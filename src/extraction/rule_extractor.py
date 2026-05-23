@@ -14,13 +14,15 @@ import re
 from dataclasses import dataclass, field
 
 # 日期：2024年5月23日 / 2024-05-23 / 2024/5/23 / 2024.05.23 / 二〇二四年五月二十三日
-# 注意：年份分支必须用 (?:19|20)\d{2}，否则 "19" 会被单独匹配（优先级 bug）
+# 注意：
+# - 年份分支必须用 (?:19|20)\d{2}，否则 "19" 会被单独匹配（优先级 bug）
+# - "日" 前必须紧跟数字或中文数字，不能是空白；避免抓到合同占位符 "2026年5月___日"
 DATE_PATTERNS = [
     re.compile(
         r"(?P<y>(?:19|20)\d{2}|二[〇零]{1,3}[一二三四五六七八九十]{1,3})"
         r"\s*[年\-./]\s*(?P<m>1[0-2]|0?[1-9]|[一二三四五六七八九十]{1,3})"
         r"\s*[月\-./]\s*(?P<d>3[01]|[12]\d|0?[1-9]|[一二三四五六七八九十]{1,3})"
-        r"\s*日?"
+        r"(?:\s*日)?"
     ),
 ]
 
@@ -117,17 +119,33 @@ def extract_rules(text: str) -> RuleResult:
     if money:
         res.hits.append(RuleHit("amount", money[0], money[1], 0.7))
 
-    dates = _extract_dates(text)
-    if dates:
-        # 最早的视为签订日，最晚的视为到期日（粗糙但合理）
-        sorted_dates = sorted(dates, key=lambda x: x[0])
-        res.hits.append(
-            RuleHit("sign_date", sorted_dates[0][0], sorted_dates[0][1], 0.55)
-        )
-        if len(sorted_dates) > 1:
-            res.hits.append(
-                RuleHit("expire_date", sorted_dates[-1][0], sorted_dates[-1][1], 0.5)
-            )
+    # 1) 优先匹配带标签的签订日期（合同落款处常见格式："签订日期: 2024年5月10日"）
+    sign_labeled = _extract_labeled_date(
+        text, labels=("签订日期", "签订时间", "签署日期", "落款日期", "签字日期")
+    )
+    if sign_labeled:
+        res.hits.append(RuleHit("sign_date", sign_labeled[0], sign_labeled[1], 0.85))
+
+    # 2) 到期/截止日期同样优先看标签
+    expire_labeled = _extract_labeled_date(
+        text, labels=("到期日期", "截止日期", "终止日期", "失效日期", "有效期至")
+    )
+    if expire_labeled:
+        res.hits.append(RuleHit("expire_date", expire_labeled[0], expire_labeled[1], 0.85))
+
+    # 3) 兜底：没有标签时退化到"最早=sign, 最晚=expire"的粗糙启发式（低置信度，让 LLM 仲裁）
+    if not sign_labeled or not expire_labeled:
+        dates = _extract_dates(text)
+        if dates:
+            sorted_dates = sorted(dates, key=lambda x: x[0])
+            if not sign_labeled:
+                res.hits.append(
+                    RuleHit("sign_date", sorted_dates[0][0], sorted_dates[0][1], 0.4)
+                )
+            if not expire_labeled and len(sorted_dates) > 1:
+                res.hits.append(
+                    RuleHit("expire_date", sorted_dates[-1][0], sorted_dates[-1][1], 0.4)
+                )
 
     renewal = _extract_auto_renewal(text)
     if renewal is not None:
@@ -175,6 +193,25 @@ def _extract_money(text: str) -> tuple[str, str] | None:
         return m.group(0).strip(), text[
             max(0, m.start() - 20) : min(len(text), m.end() + 20)
         ]
+    return None
+
+
+def _extract_labeled_date(
+    text: str, labels: tuple[str, ...]
+) -> tuple[str, str] | None:
+    """
+    从形如 '签订日期: 2024年5月10日' / '签订日期：2024-05-10' 的文本里抽日期。
+    多次出现时取最后一个（合同正文里可能预先列标题，最终落款才是真值）。
+    """
+    label_re = "|".join(re.escape(lbl) for lbl in labels)
+    pattern = re.compile(
+        rf"(?:{label_re})\s*[:：]?\s*"
+        r"((?:19|20)\d{2}\s*[年\-./]\s*(?:1[0-2]|0?[1-9])\s*[月\-./]\s*(?:3[01]|[12]\d|0?[1-9])\s*日?)"
+    )
+    matches = pattern.findall(text)
+    if matches:
+        # 取最后一个出现的——合同正文的字段标签通常重复多次，最后那次往往是落款的真值
+        return matches[-1].strip(), matches[-1].strip()
     return None
 
 
