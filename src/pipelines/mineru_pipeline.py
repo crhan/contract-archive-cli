@@ -138,7 +138,11 @@ class MinerUPipeline(BasePipeline):
         page_dims = {p.page_index: (p.width_pt, p.height_pt) for p in pages}
 
         layout_blocks, tables, raw_text = _normalize_mineru(content_list, page_dims)
-        sections = _split_sections(markdown)
+        # MinerU 的 markdown 会对 _/*/[]/() 等做反斜杠转义（如 "\_2027年\_6月"），
+        # 喂给 rule/LLM 之前清掉这些转义，避免 extraction 抓不到
+        raw_text = _unescape_markdown(raw_text)
+        markdown_for_extract = _unescape_markdown(markdown)
+        sections = _split_sections(markdown_for_extract)
 
         structured = StructuredDocument(
             title=sections[0].title if sections else None,
@@ -280,6 +284,20 @@ def _normalize_mineru(
             )
 
     return blocks, tables, "\n".join(raw_lines)
+
+
+def _unescape_markdown(text: str) -> str:
+    """
+    剥离 MinerU 在 markdown 里加的反斜杠转义（\\_/\\*/\\[/\\]/\\(/\\)/\\#）。
+    再清掉常见的"数字两侧夹下划线"残留（合同填空符号被 OCR 当成下划线）：
+    '甲方于_2027年_6月_30日' → '甲方于 2027 年 6 月 30 日'
+    """
+    import re as _re
+
+    text = _re.sub(r"\\([_*\[\]()#+\-.!`])", r"\1", text)
+    # 数字/中文之间的下划线一律视为空白
+    text = _re.sub(r"_+", " ", text)
+    return text
 
 
 def _split_sections(md: str) -> list[Section]:

@@ -87,7 +87,9 @@ def extract(
     if not md_path.exists() and not txt_path.exists():
         console.print(f"[red]neither {md_path.name} nor {txt_path.name} found[/red]")
         raise typer.Exit(2)
-    document_text = md_path.read_text(encoding="utf-8") if md_path.exists() else txt_path.read_text(encoding="utf-8")
+    # 优先用 raw_text：它是 pipeline 已清洗过的版本（去掉了 LaTeX/转义符等噪声）
+    # markdown.md 仅在 raw_text 缺失时兜底
+    document_text = txt_path.read_text(encoding="utf-8") if txt_path.exists() else md_path.read_text(encoding="utf-8")
 
     console.print(f"[cyan]extracting from {ocr_dir} (chars={len(document_text)})[/cyan]")
     extraction, conf = extract_contract(document_text, llm_enabled=not no_llm)
