@@ -73,17 +73,13 @@ packages = ["src"]
 # 多索引时允许从任一索引选最佳版本（避免 paddle 私源覆盖 fastapi 等）
 index-strategy = "unsafe-best-match"
 
-# 主索引：阿里云（实测比清华快 6-8 倍：148KB/s vs 19KB/s）
+# 主索引：阿里云（实测 148KB/s，比清华源 19KB/s 快 6-8 倍）
 # 境外用户：把下面这个 default index 删掉即可走 PyPI 官方
+# 注意：不挂 fallback 镜像——腾讯源实测会偶发 567，引入随机失败
 [[tool.uv.index]]
 name = "aliyun"
 url = "https://mirrors.aliyun.com/pypi/simple/"
 default = true
-
-# 备用镜像 (腾讯)
-[[tool.uv.index]]
-name = "tencent"
-url = "https://mirrors.cloud.tencent.com/pypi/simple/"
 
 # paddlepaddle 私源（仅显式指定的包从这里取）
 [[tool.uv.index]]
