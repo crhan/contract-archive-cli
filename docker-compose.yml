@@ -1,0 +1,78 @@
+# Document Intelligence Playground - docker-compose
+#
+# 注意：
+# - Docker Desktop for Mac 不能直通 Apple GPU（M-series）到容器
+#   所以 Mac 上跑容器只能 CPU，PaddleOCR/MinerU 会非常慢
+# - 在 Mac 上**推荐 native 跑**：见 README 的 "Native (macOS) 跑法"
+# - 在 Linux + RTX 5080 上请打开 gpu profile（见下方注释）
+#
+# 启动：
+#   docker compose up api                    # 只跑 FastAPI（最轻量）
+#   docker compose --profile heavy up        # 全套 (含 PaddleOCR/MinerU)
+#   docker compose --profile gpu up          # Linux + NVIDIA GPU
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: base
+    image: ocr-playground:base
+    container_name: ocr-api
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./input:/app/input
+      - ./output:/app/output
+    command: >
+      uv run uvicorn src.api.app:app --host 0.0.0.0 --port 8000
+
+  ocr-heavy:
+    profiles: ["heavy"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      target: heavy
+    image: ocr-playground:heavy
+    container_name: ocr-heavy
+    env_file:
+      - .env
+    volumes:
+      - ./input:/app/input
+      - ./output:/app/output
+      - hf-cache:/root/.cache/huggingface
+      - modelscope-cache:/root/.cache/modelscope
+    # 默认空转，按需 exec 进去手动跑：
+    #   docker compose exec ocr-heavy uv run ocr-cli run --pipeline all input/xxx.pdf
+    command: tail -f /dev/null
+
+  # ===== Linux + RTX 5080 GPU 配置（未来切回 Linux 时启用）=====
+  # 取消下方 deploy 注释，并改 base image 为 pytorch/pytorch:2.11.0-cuda12.8-cudnn9-devel
+  ocr-gpu:
+    profiles: ["gpu"]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.gpu
+    image: ocr-playground:gpu
+    container_name: ocr-gpu
+    env_file:
+      - .env
+    volumes:
+      - ./input:/app/input
+      - ./output:/app/output
+      - hf-cache:/root/.cache/huggingface
+      - modelscope-cache:/root/.cache/modelscope
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: tail -f /dev/null
+
+volumes:
+  hf-cache:
+  modelscope-cache:
