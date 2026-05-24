@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 一键安装脚本（macOS / Linux 通用）
-# 用 uv 管理 venv 和依赖
+# uv 管理 venv + 依赖；MinerU 走 optional extras（体积大 >1GB）
 
 set -euo pipefail
 
@@ -21,15 +21,18 @@ if [[ ! -f .env ]]; then
 fi
 
 # 3) 安装依赖
-EXTRAS="${1:-dashscope}"
+# base = 只装核心（pydantic/typer/dashscope SDK），可跑 extract / list / search / show；
+# mineru = 加装 MinerU（>1GB，首次跑 ingest 时还会下模型）
+EXTRAS="${1:-mineru}"
 echo "[setup] uv sync --extra $EXTRAS"
 case "$EXTRAS" in
     base)        uv sync ;;
-    dashscope)   uv sync --extra dashscope ;;
-    paddleocr)   uv sync --extra paddleocr ;;
     mineru)      uv sync --extra mineru ;;
-    all)         uv sync --extra all ;;
-    *) echo "unknown extras: $EXTRAS (base/dashscope/paddleocr/mineru/all)"; exit 2 ;;
+    *)
+        echo "unknown extras: $EXTRAS"
+        echo "可选：base (DB+抽取，无 OCR) / mineru (含 MinerU OCR)"
+        exit 2
+        ;;
 esac
 
 echo "[setup] done. venv at .venv"

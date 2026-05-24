@@ -1,7 +1,7 @@
 [project]
 name = "ocr-cli"
 version = "0.1.0"
-description = "Document Intelligence Playground: PDF → OCR → Structured Output (DashScope / PaddleOCR / MinerU comparison)"
+description = "本地合同档案库 CLI：MinerU 解析 + qwen3.7-max 字段抽取 + SQLite 索引"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = { text = "MIT" }

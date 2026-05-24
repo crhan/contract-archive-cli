@@ -1,176 +1,193 @@
-# Document Intelligence Playground
+# 本地合同档案库 CLI
 
-> **目标**：在同一份 PDF 上，横向对比 **阿里百炼 (qwen-vl-ocr)**、**PaddleOCR (PP-StructureV3)**、**MinerU 3.x** 三路 OCR + Document Parsing 能力，并在统一 schema 上跑合同语义抽取 (rule + LLM hybrid)。
->
-> 这不是归档系统，是验证场。
+> 把合同 PDF 批量入库——MinerU 解析版面文本，qwen3.7-max LLM + 正则 hybrid
+> 抽取合同字段（合同名/甲乙方/金额/签订日/到期日/自动续约/风险条款），
+> 索引到本地 SQLite，支持多字段过滤检索。
 
-## ✦ 功能
+历史：本项目最初是 DashScope / PaddleOCR / MinerU 三路 OCR 对比 playground，
+对比验证后选定 MinerU。重构为面向档案库的 CLI，删除其余 pipeline、
+HTTP 服务、跨路对比工具，但保留了 LLM 字段抽取层。
 
-```
-            ┌─ DashScope (qwen-vl-ocr) ─┐
-PDF ───────┼─ PaddleOCR (PP-StructureV3)┤── 统一 schema ── compare.py ── 对比报告
-            └─ MinerU 3.x ──────────────┘                     │
-                                                              └── Semantic Extraction
-                                                                  rule + LLM (qwen3.7-max)
-```
-
-每路 OCR 都产出**同一份 schema**：
+## ✦ 数据流
 
 ```
-output/<pipeline>/
-├── raw_text.txt              # 纯文本
-├── markdown.md               # 带结构 markdown
-├── structured.json           # title/document_type/pages/sections/tables/entities
-├── layout.json               # [{bbox, page, text, block_type, ...}]
-├── pipeline_meta.json        # 模型/版本/设备/耗时
-├── preview_images/           # 每页 PNG
-├── extraction_result.json    # 合同字段（rule + LLM hybrid）
-└── extraction_confidence.json
+PDF ─► sha256 去重 ─► MinerU 解析 ─► (rule + qwen3.7-max LLM) 抽取
+                                          │
+              ┌───────────────────────────┴──┐
+              ▼                              ▼
+  archive/db.sqlite (索引)        archive/documents/<sha-12>/
+                                    ├── source.pdf  (硬链接)
+                                    ├── mineru/markdown.md ...
+                                    ├── extracted.json
+                                    └── ingest.log
 ```
 
-## ✦ 当前阶段硬件路线
-
-| 阶段 | 硬件 | 三路情况 |
-| --- | --- | --- |
-| **现在** | MacBook (Apple Silicon, arm64) | dashscope ✅ / paddleocr ⚠CPU / mineru ⚠CPU |
-| 未来 | Linux + RTX 5080 (sm_120) | 全部 GPU；切 `--profile gpu` |
-
-设备选择策略：`COMPUTE_DEVICE=auto` 时自动 `MPS → CUDA → CPU` 三档降级。
-
-## ✦ 快速开始 (macOS Native, 推荐)
-
-### 1. 安装
+## ✦ 安装
 
 ```bash
-# 1) 装 uv（如果还没有）
+# 1) 装 uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2) 装最轻量的 dashscope 依赖（先跑通这一路）
-./scripts/setup.sh dashscope
+# 2) 装依赖（mineru extras 会拉 MinerU 包，首次跑 ingest 还会从 modelscope 下模型 >1GB）
+./scripts/setup.sh mineru
 ```
 
-### 2. 填 API key
+如果只想用 list/search/show 查已有的档案库（机器上有别的人 ingest 好的 db.sqlite），
+跳过 mineru extras 也可以：
 
 ```bash
-# .env 已经从 .env.example 自动复制；填入 DashScope key
-$EDITOR .env
+./scripts/setup.sh base
 ```
 
-`.env` 字段说明：
+## ✦ 配置
+
+```bash
+cp .env.example .env
+$EDITOR .env   # 填入 DASHSCOPE_API_KEY
+```
 
 | 字段 | 说明 |
 | --- | --- |
-| `DASHSCOPE_API_KEY` | 必填。从 [百炼控制台](https://dashscope.console.aliyun.com/) 获取 |
-| `DASHSCOPE_OCR_MODEL` | OCR 模型，默认 `qwen-vl-ocr-latest` |
-| `DASHSCOPE_LLM_MODEL` | 语义抽取模型，默认 `qwen3.7-max`（严格按需求保留） |
-| `COMPUTE_DEVICE` | `auto` / `mps` / `cuda` / `cpu` |
+| `DASHSCOPE_API_KEY` | 必填。[百炼控制台](https://dashscope.console.aliyun.com/) 申请 |
+| `DASHSCOPE_LLM_MODEL` | 默认 `qwen3.7-max`（用户百炼账户的特定别名；若 404 换 `qwen-max` / `qwen3-max`） |
+| `OCR_ARCHIVE_DIR` | 档案库根目录，默认 `./archive`；CLI `--archive` 优先 |
+| `COMPUTE_DEVICE` | `auto` / `mps` / `cuda` / `cpu`（MinerU 走子进程，主要影响其内部 backend 选择） |
 
-### 3. 跑样本 PDF
-
-```bash
-# 三路全跑 + extraction + 对比报告（先确保只装了 dashscope，paddleocr/mineru 会优雅 skip）
-./scripts/run_sample.sh dashscope
-
-# 或单跑某一路
-uv run ocr-cli run --pipeline dashscope ./input/sample_contract.pdf
-uv run ocr-cli extract ./output/dashscope
-uv run ocr-cli compare ./output
-```
-
-### 4. 装重型依赖（PaddleOCR / MinerU）
+## ✦ 用法
 
 ```bash
-./scripts/setup.sh paddleocr    # 装 paddlepaddle (cpu) + paddleocr[all]
-./scripts/setup.sh mineru       # 装 mineru[core]
-./scripts/setup.sh all          # 一次全装
+# 入库单个 PDF
+uv run ocr-cli ingest path/to/合同.pdf
+
+# 批量入库整个目录（递归扫 *.pdf，sha256 去重）
+uv run ocr-cli ingest ~/Documents/contracts/
+
+# 调试：只跑 rule 抽取跳过 LLM（不需要 API key）
+uv run ocr-cli ingest path/to/合同.pdf --no-llm
+
+# 强制重跑（已 ingest 过的也再跑一遍，覆盖旧记录）
+uv run ocr-cli ingest path/to/合同.pdf --reingest
+
+# 试跑前 3 个
+uv run ocr-cli ingest ~/Documents/contracts/ --limit 3
 ```
 
-> **Mac 注意**：`paddlepaddle` 在 arm64 上只有 CPU wheel，跑 9 页扫描合同约 30–120s；`mineru` CPU backend (-b pipeline) 同样会慢。建议先用 dashscope 验证整套链路通了，再装重型路线。
-
-## ✦ Docker 用法（Linux 推荐）
+### 查询
 
 ```bash
-# 只跑 FastAPI + dashscope（最轻）
-docker compose up api
+# 列出全部（按入库时间倒序，默认 50 条）
+uv run ocr-cli list
 
-# 含 paddleocr/mineru 的重型容器
-docker compose --profile heavy up
+# 按签订日排序，只看 partial 的
+uv run ocr-cli list --order-by sign_date --status partial
 
-# Linux + NVIDIA GPU
-docker compose --profile gpu up
+# 输出 JSON 供脚本消费
+uv run ocr-cli list --format json | jq '.[] | .contract_name'
+
+# 多字段过滤（全部 AND）
+uv run ocr-cli search --party 张三 --amount-min 100000 --signed-after 2024-01-01
+uv run ocr-cli search --expire-before 2026-12-31 --has-risk
+uv run ocr-cli search --name 车位 --auto-renewal
+
+# 看单条详情（id 或 sha 前缀 ≥4 字符）
+uv run ocr-cli show 5
+uv run ocr-cli show a3f9c2b1
 ```
 
-> **Mac 警告**：Docker Desktop for Mac 不能直通 Apple GPU，重型 pipeline 在 Mac docker 里会 CPU 跑且更慢。Mac 阶段优先 native venv。
+### 抽取层管理
 
-## ✦ HTTP API
+LLM 跑挂或想升级 prompt 后批量再抽取——不重跑 MinerU：
 
 ```bash
-# 启服务
-uv run ocr-cli serve --port 8000
-
-# 上传 PDF 让指定 pipeline 处理
-curl -F 'file=@input/sample_contract.pdf' http://localhost:8000/ocr/dashscope
-
-# 三路 + extraction + compare 一把梭
-curl -F 'file=@input/sample_contract.pdf' http://localhost:8000/pipeline/all
+uv run ocr-cli extract 5            # 复跑 id=5 的抽取
+uv run ocr-cli extract 5 --no-llm   # 只跑 rule
 ```
 
-## ✦ Benchmark
+### 统计与维护
 
 ```bash
-uv run ocr-cli benchmark ./input/sample_contract.pdf --rounds 1
+uv run ocr-cli stats                # 总数 / status 分布 / 按月签订 / 近 30 天到期
+uv run ocr-cli delete 5             # 默认仅删 DB 行，交互确认
+uv run ocr-cli delete 5 --purge-files -y    # 同时删 archive/documents/<sha>/，无确认
+uv run ocr-cli vacuum               # 大批量 ingest 后整理碎片
 ```
 
-会落 `./output/benchmark.json`，含每路 duration/raw_chars/md_chars/layout_blocks。
+> **注意**：`delete` 不会删用户原 PDF 文件——`source_path` 字段记录的是入库时
+> 的源路径，源文件归用户所有。
+
+## ✦ 档案库目录结构
+
+```
+archive/
+├── db.sqlite                     # 索引表
+├── db.sqlite-wal / -shm          # WAL 模式产物（运行时）
+├── ingest.jsonl                  # 总日志（每次 ingest 一行 JSON）
+└── documents/
+    └── a3f9c2b1/                 # sha256 前 12 位
+        ├── source.pdf            # 硬链接源 PDF（跨盘 fallback copy）
+        ├── mineru/
+        │   ├── markdown.md
+        │   ├── layout.json       # bbox 已归一到 PDF point
+        │   ├── structured.json
+        │   ├── raw_text.txt
+        │   ├── pipeline_meta.json
+        │   └── preview_images/
+        ├── extracted.json        # 抽取字段
+        ├── extraction_confidence.json
+        └── ingest.log            # 单合同 stderr
+```
+
+## ✦ Docker
+
+```bash
+docker build -t ocr-cli -f docker/Dockerfile .
+docker run --rm -it \
+  -v $PWD/archive:/app/archive \
+  -v $PWD/input:/app/input \
+  -v ~/.cache/modelscope:/root/.cache/modelscope \
+  --env-file .env \
+  ocr-cli uv run ocr-cli ingest /app/input
+```
+
+挂载 modelscope 缓存复用本机 MinerU 模型。Mac 容器不直通 GPU，强烈推荐 native venv 跑。
 
 ## ✦ 项目结构
 
 ```
 ocr-cli/
-├── pyproject.toml          # uv 依赖管理（extras: dashscope/paddleocr/mineru/all）
-├── docker-compose.yml
-├── docker/
-│   ├── Dockerfile          # base + heavy stage
-│   └── Dockerfile.gpu      # 未来 5080 用
+├── pyproject.toml          # uv 依赖管理（extras: mineru）
+├── docker/Dockerfile
 ├── .env.example
 ├── scripts/
 │   ├── setup.sh
 │   └── run_sample.sh
 ├── src/
 │   ├── cli.py              # ocr-cli 入口
-│   ├── compare.py          # 对比报告生成
-│   ├── schemas/            # pydantic 统一 schema
+│   ├── schemas/            # pydantic schema（BBox/LayoutBlock/ContractExtraction 等）
 │   ├── pipelines/
-│   │   ├── base.py
-│   │   ├── dashscope_pipeline.py
-│   │   ├── paddleocr_pipeline.py
-│   │   └── mineru_pipeline.py
+│   │   └── mineru_pipeline.py   # MinerU subprocess 调用 + 坐标归一化 + markdown 清洗
 │   ├── extraction/
-│   │   ├── rule_extractor.py
+│   │   ├── rule_extractor.py    # 正则抽取
 │   │   ├── llm_extractor.py     # qwen3.7-max
-│   │   └── hybrid.py
-│   ├── api/
-│   │   └── app.py              # FastAPI
-│   └── utils/
-│       ├── device.py           # MPS → CUDA → CPU 自动降级
-│       └── pdf.py              # PyMuPDF 渲染
-├── input/                 # 放待处理 PDF
-└── output/                # 三路输出 + compare_report.md
+│   │   └── hybrid.py            # rule + LLM 字段级合并
+│   ├── archive/
+│   │   ├── db.py                # SQLite 连接 + migrations 引擎
+│   │   ├── repository.py        # DAO + 搜索查询构造
+│   │   ├── ingest.py            # 入库流水线（hash → MinerU → extract → rename → DB）
+│   │   ├── paths.py             # 档案库路径约定 + 硬链接工具
+│   │   └── migrations/001_init.sql
+│   └── utils/                   # 设备选择 / PyMuPDF PDF 渲染
+├── archive/                # 档案库数据（gitignored）
+├── input/                  # 用户放待处理 PDF
+└── output.legacy/          # 旧 pipeline 历史产物（重构前的对比数据，可删）
 ```
 
 ## ✦ 设计纪律
 
-- **三路彼此独立**：任何一路依赖装不上不影响其他两路（lazy import + optional extras）
-- **统一 schema 是契约**：所有 pipeline 必须把自己的输出折算到 `BBox(pt)` / `LayoutBlock` / `StructuredDocument`
-- **rule + LLM hybrid**：单字段命中策略明确，每个字段都有 `value_source` 记录来源
-- **API key 不出包**：仅从 env 读取，所有日志路径都过滤
-
-## ✦ 未来迁移到 RTX 5080
-
-1. 切到 Linux 主机
-2. `cp .env .env` 一份
-3. `docker compose --profile gpu up`
-4. `COMPUTE_DEVICE=cuda` 自动启用 CUDA
-5. PaddlePaddle 改用 [paddlepaddle-sm120-wheels](https://github.com/horhe-dvlp/paddlepaddle-sm120-wheels) 社区 wheel（官方 wheel 在 2026.5 还没合 sm_120）
-
-代码层面 0 改动。
+- **统一 schema**：MinerU 的 0-1000 归一化坐标全部反算成 PDF point；markdown 反斜杠转义在喂给抽取层前清洗
+- **rule + LLM hybrid**：字段级合并策略（金额/日期信 rule 原文证据，实体名信 LLM 规整），每字段附 `value_source`（rule/llm/merged/missing）+ 置信度
+- **API key 不出包**：仅从 env 读，日志不打印响应体
+- **sha256 去重**：流式 hash 后查 UNIQUE 索引；命中即 skip 避免 MinerU 跑一次几分钟才发现重复
+- **事务边界**：tmp 目录跑全 → `os.rename` 到 documents/ → DB INSERT；任一阶段失败回滚干净，DB 不留半成品
+- **partial 状态可修复**：MinerU OK 但 LLM 挂时 markdown 仍可用，`extract <id>` 命令只重跑抽取层
+- **不并发 MinerU**：每个 subprocess 会加载 GB 级模型，并发反而 OOM；默认 workers=1
