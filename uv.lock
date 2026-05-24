@@ -2399,6 +2399,7 @@ name = "ocr-cli"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "dashscope" },
     { name = "fastapi" },
     { name = "pillow" },
     { name = "pydantic" },
@@ -2438,6 +2439,7 @@ paddleocr = [
 
 [package.metadata]
 requires-dist = [
+    { name = "dashscope", specifier = ">=1.22.2" },
     { name = "dashscope", marker = "extra == 'all'", specifier = ">=1.22.2" },
     { name = "dashscope", marker = "extra == 'dashscope'", specifier = ">=1.22.2" },
     { name = "fastapi", specifier = ">=0.111" },
