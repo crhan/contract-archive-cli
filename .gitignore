@@ -12,10 +12,10 @@ __pycache__/
 venv/
 .uv/
 
-# OCR runtime
-archive/
-output/
-output.legacy/
+# OCR runtime（前置 / 仅匹配根目录，避免误伤 src/archive 代码）
+/archive/
+/output/
+/output.legacy/
 input/*.pdf
 !input/.gitkeep
 models/
