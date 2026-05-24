@@ -32,6 +32,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ./scripts/setup.sh mineru
 ```
 
+> **uv hardlink 坑**：uv 默认 `UV_LINK_MODE=hardlink` 偶发只装包的一部分文件
+> （实测 `cv2`/`pptx` 会丢，触发 `module 'cv2' has no attribute 'INTER_NEAREST'`
+> 或 `cannot import name 'Presentation' from 'pptx'`）。`scripts/setup.sh` 已
+> 显式 `export UV_LINK_MODE=copy` 规避。手动 `uv sync` 时建议也带上。
+> 已损坏的包可以 `uv pip install --force-reinstall --no-deps <包名>` 修。
+
 如果只想用 list/search/show 查已有的档案库（机器上有别的人 ingest 好的 db.sqlite），
 跳过 mineru extras 也可以：
 

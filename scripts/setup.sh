@@ -14,6 +14,10 @@ if ! command -v uv &>/dev/null; then
 fi
 echo "[setup] uv $(uv --version)"
 
+# UV_LINK_MODE=copy 避免 uv 默认的 hardlink 模式偶发丢文件
+# （实测会导致 cv2/pptx 包只装一部分子目录，触发奇怪的 ImportError）
+export UV_LINK_MODE=copy
+
 # 2) 检查 .env
 if [[ ! -f .env ]]; then
     echo "[setup] .env 不存在，从 .env.example 复制（请记得填 DASHSCOPE_API_KEY）"
