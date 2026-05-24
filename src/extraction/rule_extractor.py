@@ -119,12 +119,20 @@ def extract_rules(text: str) -> RuleResult:
     if money:
         res.hits.append(RuleHit("amount", money[0], money[1], 0.7))
 
-    # 1) 优先匹配带标签的签订日期（合同落款处常见格式："签订日期: 2024年5月10日"）
-    sign_labeled = _extract_labeled_date(
+    # 1) 优先匹配带强标签的签订日期（合同落款最常见格式）
+    sign_strict = _extract_labeled_date(
         text, labels=("签订日期", "签订时间", "签署日期", "落款日期", "签字日期")
     )
-    if sign_labeled:
-        res.hits.append(RuleHit("sign_date", sign_labeled[0], sign_labeled[1], 0.85))
+    if sign_strict:
+        res.hits.append(RuleHit("sign_date", sign_strict[0], sign_strict[1], 0.85))
+    else:
+        # 1b) 退化到泛"日期"标签（避开"付款/交付/截止"等干扰）
+        # 给低置信度 0.5——LLM 命中时 hybrid 会优先信 LLM
+        sign_loose = _extract_labeled_date(
+            text, labels=("日期",), blocklist_prefix=_SIGN_DATE_BLOCKLIST
+        )
+        if sign_loose:
+            res.hits.append(RuleHit("sign_date", sign_loose[0], sign_loose[1], 0.5))
 
     # 2) 到期/截止日期同样优先看标签
     expire_labeled = _extract_labeled_date(
@@ -133,19 +141,17 @@ def extract_rules(text: str) -> RuleResult:
     if expire_labeled:
         res.hits.append(RuleHit("expire_date", expire_labeled[0], expire_labeled[1], 0.85))
 
-    # 3) 兜底：没有标签时退化到"最早=sign, 最晚=expire"的粗糙启发式（低置信度，让 LLM 仲裁）
-    if not sign_labeled or not expire_labeled:
+    # 3) sign_date 兜底：没有任何日期标签命中时取文中最早的日期作为低置信候选
+    # 注意 expire_date 不做"最晚日期"兜底——认购协议、车位转让等一次性合同
+    # 本就无到期日，乱抓最晚日期会产生 sign==expire 的假值，污染 search 查询。
+    # LLM 的"null"判断更靠谱，无标签时就让 LLM 决定。
+    if res.get("sign_date") is None:
         dates = _extract_dates(text)
         if dates:
             sorted_dates = sorted(dates, key=lambda x: x[0])
-            if not sign_labeled:
-                res.hits.append(
-                    RuleHit("sign_date", sorted_dates[0][0], sorted_dates[0][1], 0.4)
-                )
-            if not expire_labeled and len(sorted_dates) > 1:
-                res.hits.append(
-                    RuleHit("expire_date", sorted_dates[-1][0], sorted_dates[-1][1], 0.4)
-                )
+            res.hits.append(
+                RuleHit("sign_date", sorted_dates[0][0], sorted_dates[0][1], 0.4)
+            )
 
     renewal = _extract_auto_renewal(text)
     if renewal is not None:
@@ -196,22 +202,46 @@ def _extract_money(text: str) -> tuple[str, str] | None:
     return None
 
 
+# 这些字符出现在"日期"标签前面意味着不是签订日（付款/交付/截止等）
+# 用 set 而不是正则，性能更好且容易扩展
+_SIGN_DATE_BLOCKLIST = frozenset({
+    "付款", "缴款", "缴费", "汇款",
+    "交付", "交楼", "交房", "交车",
+    "截止", "终止", "失效", "到期",
+    "完工", "竣工", "验收", "签收",
+    "起算", "起息", "生效",
+    "出生",
+})
+
+
 def _extract_labeled_date(
-    text: str, labels: tuple[str, ...]
+    text: str,
+    labels: tuple[str, ...],
+    blocklist_prefix: frozenset[str] = frozenset(),
 ) -> tuple[str, str] | None:
     """
     从形如 '签订日期: 2024年5月10日' / '签订日期：2024-05-10' 的文本里抽日期。
     多次出现时取最后一个（合同正文里可能预先列标题，最终落款才是真值）。
+
+    :param blocklist_prefix: 标签前 4 字符内出现这些词则跳过该匹配。
+        例如 "付款日期: ..." 在 sign_date 抽取时应被过滤。
     """
     label_re = "|".join(re.escape(lbl) for lbl in labels)
     pattern = re.compile(
-        rf"(?:{label_re})\s*[:：]?\s*"
-        r"((?:19|20)\d{2}\s*[年\-./]\s*(?:1[0-2]|0?[1-9])\s*[月\-./]\s*(?:3[01]|[12]\d|0?[1-9])\s*日?)"
+        rf"(?P<label>{label_re})\s*[:：]?\s*"
+        r"(?P<date>(?:19|20)\d{2}\s*[年\-./]\s*(?:1[0-2]|0?[1-9])\s*[月\-./]\s*(?:3[01]|[12]\d|0?[1-9])\s*日?)"
     )
-    matches = pattern.findall(text)
+    matches: list[str] = []
+    for m in pattern.finditer(text):
+        # 检查标签前 4 字符是否含黑名单（如"付款日期"会让"日期"标签命中）
+        prefix_start = max(0, m.start("label") - 4)
+        prefix = text[prefix_start:m.start("label")]
+        if any(bad in prefix for bad in blocklist_prefix):
+            continue
+        matches.append(m.group("date").strip())
     if matches:
         # 取最后一个出现的——合同正文的字段标签通常重复多次，最后那次往往是落款的真值
-        return matches[-1].strip(), matches[-1].strip()
+        return matches[-1], matches[-1]
     return None
 
 

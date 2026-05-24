@@ -67,18 +67,73 @@ def _cn_num_to_int(s: str) -> str:
     return "".join(str(_CN_DIGITS.get(ch, "")) for ch in s) or s
 
 
+_CN_MONEY_DIGITS = {
+    "零": 0, "壹": 1, "贰": 2, "叁": 3, "肆": 4, "伍": 5,
+    "陆": 6, "柒": 7, "捌": 8, "玖": 9,
+    # 小写也支持（合同里偶尔混用）
+    "一": 1, "二": 2, "三": 3, "四": 4, "五": 5,
+    "六": 6, "七": 7, "八": 8, "九": 9, "两": 2,
+}
+_CN_MONEY_UNITS = {
+    "拾": 10, "佰": 100, "仟": 1000, "万": 10000, "亿": 100000000,
+    "十": 10, "百": 100, "千": 1000,
+}
+
+
+def _cn_money_to_value(s: str) -> float | None:
+    """
+    中文大写金额 → 数值（元）。
+    "壹仟贰佰贰拾柒万玖仟捌佰捌拾玖元整" → 12279889.0
+    "贰万元" → 20000.0
+    解析失败返回 None。
+    """
+    s = (s.replace("元", "").replace("圆", "")
+          .replace("整", "").replace("人民币", "").strip())
+    if not s:
+        return None
+    total = 0
+    section = 0   # 当前"万"以下的累加
+    digit = 0     # 上一个数字
+    saw_any = False
+    for ch in s:
+        if ch in _CN_MONEY_DIGITS:
+            digit = _CN_MONEY_DIGITS[ch]
+            saw_any = True
+        elif ch in _CN_MONEY_UNITS:
+            unit = _CN_MONEY_UNITS[ch]
+            if unit >= 10000:
+                # 万 / 亿 触发段结算
+                section = (section + digit) * unit
+                total += section
+                section = 0
+            else:
+                # 拾/佰/仟：digit 为 0 时按 1（"拾" 单独 = 10）
+                section += (digit if digit else 1) * unit
+            digit = 0
+            saw_any = True
+        elif ch.isspace():
+            continue
+        else:
+            return None  # 不认识的字符（含混阿拉伯/中文），交给阿拉伯路径
+    section += digit
+    total += section
+    return float(total) if saw_any and total > 0 else None
+
+
 def parse_money_value(value: str | None) -> float | None:
-    """从原文金额抽出数值（人民币元）。中文大写暂不解析，返回 None。"""
+    """从原文金额抽出数值（人民币元）。先试阿拉伯数字，再试中文大写。"""
     if not value:
         return None
+    # 阿拉伯数字优先（精度高，覆盖大多数情况）
     m = re.search(r"([0-9]+(?:[,，]\d{3})*(?:\.\d+)?)\s*(万元|万|千元|百元|元|圆)?", value)
-    if not m:
-        return None
-    num = float(m.group(1).replace(",", "").replace("，", ""))
-    unit = m.group(2) or "元"
-    multiplier = {"万元": 10000, "万": 10000, "千元": 1000, "百元": 100,
-                  "元": 1, "圆": 1}.get(unit, 1)
-    return num * multiplier
+    if m:
+        num = float(m.group(1).replace(",", "").replace("，", ""))
+        unit = m.group(2) or "元"
+        multiplier = {"万元": 10000, "万": 10000, "千元": 1000, "百元": 100,
+                      "元": 1, "圆": 1}.get(unit, 1)
+        return num * multiplier
+    # 退化到中文大写
+    return _cn_money_to_value(value)
 
 
 def extract_contract(
@@ -108,6 +163,7 @@ def extract_contract(
     ):
         rule_hit = rule_res.get(field_name)
         rule_val = rule_hit.value if rule_hit else None
+        rule_conf = rule_hit.confidence if rule_hit else 0.0
         llm_val = llm_res.get(field_name)
 
         # 日期归一化
@@ -115,7 +171,7 @@ def extract_contract(
             rule_val = normalize_date(rule_val) if isinstance(rule_val, str) else rule_val
             llm_val = normalize_date(llm_val) if isinstance(llm_val, str) else llm_val
 
-        merged_val, fc = _merge_field(rule_val, llm_val, field_name)
+        merged_val, fc = _merge_field(rule_val, llm_val, field_name, rule_conf=rule_conf)
         setattr(extraction, field_name, merged_val)
         setattr(conf, field_name, fc)
         if rule_hit:
@@ -174,9 +230,17 @@ _RULE_WINS_ON_CONFLICT = {"amount", "sign_date", "expire_date", "auto_renewal"}
 
 
 def _merge_field(
-    rule_val: Any, llm_val: Any, field_name: str = ""
+    rule_val: Any,
+    llm_val: Any,
+    field_name: str = "",
+    rule_conf: float = 0.7,
 ) -> tuple[Any, FieldConfidence]:
-    """单字段合并 → (最终值, FieldConfidence)"""
+    """
+    单字段合并 → (最终值, FieldConfidence)。
+
+    rule_conf < 0.7 视为弱信号——即使 field_name 在 _RULE_WINS_ON_CONFLICT
+    名单里，冲突时也让 LLM 赢（rule 的兜底启发式不应压过 LLM 的整体判断）。
+    """
     if rule_val is None and llm_val is None:
         return None, FieldConfidence(value_source="missing", confidence=0.0)
     if rule_val is not None and llm_val is None:
@@ -194,8 +258,8 @@ def _merge_field(
         return merged, FieldConfidence(
             value_source="merged", confidence=0.9, rule_hit=True, llm_agreed=True
         )
-    # 冲突：按字段策略
-    if field_name in _RULE_WINS_ON_CONFLICT:
+    # 冲突：按字段策略 + rule 置信度门槛
+    if field_name in _RULE_WINS_ON_CONFLICT and rule_conf >= 0.7:
         return rule_val, FieldConfidence(
             value_source="rule", confidence=0.5, rule_hit=True, llm_agreed=False
         )
