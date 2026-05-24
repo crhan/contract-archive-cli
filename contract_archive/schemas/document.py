@@ -181,6 +181,65 @@ class ContractExtraction(BaseModel):
     )
 
 
+# -------- 通用文档抽取（LLM-first，跨类型） --------
+#
+# 设计（贴合"LLM-first、少死代码"）：不为每种文档类型写死 pydantic 字段表，
+# 而是一个通用信封——可查询的公共核心 + 柔性键值/金额/日期列表。
+# 加新文档类型 = 零代码：LLM 自行决定 fields/amounts/key_dates 抽哪些。
+
+
+class LabeledValue(BaseModel):
+    """类型专属字段的通用键值对。"""
+
+    label: str   # "持证人" / "职位" / "身份证号" / "发票号" ...
+    value: str   # 原文值（统一用字符串承载；数值/日期另见 amounts/key_dates）
+
+
+class LabeledAmount(BaseModel):
+    """带标签的金额。"""
+
+    label: str                      # "年收入" / "月均收入" / "公积金(个人)" / "合同金额"
+    text: str                       # 原文（含大写/币种）
+    value: Optional[float] = None   # 归一化数值（人民币元）
+
+
+class LabeledDate(BaseModel):
+    """带标签的日期。"""
+
+    label: str                      # "出具日" / "签订日" / "到期日" / "入职日"
+    date: Optional[str] = None      # ISO 8601 'YYYY-MM-DD'
+
+
+# 粗粒度规范类型（用于 --type 过滤）。LLM 从中择一，更细的归类放进 title/fields。
+DOC_TYPES = ("合同协议", "证明", "发票票据", "报告", "证件", "其他")
+DocType = str  # 存库用 str（保持柔性，不上 Literal 以免 LLM 新类型被卡死）
+
+
+class DocumentExtraction(BaseModel):
+    """
+    通用文档抽取信封：任何文档类型都归一化到这里（LLM-first）。
+
+    公共核心（doc_type/title/summary/primary_*/parties）落 documents 表列、可查询；
+    柔性 fields/amounts/key_dates/obligations 整体存 details_json，承载类型专属信息。
+    所有字段允许空——抽不到比硬塞更诚实。
+    """
+
+    doc_type: str = "其他"                  # 规范类型，取自 DOC_TYPES
+    title: Optional[str] = None             # 文档标题/抬头
+    summary: Optional[str] = None           # 一句话摘要（可追溯的关键钩子）
+    parties: list[str] = Field(default_factory=list)   # 涉及主体（人/机构全称）
+    primary_date: Optional[str] = None      # 主日期 ISO（合同=签订日，证明=出具日）
+    primary_amount_text: Optional[str] = None
+    primary_amount_value: Optional[float] = None
+    key_dates: list[LabeledDate] = Field(default_factory=list)
+    amounts: list[LabeledAmount] = Field(default_factory=list)
+    fields: list[LabeledValue] = Field(default_factory=list)
+    obligations: list[ObligationItem] = Field(default_factory=list)
+    raw_evidence: dict[str, str] = Field(
+        default_factory=dict, description="字段→原文证据片段，用于人工抽检"
+    )
+
+
 class FieldConfidence(BaseModel):
     """单字段置信度。"""
 
