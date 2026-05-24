@@ -47,22 +47,22 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## ✦ 全局安装（可选）
 
-如果想在任意目录用 `ocr-cli`（不必 `cd` 项目目录或 `uv run`），用 `uv tool install`：
+如果想在任意目录用 `contract-archive`（不必 `cd` 项目目录或 `uv run`），用 `uv tool install`：
 
 ```bash
-UV_LINK_MODE=copy uv tool install --reinstall --with mineru --force /path/to/ocr-cli
+UV_LINK_MODE=copy uv tool install --reinstall --with mineru --force /path/to/contract-archive-cli
 ```
 
-`uv tool install` 会在 `~/.local/bin/ocr-cli` 装独立 venv（与项目 venv 隔离）。
+`uv tool install` 会在 `~/.local/bin/contract-archive` 装独立 venv（与项目 venv 隔离）。
 然后从任意目录：
 
 ```bash
 # 用环境变量指定档案库
-OCR_ARCHIVE_DIR=~/contracts ocr-cli list
+CONTRACT_ARCHIVE_DIR=~/contracts contract-archive list
 
 # 或显式 --archive
-ocr-cli --archive ~/contracts list
-ocr-cli --archive ~/contracts ingest ~/Documents/new_contract.pdf
+contract-archive --archive ~/contracts list
+contract-archive --archive ~/contracts ingest ~/Documents/new_contract.pdf
 ```
 
 `DASHSCOPE_API_KEY` 需通过 shell env 提供（建议放进 `~/.zshrc` 或专用 shell wrapper）。
@@ -78,48 +78,48 @@ $EDITOR .env   # 填入 DASHSCOPE_API_KEY
 | --- | --- |
 | `DASHSCOPE_API_KEY` | 必填。[百炼控制台](https://dashscope.console.aliyun.com/) 申请 |
 | `DASHSCOPE_LLM_MODEL` | 默认 `qwen3.7-max`（用户百炼账户的特定别名；若 404 换 `qwen-max` / `qwen3-max`） |
-| `OCR_ARCHIVE_DIR` | 档案库根目录，默认 `./archive`；CLI `--archive` 优先 |
+| `CONTRACT_ARCHIVE_DIR` | 档案库根目录，默认 `./archive`；CLI `--archive` 优先 |
 | `COMPUTE_DEVICE` | `auto` / `mps` / `cuda` / `cpu`（MinerU 走子进程，主要影响其内部 backend 选择） |
 
 ## ✦ 用法
 
 ```bash
 # 入库单个 PDF
-uv run ocr-cli ingest path/to/合同.pdf
+uv run contract-archive ingest path/to/合同.pdf
 
 # 批量入库整个目录（递归扫 *.pdf，sha256 去重）
-uv run ocr-cli ingest ~/Documents/contracts/
+uv run contract-archive ingest ~/Documents/contracts/
 
 # 调试：只跑 rule 抽取跳过 LLM（不需要 API key）
-uv run ocr-cli ingest path/to/合同.pdf --no-llm
+uv run contract-archive ingest path/to/合同.pdf --no-llm
 
 # 强制重跑（已 ingest 过的也再跑一遍，覆盖旧记录）
-uv run ocr-cli ingest path/to/合同.pdf --reingest
+uv run contract-archive ingest path/to/合同.pdf --reingest
 
 # 试跑前 3 个
-uv run ocr-cli ingest ~/Documents/contracts/ --limit 3
+uv run contract-archive ingest ~/Documents/contracts/ --limit 3
 ```
 
 ### 查询
 
 ```bash
 # 列出全部（按入库时间倒序，默认 50 条）
-uv run ocr-cli list
+uv run contract-archive list
 
 # 按签订日排序，只看 partial 的
-uv run ocr-cli list --order-by sign_date --status partial
+uv run contract-archive list --order-by sign_date --status partial
 
 # 输出 JSON 供脚本消费
-uv run ocr-cli list --format json | jq '.[] | .contract_name'
+uv run contract-archive list --format json | jq '.[] | .contract_name'
 
 # 多字段过滤（全部 AND）
-uv run ocr-cli search --party 张三 --amount-min 100000 --signed-after 2024-01-01
-uv run ocr-cli search --expire-before 2026-12-31 --has-risk
-uv run ocr-cli search --name 车位 --auto-renewal
+uv run contract-archive search --party 张三 --amount-min 100000 --signed-after 2024-01-01
+uv run contract-archive search --expire-before 2026-12-31 --has-risk
+uv run contract-archive search --name 车位 --auto-renewal
 
 # 看单条详情（id 或 sha 前缀 ≥4 字符）
-uv run ocr-cli show 5
-uv run ocr-cli show a3f9c2b1
+uv run contract-archive show 5
+uv run contract-archive show a3f9c2b1
 ```
 
 ### 待办看板（义务清单）
@@ -129,20 +129,20 @@ uv run ocr-cli show a3f9c2b1
 
 ```bash
 # 跨合同列出所有待办（按 deadline 升序，NULL 排最后）
-ocr-cli todo --include-undated
+contract-archive todo --include-undated
 
 # 未来 30 天内要做的事
-ocr-cli todo --within-days 30
+contract-archive todo --within-days 30
 
 # 只看甲方任务 / 只看乙方任务
-ocr-cli todo --actor party_a
-ocr-cli todo --actor party_b --before 2026-12-31
+contract-archive todo --actor party_a
+contract-archive todo --actor party_b --before 2026-12-31
 
 # 找"近 30 天内有截止动作的合同"（不是单条 obligation，而是合同列）
-ocr-cli search --deadline-before 2026-06-30 --actor party_b
+contract-archive search --deadline-before 2026-06-30 --actor party_b
 ```
 
-`ocr-cli show <id>` 会按甲方/乙方/双方分组展示该合同所有义务，
+`contract-archive show <id>` 会按甲方/乙方/双方分组展示该合同所有义务，
 与原本的 `risk_clauses`（违约罚则）严格区分。
 
 ### 抽取层管理
@@ -150,17 +150,17 @@ ocr-cli search --deadline-before 2026-06-30 --actor party_b
 LLM 跑挂或想升级 prompt 后批量再抽取——不重跑 MinerU：
 
 ```bash
-uv run ocr-cli extract 5            # 复跑 id=5 的抽取
-uv run ocr-cli extract 5 --no-llm   # 只跑 rule
+uv run contract-archive extract 5            # 复跑 id=5 的抽取
+uv run contract-archive extract 5 --no-llm   # 只跑 rule
 ```
 
 ### 统计与维护
 
 ```bash
-uv run ocr-cli stats                # 总数 / status 分布 / 按月签订 / 近 30 天到期
-uv run ocr-cli delete 5             # 默认仅删 DB 行，交互确认
-uv run ocr-cli delete 5 --purge-files -y    # 同时删 archive/documents/<sha>/，无确认
-uv run ocr-cli vacuum               # 大批量 ingest 后整理碎片
+uv run contract-archive stats                # 总数 / status 分布 / 按月签订 / 近 30 天到期
+uv run contract-archive delete 5             # 默认仅删 DB 行，交互确认
+uv run contract-archive delete 5 --purge-files -y    # 同时删 archive/documents/<sha>/，无确认
+uv run contract-archive vacuum               # 大批量 ingest 后整理碎片
 ```
 
 > **注意**：`delete` 不会删用户原 PDF 文件——`source_path` 字段记录的是入库时
@@ -191,13 +191,13 @@ archive/
 ## ✦ Docker
 
 ```bash
-docker build -t ocr-cli -f docker/Dockerfile .
+docker build -t contract-archive -f docker/Dockerfile .
 docker run --rm -it \
   -v $PWD/archive:/app/archive \
   -v $PWD/input:/app/input \
   -v ~/.cache/modelscope:/root/.cache/modelscope \
   --env-file .env \
-  ocr-cli uv run ocr-cli ingest /app/input
+  contract-archive uv run contract-archive ingest /app/input
 ```
 
 挂载 modelscope 缓存复用本机 MinerU 模型。Mac 容器不直通 GPU，强烈推荐 native venv 跑。
@@ -205,15 +205,15 @@ docker run --rm -it \
 ## ✦ 项目结构
 
 ```
-ocr-cli/
+contract-archive-cli/
 ├── pyproject.toml          # uv 依赖管理（extras: mineru）
 ├── docker/Dockerfile
 ├── .env.example
 ├── scripts/
 │   ├── setup.sh
 │   └── run_sample.sh
-├── src/
-│   ├── cli.py              # ocr-cli 入口
+├── contract_archive/
+│   ├── cli.py              # contract-archive 入口
 │   ├── schemas/            # pydantic schema（BBox/LayoutBlock/ContractExtraction 等）
 │   ├── pipelines/
 │   │   └── mineru_pipeline.py   # MinerU subprocess 调用 + 坐标归一化 + markdown 清洗

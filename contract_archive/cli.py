@@ -11,7 +11,7 @@
   delete <id>           删除档案记录；默认仅删 DB 行，--purge-files 同时删文件
   vacuum                VACUUM 数据库（碎片整理）
 
-档案库路径优先级：--archive flag > OCR_ARCHIVE_DIR env > ./archive
+档案库路径优先级：--archive flag > CONTRACT_ARCHIVE_DIR env > ./archive
 """
 from __future__ import annotations
 
@@ -59,11 +59,11 @@ logging.basicConfig(
 
 
 def _resolve_archive(archive_opt: Optional[Path]) -> ArchivePaths:
-    """--archive flag > OCR_ARCHIVE_DIR env > ./archive"""
+    """--archive flag > CONTRACT_ARCHIVE_DIR env > ./archive"""
     if archive_opt:
         root = archive_opt
-    elif os.getenv("OCR_ARCHIVE_DIR"):
-        root = Path(os.getenv("OCR_ARCHIVE_DIR"))
+    elif os.getenv("CONTRACT_ARCHIVE_DIR"):
+        root = Path(os.getenv("CONTRACT_ARCHIVE_DIR"))
     else:
         root = Path("./archive")
     return ArchivePaths(root=root.resolve())
@@ -73,7 +73,7 @@ _archive_opt = typer.Option(
     None,
     "--archive",
     "-a",
-    help="档案库根目录；不传则用 OCR_ARCHIVE_DIR 或 ./archive",
+    help="档案库根目录；不传则用 CONTRACT_ARCHIVE_DIR 或 ./archive",
 )
 
 
@@ -616,10 +616,10 @@ def todo(
     跨合同列出待办义务（"催办看板"）。按 deadline 升序。
 
     用例：
-      ocr-cli todo --within-days 30           本月需要做的事
-      ocr-cli todo --actor party_b            乙方所有待办
-      ocr-cli todo --actor party_a --before 2026-12-31
-      ocr-cli todo --include-undated          含无日期的（如"签订当日支付定金"）
+      contract-archive todo --within-days 30           本月需要做的事
+      contract-archive todo --actor party_b            乙方所有待办
+      contract-archive todo --actor party_a --before 2026-12-31
+      contract-archive todo --include-undated          含无日期的（如"签订当日支付定金"）
     """
     from datetime import date, timedelta
 

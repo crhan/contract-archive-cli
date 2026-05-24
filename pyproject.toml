@@ -1,11 +1,11 @@
 [project]
-name = "ocr-cli"
+name = "contract-archive-cli"
 version = "0.1.0"
 description = "本地合同档案库 CLI：MinerU 解析 + qwen3.7-max 字段抽取 + SQLite 索引"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = { text = "MIT" }
-authors = [{ name = "ocr-cli" }]
+authors = [{ name = "crhan" }]
 
 # ===== 基础依赖 =====
 # dashscope 是合同字段抽取（qwen3.7-max LLM）的强依赖，纯 HTTP SDK ~200KB，放进 base
@@ -38,14 +38,14 @@ dev = [
 ]
 
 [project.scripts]
-ocr-cli = "src.cli:app"
+contract-archive = "contract_archive.cli:app"
 
 [build-system]
 requires = ["hatchling>=1.24"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["contract_archive"]
 
 # ===== uv 配置 =====
 [tool.uv]

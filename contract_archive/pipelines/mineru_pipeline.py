@@ -320,9 +320,9 @@ def _resolve_mineru() -> str:
     定位 mineru 可执行文件的绝对路径。
 
     为什么不能直接用裸字符串 "mineru" 交给 subprocess：
-    ocr-cli 经 `uv tool install` 安装在隔离 venv 里，mineru 作为同一个 venv 的
+    contract-archive 经 `uv tool install` 安装在隔离 venv 里，mineru 作为同一个 venv 的
     依赖（extra）一起装。但该 venv 的 bin/ 目录**不在**用户 shell 的 PATH 上——
-    ocr-cli 通过 ~/.local/bin 的 symlink 启动，子进程继承的是 shell PATH，
+    contract-archive 通过 ~/.local/bin 的 symlink 启动，子进程继承的是 shell PATH，
     于是靠 PATH 解析 "mineru" 必然 FileNotFoundError。
 
     策略（确定性优先，消除"PATH 里必须有 mineru"这个隐含前提）：
@@ -340,9 +340,9 @@ def _resolve_mineru() -> str:
     if found:
         return found
     raise FileNotFoundError(
-        "找不到 mineru 可执行文件。它随 ocr-cli 的 mineru extra 一起安装：\n"
-        "  uv tool install 'ocr-cli[mineru]'        # 首次安装\n"
-        "  uv tool install 'ocr-cli[mineru]' --reinstall   # 已装过 ocr-cli 但缺 mineru\n"
+        "找不到 mineru 可执行文件。它随 contract-archive-cli 的 mineru extra 一起安装：\n"
+        "  uv tool install 'contract-archive-cli[mineru]'        # 首次安装\n"
+        "  uv tool install 'contract-archive-cli[mineru]' --reinstall   # 已装过 contract-archive-cli 但缺 mineru\n"
         "开发环境：uv sync --extra mineru"
     )
 

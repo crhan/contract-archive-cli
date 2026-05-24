@@ -40,4 +40,4 @@ case "$EXTRAS" in
 esac
 
 echo "[setup] done. venv at .venv"
-echo "[setup] 试运行：uv run ocr-cli --help"
+echo "[setup] 试运行：uv run contract-archive --help"

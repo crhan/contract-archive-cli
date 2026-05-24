@@ -1,9 +1,9 @@
 # 本地合同档案库 CLI 容器镜像
 #
 # 使用：
-#   docker build -t ocr-cli -f docker/Dockerfile .
+#   docker build -t contract-archive -f docker/Dockerfile .
 #   docker run --rm -it -v $PWD/archive:/app/archive -v $PWD/input:/app/input \
-#     --env-file .env ocr-cli ocr-cli ingest /app/input
+#     --env-file .env contract-archive contract-archive ingest /app/input
 #
 # 注意：MinerU 首次启动会从 modelscope 下载模型（>1GB），
 # 建议挂载 -v ~/.cache/modelscope:/root/.cache/modelscope 复用本机缓存。
@@ -28,8 +28,8 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --extra mineru --no-install-project
 
-COPY src ./src
+COPY contract_archive ./contract_archive
 COPY README.md ./README.md
 RUN uv sync --extra mineru
 
-CMD ["uv", "run", "ocr-cli", "--help"]
+CMD ["uv", "run", "contract-archive", "--help"]

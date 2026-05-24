@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.archive import (
+from contract_archive.archive import (
     ArchivePaths,
     SearchFilter,
     collect_stats,
@@ -35,7 +35,7 @@ from src.archive import (
     re_extract,
     search_documents,
 )
-from src.schemas import (
+from contract_archive.schemas import (
     PipelineMeta,
     PipelineOutput,
     StructuredDocument,
@@ -121,7 +121,7 @@ def sample_markdown() -> str:
 
 def _patch_pipeline(stub: StubMineruPipeline):
     """把 ingest.ingest_pdf 内部的 MinerUPipeline() 替换为 stub。"""
-    return patch("src.archive.ingest.MinerUPipeline", lambda *a, **kw: stub)
+    return patch("contract_archive.archive.ingest.MinerUPipeline", lambda *a, **kw: stub)
 
 
 def _patch_llm_disabled():
@@ -216,7 +216,7 @@ def test_ingest_mineru_failure_writes_failed_status(
         def run(self, *_a, **_kw):
             raise RuntimeError("simulated mineru crash")
 
-    with patch("src.archive.ingest.MinerUPipeline", lambda *a, **kw: FailingPipeline()):
+    with patch("contract_archive.archive.ingest.MinerUPipeline", lambda *a, **kw: FailingPipeline()):
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     assert r.status == "failed"
     assert "simulated mineru crash" in r.error_message
@@ -233,8 +233,8 @@ def test_list_and_search(archive_root, conn, sample_pdf, tmp_path):
     用 update_extraction 直接灌可控的字段值，绕开 rule 抽取的精度问题
     （rule 抽取另有自己的测试覆盖，不在 archive 模块的责任范围）。
     """
-    from src.archive import update_extraction
-    from src.schemas import ContractExtraction, ExtractionConfidence
+    from contract_archive.archive import update_extraction
+    from contract_archive.schemas import ContractExtraction, ExtractionConfidence
 
     md_min = "# placeholder"
     pdf2 = tmp_path / "input" / "other.pdf"
@@ -295,8 +295,8 @@ def test_list_and_search(archive_root, conn, sample_pdf, tmp_path):
 
 def test_stats(archive_root, conn, sample_pdf):
     """stats 按管道结果统计，不依赖 rule 抽取精度。"""
-    from src.archive import update_extraction
-    from src.schemas import ContractExtraction, ExtractionConfidence
+    from contract_archive.archive import update_extraction
+    from contract_archive.schemas import ContractExtraction, ExtractionConfidence
 
     with _patch_pipeline(StubMineruPipeline(markdown_text="# placeholder")):
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
@@ -320,7 +320,7 @@ def test_re_extract_does_not_rerun_mineru(
     orig = get_document(conn, r.doc_id)
 
     # 即使把 stub 改了，re_extract 不会再调 MinerU
-    with patch("src.archive.ingest.MinerUPipeline", side_effect=AssertionError("should not be called")):
+    with patch("contract_archive.archive.ingest.MinerUPipeline", side_effect=AssertionError("should not be called")):
         re_extract(r.doc_id, archive_root, conn, llm_enabled=False)
 
     after = get_document(conn, r.doc_id)
@@ -352,7 +352,7 @@ def test_discover_pdfs_recursive(tmp_path):
 
 
 def test_show_ident_sha_prefix(archive_root, conn, sample_pdf, sample_markdown):
-    from src.archive import find_by_sha_prefix
+    from contract_archive.archive import find_by_sha_prefix
 
     with _patch_pipeline(StubMineruPipeline(markdown_text=sample_markdown)):
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
@@ -367,10 +367,10 @@ def test_show_ident_sha_prefix(archive_root, conn, sample_pdf, sample_markdown):
 
 def test_obligations_storage_and_filter(archive_root, conn, sample_pdf):
     """obligations 写入 + reingest 不堆积 + search/todo 过滤。"""
-    from src.archive import (
+    from contract_archive.archive import (
         list_obligations, search_documents, update_extraction
     )
-    from src.schemas import (
+    from contract_archive.schemas import (
         ContractExtraction, ExtractionConfidence, ObligationItem
     )
 
@@ -430,7 +430,7 @@ def test_obligations_storage_and_filter(archive_root, conn, sample_pdf):
 
 def test_obligations_coerce_chinese_actor(archive_root, conn, sample_pdf):
     """LLM 偶尔返回 actor=甲方/乙方 中文，hybrid 应归一为 party_a/party_b。"""
-    from src.extraction.hybrid import _coerce_obligations
+    from contract_archive.extraction.hybrid import _coerce_obligations
 
     raw = [
         {"actor": "甲方", "action": "交付", "deadline": "2026-12-31",
