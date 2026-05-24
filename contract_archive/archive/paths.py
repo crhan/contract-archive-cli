@@ -23,6 +23,23 @@ from pathlib import Path
 
 SHA_SHORT_LEN = 12
 
+# XDG 数据目录下的应用子目录名（跟 CLI / repo 名对齐）
+APP_DIR_NAME = "contract-archive"
+
+
+def default_archive_root() -> Path:
+    """
+    无 --archive / CONTRACT_ARCHIVE_DIR 时的默认档案库根，遵循 XDG Base Directory 约定。
+
+    数据类文件（db + 文档产物 + 日志）属于 XDG "data"：
+      $XDG_DATA_HOME/contract-archive  （默认 ~/.local/share/contract-archive）
+
+    按 XDG 规范：$XDG_DATA_HOME 仅在被设置且为绝对路径时生效，否则回退默认值。
+    """
+    xdg_data = os.getenv("XDG_DATA_HOME", "").strip()
+    base = Path(xdg_data) if xdg_data and os.path.isabs(xdg_data) else Path.home() / ".local" / "share"
+    return base / APP_DIR_NAME
+
 
 @dataclass(frozen=True)
 class ArchivePaths:

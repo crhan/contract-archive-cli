@@ -78,7 +78,7 @@ $EDITOR .env   # 填入 DASHSCOPE_API_KEY
 | --- | --- |
 | `DASHSCOPE_API_KEY` | 必填。[百炼控制台](https://dashscope.console.aliyun.com/) 申请 |
 | `DASHSCOPE_LLM_MODEL` | 默认 `qwen3.7-max`（用户百炼账户的特定别名；若 404 换 `qwen-max` / `qwen3-max`） |
-| `CONTRACT_ARCHIVE_DIR` | 档案库根目录，默认 `./archive`；CLI `--archive` 优先 |
+| `CONTRACT_ARCHIVE_DIR` | 档案库根目录，默认 XDG `~/.local/share/contract-archive`；CLI `--archive` 优先 |
 | `COMPUTE_DEVICE` | `auto` / `mps` / `cuda` / `cpu`（MinerU 走子进程，主要影响其内部 backend 选择） |
 
 ## ✦ 用法

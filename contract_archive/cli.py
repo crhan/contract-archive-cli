@@ -11,7 +11,7 @@
   delete <id>           删除档案记录；默认仅删 DB 行，--purge-files 同时删文件
   vacuum                VACUUM 数据库（碎片整理）
 
-档案库路径优先级：--archive flag > CONTRACT_ARCHIVE_DIR env > ./archive
+档案库路径优先级：--archive flag > CONTRACT_ARCHIVE_DIR env > XDG 默认 (~/.local/share/contract-archive)
 """
 from __future__ import annotations
 
@@ -31,6 +31,7 @@ from .archive import (
     ArchivePaths,
     SearchFilter,
     checkpoint,
+    default_archive_root,
     collect_stats,
     delete_document,
     discover_pdfs,
@@ -59,13 +60,13 @@ logging.basicConfig(
 
 
 def _resolve_archive(archive_opt: Optional[Path]) -> ArchivePaths:
-    """--archive flag > CONTRACT_ARCHIVE_DIR env > ./archive"""
+    """--archive flag > CONTRACT_ARCHIVE_DIR env > XDG 默认 (~/.local/share/contract-archive)"""
     if archive_opt:
         root = archive_opt
     elif os.getenv("CONTRACT_ARCHIVE_DIR"):
         root = Path(os.getenv("CONTRACT_ARCHIVE_DIR"))
     else:
-        root = Path("./archive")
+        root = default_archive_root()
     return ArchivePaths(root=root.resolve())
 
 
@@ -73,7 +74,7 @@ _archive_opt = typer.Option(
     None,
     "--archive",
     "-a",
-    help="档案库根目录；不传则用 CONTRACT_ARCHIVE_DIR 或 ./archive",
+    help="档案库根目录；不传则用 CONTRACT_ARCHIVE_DIR 或 XDG 默认 ~/.local/share/contract-archive",
 )
 
 

@@ -9,7 +9,7 @@
 """
 from .db import checkpoint, open_archive_db, transaction, utc_now_iso
 from .ingest import IngestResult, discover_pdfs, ingest_pdf, re_extract
-from .paths import ArchivePaths, link_or_copy, sha256_of_file
+from .paths import ArchivePaths, default_archive_root, link_or_copy, sha256_of_file
 from .repository import (
     DocumentRow,
     SearchFilter,
@@ -34,6 +34,7 @@ __all__ = [
     "checkpoint",
     "utc_now_iso",
     "ArchivePaths",
+    "default_archive_root",
     "link_or_copy",
     "sha256_of_file",
     "DocumentRow",
