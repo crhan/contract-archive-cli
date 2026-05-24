@@ -24,6 +24,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -158,7 +159,7 @@ class MinerUPipeline:
         env.setdefault("MINERU_MODEL_SOURCE", "modelscope")  # 国内更快
 
         cmd = [
-            "mineru",
+            _resolve_mineru(),
             "-p",
             str(pdf_path),
             "-o",
@@ -314,10 +315,42 @@ def _locate_mineru_result(out_root: Path, stem: str) -> Path | None:
     return None
 
 
+def _resolve_mineru() -> str:
+    """
+    定位 mineru 可执行文件的绝对路径。
+
+    为什么不能直接用裸字符串 "mineru" 交给 subprocess：
+    ocr-cli 经 `uv tool install` 安装在隔离 venv 里，mineru 作为同一个 venv 的
+    依赖（extra）一起装。但该 venv 的 bin/ 目录**不在**用户 shell 的 PATH 上——
+    ocr-cli 通过 ~/.local/bin 的 symlink 启动，子进程继承的是 shell PATH，
+    于是靠 PATH 解析 "mineru" 必然 FileNotFoundError。
+
+    策略（确定性优先，消除"PATH 里必须有 mineru"这个隐含前提）：
+      1. 找与当前解释器同目录的兄弟可执行文件——uv tool / 已激活 venv 场景下，
+         mineru 与 python 必然同在一个 bin/，这一步直接命中。
+      2. 兜底 shutil.which，兼容用户把 mineru 手动放进 PATH 的开发环境。
+
+    返回：mineru 可执行文件路径。
+    抛出：FileNotFoundError（附安装指引），比裸的 [Errno 2] 可读得多。
+    """
+    sibling = Path(sys.executable).parent / "mineru"
+    if sibling.exists():
+        return str(sibling)
+    found = shutil.which("mineru")
+    if found:
+        return found
+    raise FileNotFoundError(
+        "找不到 mineru 可执行文件。它随 ocr-cli 的 mineru extra 一起安装：\n"
+        "  uv tool install 'ocr-cli[mineru]'        # 首次安装\n"
+        "  uv tool install 'ocr-cli[mineru]' --reinstall   # 已装过 ocr-cli 但缺 mineru\n"
+        "开发环境：uv sync --extra mineru"
+    )
+
+
 def _mineru_version() -> str:
     try:
         proc = subprocess.run(
-            ["mineru", "--version"], capture_output=True, text=True, check=False
+            [_resolve_mineru(), "--version"], capture_output=True, text=True, check=False
         )
         return (proc.stdout or proc.stderr).strip()
     except Exception:
