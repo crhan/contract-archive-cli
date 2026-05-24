@@ -13,17 +13,16 @@ venv/
 .uv/
 
 # OCR runtime
+archive/
 output/
-!output/.gitkeep
+output.legacy/
 input/*.pdf
 !input/.gitkeep
 models/
 *.onnx
-*.pdmodel
-*.pdiparams
-.paddleocr/
 .mineru_cache/
 huggingface_cache/
+modelscope_cache/
 
 # IDE / OS
 .DS_Store

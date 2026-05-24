@@ -1,5 +1,12 @@
-# 基础镜像：用 Python 3.12 + uv，覆盖 dashscope 那一路 + FastAPI
-# 这层故意只装最小依赖，体积小、build 快、纯 CPU
+# 本地合同档案库 CLI 容器镜像
+#
+# 使用：
+#   docker build -t ocr-cli -f docker/Dockerfile .
+#   docker run --rm -it -v $PWD/archive:/app/archive -v $PWD/input:/app/input \
+#     --env-file .env ocr-cli ocr-cli ingest /app/input
+#
+# 注意：MinerU 首次启动会从 modelscope 下载模型（>1GB），
+# 建议挂载 -v ~/.cache/modelscope:/root/.cache/modelscope 复用本机缓存。
 FROM python:3.12-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
@@ -7,32 +14,22 @@ ENV PYTHONUNBUFFERED=1 \
     UV_SYSTEM_PYTHON=1 \
     UV_LINK_MODE=copy
 
-# 系统依赖：PyMuPDF 不需要 poppler；只装 build essentials 兜底
+# 系统依赖：PyMuPDF 不需要 poppler；libgl1 给 MinerU OCR backend
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git libgl1 libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh \
     && cp /root/.local/bin/uv /usr/local/bin/uv
 
 WORKDIR /app
 
-# 先复制依赖描述文件以利用 layer cache
-COPY pyproject.toml ./
+# 利用 layer cache：先复制依赖描述
+COPY pyproject.toml uv.lock ./
+RUN uv sync --extra mineru --no-install-project
 
-# base：只装 dashscope + 通用基础依赖
-RUN uv sync --extra dashscope --no-install-project
-
-# 拷代码
 COPY src ./src
 COPY README.md ./README.md
-RUN uv sync --extra dashscope
+RUN uv sync --extra mineru
 
-EXPOSE 8000
-CMD ["uv", "run", "uvicorn", "src.api.app:app", "--host", "0.0.0.0", "--port", "8000"]
-
-# ===== heavy stage：含 paddleocr + mineru，体积大 =====
-FROM base AS heavy
-RUN uv sync --extra all
-CMD ["tail", "-f", "/dev/null"]
+CMD ["uv", "run", "ocr-cli", "--help"]
