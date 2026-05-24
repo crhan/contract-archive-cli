@@ -122,6 +122,29 @@ uv run ocr-cli show 5
 uv run ocr-cli show a3f9c2b1
 ```
 
+### 待办看板（义务清单）
+
+每份合同抽取时会拆出双方"动作"（递交资料/付款/交付/签字等）作为
+独立的 `obligations` 表，每条带 `actor` (甲方/乙方/双方) + `deadline`：
+
+```bash
+# 跨合同列出所有待办（按 deadline 升序，NULL 排最后）
+ocr-cli todo --include-undated
+
+# 未来 30 天内要做的事
+ocr-cli todo --within-days 30
+
+# 只看甲方任务 / 只看乙方任务
+ocr-cli todo --actor party_a
+ocr-cli todo --actor party_b --before 2026-12-31
+
+# 找"近 30 天内有截止动作的合同"（不是单条 obligation，而是合同列）
+ocr-cli search --deadline-before 2026-06-30 --actor party_b
+```
+
+`ocr-cli show <id>` 会按甲方/乙方/双方分组展示该合同所有义务，
+与原本的 `risk_clauses`（违约罚则）严格区分。
+
 ### 抽取层管理
 
 LLM 跑挂或想升级 prompt 后批量再抽取——不重跑 MinerU：
