@@ -148,6 +148,20 @@ class PipelineOutput(BaseModel):
 # -------- Semantic Extraction --------
 
 
+class ObligationItem(BaseModel):
+    """
+    合同义务/动作条款。
+    与 risk_clauses 区别：
+      - obligation = "X 方应该做什么"（动作 + 截止）
+      - risk_clause = "违约后果"（罚则/赔偿/解除条件）
+    """
+
+    actor: Literal["party_a", "party_b", "both"]
+    action: str                         # "递交审贷资料"
+    deadline: Optional[str] = None      # ISO 'YYYY-MM-DD' 或 None
+    evidence: str = ""                  # 原文片段
+
+
 class ContractExtraction(BaseModel):
     """合同语义抽取的统一 schema。所有字段都允许 None（抽不到比硬塞更诚实）。"""
 
@@ -160,6 +174,7 @@ class ContractExtraction(BaseModel):
     expire_date: Optional[str] = None  # 到期/失效日期 ISO 8601
     auto_renewal: Optional[bool] = None
     risk_clauses: list[str] = Field(default_factory=list)
+    obligations: list[ObligationItem] = Field(default_factory=list)
     raw_evidence: dict[str, str] = Field(
         default_factory=dict,
         description="字段→原文证据片段，用于人工抽检",

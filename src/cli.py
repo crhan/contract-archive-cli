@@ -38,6 +38,7 @@ from .archive import (
     get_document,
     ingest_pdf,
     list_documents,
+    list_obligations,
     open_archive_db,
     re_extract,
     search_documents,
@@ -240,6 +241,11 @@ def _row_to_dict(r) -> dict:
         "expire_date": r.expire_date,
         "auto_renewal": bool(r.auto_renewal) if r.auto_renewal is not None else None,
         "risk_clauses": r.risk_clauses,
+        "obligations": [
+            {"actor": o.actor, "action": o.action,
+             "deadline": o.deadline, "evidence": o.evidence}
+            for o in r.obligations
+        ],
         "overall_confidence": r.overall_confidence,
         "source_path": r.source_path,
         "output_dir": r.output_dir,
@@ -278,6 +284,18 @@ def search(
         help="是否自动续约",
     ),
     has_risk: bool = typer.Option(False, "--has-risk", help="只显示有风险条款的"),
+    deadline_before: Optional[str] = typer.Option(
+        None,
+        "--deadline-before",
+        help="存在 deadline ≤ YYYY-MM-DD 的义务（找近期待办合同）",
+    ),
+    deadline_after: Optional[str] = typer.Option(
+        None, "--deadline-after", help="存在 deadline ≥ YYYY-MM-DD 的义务"
+    ),
+    actor: Optional[str] = typer.Option(
+        None, "--actor",
+        help="义务 actor: party_a | party_b | both",
+    ),
     status: Optional[str] = typer.Option(None, "--status"),
     limit: int = typer.Option(50, "--limit", "-n"),
     fmt: str = typer.Option("table", "--format", help="table | json"),
@@ -298,6 +316,9 @@ def search(
         expire_before=expire_before,
         auto_renewal=auto_renewal,
         has_risk=has_risk,
+        deadline_before=deadline_before,
+        deadline_after=deadline_after,
+        actor=actor,
         status=status,
         limit=limit,
     )
@@ -391,9 +412,25 @@ def show(
         "overall_confidence",
         f"{row.overall_confidence:.2f}" if row.overall_confidence is not None else "-",
     )
+    if row.obligations:
+        table.add_row("", "")
+        for actor_key, label in (
+            ("party_a", "[bold]甲方动作[/bold]"),
+            ("party_b", "[bold]乙方动作[/bold]"),
+            ("both",    "[bold]双方动作[/bold]"),
+        ):
+            items = [o for o in row.obligations if o.actor == actor_key]
+            if not items:
+                continue
+            lines = []
+            for o in items:
+                dl = o.deadline or "[dim]无日期[/dim]"
+                lines.append(f"• [{dl}] {o.action}")
+            table.add_row(label, "\n".join(lines))
     if row.risk_clauses:
         table.add_row(
-            "risk_clauses", "\n".join(f"• {c}" for c in row.risk_clauses)
+            "[bold]risk_clauses[/bold]",
+            "\n".join(f"• {c}" for c in row.risk_clauses),
         )
     console.print(table)
 
@@ -547,6 +584,102 @@ def delete(
             rmtree(out)
             console.print(f"[green]✓ removed {out}[/green]")
     console.print(f"[green]✓ deleted DB row id={row.id}[/green]")
+
+
+# ---------- todo ----------
+
+
+@app.command()
+def todo(
+    archive: Optional[Path] = _archive_opt,
+    actor: Optional[str] = typer.Option(
+        None, "--actor", help="party_a | party_b | both"
+    ),
+    before: Optional[str] = typer.Option(
+        None, "--before", help="deadline ≤ YYYY-MM-DD"
+    ),
+    after: Optional[str] = typer.Option(
+        None, "--after", help="deadline ≥ YYYY-MM-DD"
+    ),
+    include_undated: bool = typer.Option(
+        False, "--include-undated", help="同时显示无 deadline 的义务"
+    ),
+    within_days: Optional[int] = typer.Option(
+        None,
+        "--within-days",
+        help="便捷选项：deadline 在今天到 N 天内（等价于 --after today --before today+N）",
+    ),
+    limit: int = typer.Option(50, "--limit", "-n"),
+    fmt: str = typer.Option("table", "--format", help="table | json"),
+) -> None:
+    """
+    跨合同列出待办义务（"催办看板"）。按 deadline 升序。
+
+    用例：
+      ocr-cli todo --within-days 30           本月需要做的事
+      ocr-cli todo --actor party_b            乙方所有待办
+      ocr-cli todo --actor party_a --before 2026-12-31
+      ocr-cli todo --include-undated          含无日期的（如"签订当日支付定金"）
+    """
+    from datetime import date, timedelta
+
+    if within_days is not None:
+        today = date.today().isoformat()
+        before = before or (date.today() + timedelta(days=within_days)).isoformat()
+        after = after or today
+
+    paths = _resolve_archive(archive)
+    if not paths.db_path.exists():
+        console.print(f"[yellow]archive empty: {paths.db_path}[/yellow]")
+        raise typer.Exit(0)
+    conn = open_archive_db(paths.db_path)
+    items = list_obligations(
+        conn,
+        actor=actor,
+        before=before,
+        after=after,
+        include_undated=include_undated,
+        limit=limit,
+    )
+    conn.close()
+
+    if fmt == "json":
+        print(
+            _json.dumps(
+                [
+                    {
+                        "doc_id": it.doc_id,
+                        "contract_name": it.contract_name,
+                        "actor": it.actor,
+                        "action": it.action,
+                        "deadline": it.deadline,
+                        "evidence": it.evidence,
+                    }
+                    for it in items
+                ],
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return
+
+    table = Table(title=f"Todo · {len(items)} obligation(s)")
+    table.add_column("deadline", style="cyan")
+    table.add_column("actor")
+    table.add_column("action", overflow="fold")
+    table.add_column("contract", overflow="fold", style="dim")
+    table.add_column("doc", justify="right", style="dim")
+    actor_label = {"party_a": "甲方", "party_b": "乙方", "both": "双方"}
+    for it in items:
+        deadline = it.deadline or "[dim]无日期[/dim]"
+        table.add_row(
+            deadline,
+            actor_label.get(it.actor, it.actor),
+            it.action,
+            it.contract_name or "-",
+            f"#{it.doc_id}",
+        )
+    console.print(table)
 
 
 # ---------- vacuum ----------

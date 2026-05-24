@@ -363,3 +363,85 @@ def test_show_ident_sha_prefix(archive_root, conn, sample_pdf, sample_markdown):
 
     with pytest.raises(ValueError, match="prefix must be >= 4"):
         find_by_sha_prefix(conn, "abc")
+
+
+def test_obligations_storage_and_filter(archive_root, conn, sample_pdf):
+    """obligations 写入 + reingest 不堆积 + search/todo 过滤。"""
+    from src.archive import (
+        list_obligations, search_documents, update_extraction
+    )
+    from src.schemas import (
+        ContractExtraction, ExtractionConfidence, ObligationItem
+    )
+
+    with _patch_pipeline(StubMineruPipeline(markdown_text="# placeholder")):
+        r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
+
+    obls = [
+        ObligationItem(actor="party_b", action="递交审贷资料",
+                       deadline="2026-05-12", evidence="..."),
+        ObligationItem(actor="party_b", action="支付定金",
+                       deadline=None, evidence="签订当日"),
+        ObligationItem(actor="party_a", action="交付车位",
+                       deadline="2027-06-30", evidence="..."),
+        ObligationItem(actor="both", action="签订商品房买卖合同",
+                       deadline=None, evidence="..."),
+    ]
+    update_extraction(conn, r.doc_id, status="ok", llm_duration_s=0.1,
+        error_message=None,
+        extraction=ContractExtraction(obligations=obls),
+        confidence=ExtractionConfidence())
+
+    # 1) DocumentRow.obligations 完整加载
+    doc = get_document(conn, r.doc_id)
+    assert len(doc.obligations) == 4
+    assert doc.obligations[0].actor == "party_b"
+    assert doc.obligations[0].deadline == "2026-05-12"
+
+    # 2) search 跨表 EXISTS 过滤
+    assert len(search_documents(conn,
+        SearchFilter(deadline_before="2026-06-30"))) == 1
+    assert len(search_documents(conn,
+        SearchFilter(deadline_before="2026-04-30"))) == 0
+    assert len(search_documents(conn,
+        SearchFilter(actor="party_a", deadline_after="2027-01-01"))) == 1
+    assert len(search_documents(conn,
+        SearchFilter(actor="party_a", deadline_before="2026-12-31"))) == 0
+
+    # 3) todo 视图：默认只看带 deadline 的，按 deadline 升序
+    todos = list_obligations(conn)
+    assert [t.deadline for t in todos] == ["2026-05-12", "2027-06-30"]
+    todos = list_obligations(conn, include_undated=True)
+    assert len(todos) == 4
+    # NULL deadline 排到最后
+    assert todos[-1].deadline is None or todos[-2].deadline is None
+
+    # 4) reingest 不堆积
+    update_extraction(conn, r.doc_id, status="ok", llm_duration_s=0.1,
+        error_message=None,
+        extraction=ContractExtraction(obligations=[
+            ObligationItem(actor="party_a", action="新动作", deadline="2027-01-01")
+        ]),
+        confidence=ExtractionConfidence())
+    doc = get_document(conn, r.doc_id)
+    assert len(doc.obligations) == 1
+    assert doc.obligations[0].action == "新动作"
+
+
+def test_obligations_coerce_chinese_actor(archive_root, conn, sample_pdf):
+    """LLM 偶尔返回 actor=甲方/乙方 中文，hybrid 应归一为 party_a/party_b。"""
+    from src.extraction.hybrid import _coerce_obligations
+
+    raw = [
+        {"actor": "甲方", "action": "交付", "deadline": "2026-12-31",
+         "evidence": "..."},
+        {"actor": "乙方", "action": "付款", "deadline": "2025年1月15日",
+         "evidence": "..."},
+        {"actor": "双方", "action": "签字", "deadline": None, "evidence": ""},
+        {"actor": "未知", "action": "应跳过"},        # 非法 actor
+        {"actor": "party_a", "action": ""},          # 空 action 跳过
+    ]
+    out = _coerce_obligations(raw)
+    assert [o.actor for o in out] == ["party_a", "party_b", "both"]
+    # 日期归一化
+    assert out[1].deadline == "2025-01-15"

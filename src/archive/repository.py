@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from ..schemas import ContractExtraction, ExtractionConfidence
+from ..schemas import ContractExtraction, ExtractionConfidence, ObligationItem
 from .db import transaction, utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -48,6 +48,7 @@ class DocumentRow:
     auto_renewal: Optional[int]
     overall_confidence: Optional[float]
     risk_clauses: list[str] = field(default_factory=list)
+    obligations: list[ObligationItem] = field(default_factory=list)
 
     @property
     def amount_value(self) -> Optional[float]:
@@ -69,7 +70,11 @@ def _amount_to_cents(value: Optional[float]) -> Optional[int]:
     return int(round(value * 100))
 
 
-def _row_to_document(row: sqlite3.Row, risks: list[str]) -> DocumentRow:
+def _row_to_document(
+    row: sqlite3.Row,
+    risks: list[str],
+    obligations: list[ObligationItem],
+) -> DocumentRow:
     return DocumentRow(
         id=row["id"],
         sha256=row["sha256"],
@@ -90,6 +95,7 @@ def _row_to_document(row: sqlite3.Row, risks: list[str]) -> DocumentRow:
         auto_renewal=row["auto_renewal"],
         overall_confidence=row["overall_confidence"],
         risk_clauses=risks,
+        obligations=obligations,
     )
 
 
@@ -110,8 +116,7 @@ def get_document(conn: sqlite3.Connection, doc_id: int) -> Optional[DocumentRow]
     ).fetchone()
     if not row:
         return None
-    risks = _load_risks(conn, doc_id)
-    return _row_to_document(row, risks)
+    return _hydrate(conn, row)
 
 
 def find_by_sha_prefix(
@@ -127,7 +132,16 @@ def find_by_sha_prefix(
         "SELECT * FROM documents WHERE sha256 LIKE ? ORDER BY ingested_at DESC",
         (prefix + "%",),
     ).fetchall()
-    return [_row_to_document(r, _load_risks(conn, r["id"])) for r in rows]
+    return [_hydrate(conn, r) for r in rows]
+
+
+def _hydrate(conn: sqlite3.Connection, row: sqlite3.Row) -> DocumentRow:
+    """从主表行 + 子表数据组装 DocumentRow。"""
+    return _row_to_document(
+        row,
+        _load_risks(conn, row["id"]),
+        _load_obligations(conn, row["id"]),
+    )
 
 
 def _load_risks(conn: sqlite3.Connection, doc_id: int) -> list[str]:
@@ -136,6 +150,98 @@ def _load_risks(conn: sqlite3.Connection, doc_id: int) -> list[str]:
         (doc_id,),
     ).fetchall()
     return [r["clause_text"] for r in rows]
+
+
+@dataclass
+class TodoItem:
+    """跨合同 obligations 视图（list_obligations 的返回行）。"""
+
+    obligation_id: int
+    doc_id: int
+    contract_name: Optional[str]
+    party_a: Optional[str]
+    party_b: Optional[str]
+    actor: str
+    action: str
+    deadline: Optional[str]
+    evidence: str
+
+
+def list_obligations(
+    conn: sqlite3.Connection,
+    *,
+    actor: Optional[str] = None,
+    before: Optional[str] = None,
+    after: Optional[str] = None,
+    include_undated: bool = False,
+    limit: int = 50,
+) -> list[TodoItem]:
+    """
+    跨合同列 obligations（待办看板）。
+
+    默认只返回带 deadline 的，按 deadline 升序。
+    include_undated=True 时同时返回无日期义务（排在末尾）。
+    """
+    where: list[str] = []
+    params: list[Any] = []
+    if not include_undated:
+        where.append("o.deadline IS NOT NULL")
+    if actor:
+        if actor not in ("party_a", "party_b", "both"):
+            raise ValueError(f"actor must be party_a/party_b/both, got {actor!r}")
+        where.append("o.actor = ?")
+        params.append(actor)
+    if before:
+        where.append("(o.deadline IS NOT NULL AND o.deadline <= ?)")
+        params.append(before)
+    if after:
+        where.append("(o.deadline IS NOT NULL AND o.deadline >= ?)")
+        params.append(after)
+
+    sql = """
+        SELECT o.id AS oid, o.doc_id, o.actor, o.action, o.deadline, o.evidence,
+               d.contract_name, d.party_a, d.party_b
+          FROM obligations o JOIN documents d ON d.id = o.doc_id
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    # NULL deadline 排到最后（IS NULL 排序：SQLite NULLS FIRST 默认，反过来）
+    sql += " ORDER BY (o.deadline IS NULL), o.deadline ASC, o.doc_id LIMIT ?"
+    params.append(limit)
+
+    rows = conn.execute(sql, params).fetchall()
+    return [
+        TodoItem(
+            obligation_id=r["oid"],
+            doc_id=r["doc_id"],
+            contract_name=r["contract_name"],
+            party_a=r["party_a"],
+            party_b=r["party_b"],
+            actor=r["actor"],
+            action=r["action"],
+            deadline=r["deadline"],
+            evidence=r["evidence"] or "",
+        )
+        for r in rows
+    ]
+
+
+def _load_obligations(conn: sqlite3.Connection, doc_id: int) -> list[ObligationItem]:
+    rows = conn.execute(
+        """SELECT actor, action, deadline, evidence
+             FROM obligations WHERE doc_id = ?
+             ORDER BY ordering, id""",
+        (doc_id,),
+    ).fetchall()
+    return [
+        ObligationItem(
+            actor=r["actor"],
+            action=r["action"],
+            deadline=r["deadline"],
+            evidence=r["evidence"] or "",
+        )
+        for r in rows
+    ]
 
 
 def list_documents(
@@ -158,15 +264,15 @@ def list_documents(
     params.append(limit)
 
     rows = conn.execute(sql, params).fetchall()
-    return [_row_to_document(r, _load_risks(conn, r["id"])) for r in rows]
+    return [_hydrate(conn, r) for r in rows]
 
 
 @dataclass
 class SearchFilter:
     """search 命令的过滤参数。所有 None 字段被忽略。"""
 
-    name: Optional[str] = None         # FTS 模糊匹配 contract_name
-    party: Optional[str] = None        # FTS 模糊匹配 party_a 或 party_b
+    name: Optional[str] = None         # LIKE 模糊匹配 contract_name
+    party: Optional[str] = None        # LIKE 模糊匹配 party_a 或 party_b
     amount_min_cents: Optional[int] = None
     amount_max_cents: Optional[int] = None
     signed_after: Optional[str] = None
@@ -175,6 +281,10 @@ class SearchFilter:
     auto_renewal: Optional[bool] = None
     has_risk: bool = False
     status: Optional[str] = None
+    # 义务过滤：跨表 EXISTS 查询
+    deadline_before: Optional[str] = None   # 找近期到期的待办
+    deadline_after: Optional[str] = None
+    actor: Optional[str] = None             # party_a / party_b / both
     limit: int = 50
 
 
@@ -222,6 +332,31 @@ def search_documents(
         where.append("status = ?")
         params.append(flt.status)
 
+    # 义务过滤：用一个 EXISTS 子查询带 AND 链，所有 obligation 条件命中同一条 obligation
+    obl_where: list[str] = []
+    if flt.deadline_before:
+        obl_where.append("deadline IS NOT NULL AND deadline <= ?")
+        params.append(flt.deadline_before)
+    if flt.deadline_after:
+        obl_where.append("deadline IS NOT NULL AND deadline >= ?")
+        params.append(flt.deadline_after)
+    if flt.actor:
+        if flt.actor not in ("party_a", "party_b", "both"):
+            raise ValueError(f"actor must be party_a/party_b/both, got {flt.actor!r}")
+        obl_where.append("actor = ?")
+        params.append(flt.actor)
+    if obl_where:
+        # 注意把 obligation 条件参数插到主表参数之前——这里 params 是按顺序拼接的，
+        # 所以 obligation 条件必须在 SQL 中先出现：放到 where 列表开头
+        clause = (
+            "EXISTS (SELECT 1 FROM obligations WHERE doc_id = documents.id AND "
+            + " AND ".join(obl_where)
+            + ")"
+        )
+        # 因为 params 是按 where 列表顺序追加的，且 obl 参数已经追加在末尾，
+        # 这里把 clause 也加到末尾保持参数顺序一致
+        where.append(clause)
+
     sql = "SELECT * FROM documents"
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -229,7 +364,7 @@ def search_documents(
     params.append(flt.limit)
 
     rows = conn.execute(sql, params).fetchall()
-    return [_row_to_document(r, _load_risks(conn, r["id"])) for r in rows]
+    return [_hydrate(conn, r) for r in rows]
 
 
 # ---------- 写入 ----------
@@ -292,6 +427,7 @@ def insert_document(
             return None  # 冲突，sha256 已存在
         doc_id = cursor.lastrowid
         _insert_risks(conn, doc_id, ext.risk_clauses)
+        _insert_obligations(conn, doc_id, ext.obligations)
         return doc_id
 
 
@@ -339,7 +475,9 @@ def update_extraction(
             ),
         )
         conn.execute("DELETE FROM risk_clauses WHERE doc_id = ?", (doc_id,))
+        conn.execute("DELETE FROM obligations WHERE doc_id = ?", (doc_id,))
         _insert_risks(conn, doc_id, extraction.risk_clauses)
+        _insert_obligations(conn, doc_id, extraction.obligations)
 
 
 def replace_document(
@@ -392,7 +530,9 @@ def replace_document(
             ),
         )
         conn.execute("DELETE FROM risk_clauses WHERE doc_id = ?", (doc_id,))
+        conn.execute("DELETE FROM obligations WHERE doc_id = ?", (doc_id,))
         _insert_risks(conn, doc_id, extraction.risk_clauses)
+        _insert_obligations(conn, doc_id, extraction.obligations)
 
 
 def _insert_risks(
@@ -404,6 +544,26 @@ def _insert_risks(
         return
     conn.executemany(
         "INSERT INTO risk_clauses(doc_id, clause_text) VALUES (?, ?)",
+        rows,
+    )
+
+
+def _insert_obligations(
+    conn: sqlite3.Connection,
+    doc_id: int,
+    items: Iterable[ObligationItem],
+) -> None:
+    """批量插 obligations，ordering 按列表顺序递增。"""
+    rows = [
+        (doc_id, it.actor, it.action, it.deadline, it.evidence, i)
+        for i, it in enumerate(items)
+        if it.action and it.action.strip()
+    ]
+    if not rows:
+        return
+    conn.executemany(
+        """INSERT INTO obligations(doc_id, actor, action, deadline, evidence, ordering)
+             VALUES (?, ?, ?, ?, ?, ?)""",
         rows,
     )
 

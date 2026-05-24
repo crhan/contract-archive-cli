@@ -16,7 +16,12 @@ import logging
 import re
 from typing import Any
 
-from ..schemas import ContractExtraction, ExtractionConfidence, FieldConfidence
+from ..schemas import (
+    ContractExtraction,
+    ExtractionConfidence,
+    FieldConfidence,
+    ObligationItem,
+)
 from .llm_extractor import call_llm_extract
 from .rule_extractor import RuleResult, extract_rules
 
@@ -183,6 +188,9 @@ def extract_contract(
     if extraction.amount:
         extraction.amount_value = parse_money_value(extraction.amount)
 
+    # obligations 完全由 LLM 提供（rule 无法可靠区分动作/罚则）
+    extraction.obligations = _coerce_obligations(llm_res.get("obligations"))
+
     # 风险条款单独合并
     risks_rule = (
         rule_res.get("risk_clauses").value.split("|")  # type: ignore[union-attr]
@@ -303,4 +311,45 @@ def _merge_risk_lists(a: list[str], b: list[str]) -> list[str]:
         if key not in seen:
             seen.add(key)
             out.append(s.strip())
+    return out
+
+
+def _coerce_obligations(raw: Any) -> list[ObligationItem]:
+    """
+    把 LLM 返回的 obligations 数组（dict 列表）转 ObligationItem。
+    LLM 偶尔会返回 actor 写成"甲方"/"乙方"中文 —— 这里做兜底归一。
+    跳过缺 actor 或 action 的非法项，不抛异常。
+    """
+    if not isinstance(raw, list):
+        return []
+    actor_alias = {
+        "甲方": "party_a", "Party A": "party_a", "partyA": "party_a",
+        "乙方": "party_b", "Party B": "party_b", "partyB": "party_b",
+        "双方": "both",   "Both": "both",
+    }
+    out: list[ObligationItem] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        actor = str(item.get("actor", "")).strip()
+        actor = actor_alias.get(actor, actor)
+        if actor not in ("party_a", "party_b", "both"):
+            continue
+        action = str(item.get("action", "")).strip()
+        if not action:
+            continue
+        deadline = item.get("deadline")
+        if isinstance(deadline, str):
+            deadline = normalize_date(deadline) or None
+        else:
+            deadline = None
+        evidence = str(item.get("evidence", "")).strip()[:500]
+        out.append(
+            ObligationItem(
+                actor=actor,  # type: ignore[arg-type]
+                action=action[:200],
+                deadline=deadline,
+                evidence=evidence,
+            )
+        )
     return out

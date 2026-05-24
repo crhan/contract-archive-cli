@@ -29,7 +29,16 @@ LLM_SYSTEM_PROMPT = """你是一名严谨的法律助理。请从给定的合同
 6. 签订日期(sign_date)：仅取合同最后落款/签字处的日期；如未明确则 null，不要把"付款日"或"交付日"当签订日。
 7. 到期日期(expire_date)：仅取合同明确的有效期/失效日；车位转让、买卖等一次性合同通常没有，应填 null。
 8. party_a / party_b：填全称（含公司类型如"有限公司"或买受人完整身份描述）。
-9. risk_clauses 是字符串数组，每条 ≤80 字，仅列违约/赔偿/争议解决/不可抗力/保密/管辖等敏感条款。
+9. risk_clauses 是字符串数组，每条 ≤80 字，仅列违约/赔偿/争议解决/不可抗力/保密/管辖等"出问题后果"型条款。
+10. obligations 是动作清单——"X 方应/须于 Y 之前做 Z"型条款。
+    与 risk_clauses 严格区分：
+      - 动作类（要做某事、按时交付、提交资料、付款、验收、盖章、签订其他合同）→ obligations
+      - 后果类（违约金、解除权、争议解决、滞纳金、赔偿、不可抗力免责）→ risk_clauses
+    每条 obligation 必须含：actor、action、deadline（若无明确日期则 null）、evidence（原文片段≤120字）
+    actor 只能是 "party_a"|"party_b"|"both"，不要写实际人名/公司名。
+    action 用动宾短语，≤30字，例如"递交审贷资料"、"交付车位"、"支付定金"。
+    deadline 是 ISO 'YYYY-MM-DD'；原文为"签订本协议当日"/"30 日内"等相对时间无法换算时填 null。
+    宁缺毋滥：抽不出动作不要硬凑；典型合同 obligations 5-15 条为正常。
 
 JSON 字段定义：
 {
@@ -40,7 +49,15 @@ JSON 字段定义：
   "sign_date": "签订日期 ISO 8601 或 null",
   "expire_date": "到期/终止日期 ISO 8601 或 null",
   "auto_renewal": true/false/null,
-  "risk_clauses": ["风险条款1", "风险条款2"]
+  "risk_clauses": ["违约金/赔偿/解除/争议解决等罚则", "..."],
+  "obligations": [
+    {
+      "actor": "party_a"|"party_b"|"both",
+      "action": "动宾短语",
+      "deadline": "YYYY-MM-DD 或 null",
+      "evidence": "原文片段"
+    }
+  ]
 }
 """
 
