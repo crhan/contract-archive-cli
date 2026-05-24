@@ -45,6 +45,28 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 ./scripts/setup.sh base
 ```
 
+## ✦ 全局安装（可选）
+
+如果想在任意目录用 `ocr-cli`（不必 `cd` 项目目录或 `uv run`），用 `uv tool install`：
+
+```bash
+UV_LINK_MODE=copy uv tool install --reinstall --with mineru --force /path/to/ocr-cli
+```
+
+`uv tool install` 会在 `~/.local/bin/ocr-cli` 装独立 venv（与项目 venv 隔离）。
+然后从任意目录：
+
+```bash
+# 用环境变量指定档案库
+OCR_ARCHIVE_DIR=~/contracts ocr-cli list
+
+# 或显式 --archive
+ocr-cli --archive ~/contracts list
+ocr-cli --archive ~/contracts ingest ~/Documents/new_contract.pdf
+```
+
+`DASHSCOPE_API_KEY` 需通过 shell env 提供（建议放进 `~/.zshrc` 或专用 shell wrapper）。
+
 ## ✦ 配置
 
 ```bash
