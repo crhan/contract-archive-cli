@@ -13,6 +13,9 @@ mineru 3.x CLI 的输出目录约定（注意：和 2.x 不同！）：
 
 content_list.json 元素的 bbox 是 **归一化到 0-1000 整数**，不是 PDF point。
 我们把它换算回 PDF point（× page_width_pt / 1000）以与其他 pipeline 对齐。
+
+历史：原本与 DashScope/PaddleOCR pipeline 共享一个 BasePipeline 抽象基类。
+重构后唯一具体实现，抽象基类已 inline 到本文件，避免一抽象一具体的反模式。
 """
 from __future__ import annotations
 
@@ -21,11 +24,17 @@ import logging
 import os
 import shutil
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
 from ..schemas import (
     BBox,
+    FILE_LAYOUT,
+    FILE_MARKDOWN,
+    FILE_PIPELINE_META,
+    FILE_RAW_TEXT,
+    FILE_STRUCTURED,
     LayoutBlock,
     PipelineMeta,
     PipelineOutput,
@@ -34,8 +43,7 @@ from ..schemas import (
     StructuredDocument,
     Table,
 )
-from ..utils import render_pdf_to_images
-from .base import BasePipeline
+from ..utils import describe_device, render_pdf_to_images, select_device
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +67,22 @@ _MINERU_TYPE_MAP = {
 }
 
 
-class MinerUPipeline(BasePipeline):
+# 已知 pipeline 产物文件，清空目录时只删这些 + 这些子目录，绝不 rmtree 未知内容
+_OWNED_FILES = {
+    FILE_RAW_TEXT,
+    FILE_MARKDOWN,
+    FILE_STRUCTURED,
+    FILE_LAYOUT,
+    FILE_PIPELINE_META,
+    "extraction_result.json",
+    "extraction_confidence.json",
+}
+_OWNED_DIRS = {PREVIEW_DIR, "_mineru_raw"}
+
+
+class MinerUPipeline:
+    """MinerU 3.x PDF 解析。单一职责：run(pdf, out_dir) → PipelineOutput。"""
+
     name = "mineru"
 
     def __init__(
@@ -68,7 +91,8 @@ class MinerUPipeline(BasePipeline):
         backend: str | None = None,
         dpi: int = 200,
     ) -> None:
-        super().__init__(device=device)
+        self.device = select_device(device)
+        logger.info("[%s] device = %s", self.name, describe_device(self.device))
         # MinerU 3.x backend 合法值（实测）：
         #   pipeline                 CPU 兜底，兼容性最好
         #   hybrid-auto-engine       3.x 默认，混合方案
@@ -79,8 +103,51 @@ class MinerUPipeline(BasePipeline):
         self.backend = backend or ("vlm-auto-engine" if self.device == "cuda" else "pipeline")
         self.dpi = dpi
 
+    # ---------- 入口 ----------
+    def run(self, pdf_path: str | Path, out_dir: str | Path) -> PipelineOutput:
+        """
+        统一入口：
+        - 清理本 pipeline 写过的旧产物（白名单，绝不递归删未知内容）
+        - 计时 + 调 _process
+        - 按统一文件名落盘
+        """
+        pdf_path = Path(pdf_path).resolve()
+        out_dir = Path(out_dir).resolve()
+        if out_dir.exists():
+            for item in out_dir.iterdir():
+                if item.is_file() and item.name in _OWNED_FILES:
+                    item.unlink()
+                elif item.is_dir() and item.name in _OWNED_DIRS:
+                    shutil.rmtree(item)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / PREVIEW_DIR).mkdir(exist_ok=True)
+
+        started = datetime.now()
+        t0 = time.perf_counter()
+        try:
+            result = self._process(pdf_path, out_dir)
+        except Exception as e:
+            logger.exception("[%s] pipeline failed", self.name)
+            _dump_failure(out_dir, pdf_path, started, str(e))
+            raise
+        duration = time.perf_counter() - t0
+        finished = datetime.now()
+
+        result.meta.started_at = started
+        result.meta.finished_at = finished
+        result.meta.duration_seconds = duration
+        if not result.meta.source_pdf:
+            result.meta.source_pdf = str(pdf_path)
+        if not result.meta.device:
+            result.meta.device = self.device
+
+        _dump(out_dir, result)
+        logger.info("[%s] done in %.2fs, output=%s", self.name, duration, out_dir)
+        return result
+
+    # ---------- 实现 ----------
     def _process(self, pdf_path: Path, work_dir: Path) -> PipelineOutput:
-        # 1) preview images（独立于 MinerU 内部产物，便于横向比较）
+        # 1) preview images（独立于 MinerU 内部产物，供下游审阅）
         preview_dir = work_dir / PREVIEW_DIR
         pages = render_pdf_to_images(pdf_path, preview_dir, dpi=self.dpi)
 
@@ -165,7 +232,7 @@ class MinerUPipeline(BasePipeline):
             notes=f"backend={self.backend}, model_source=modelscope",
         )
 
-        # 5) 复制 MinerU 自己渲染的 images 到 preview 目录（不覆盖 PyMuPDF 渲染图）
+        # 5) 复制 MinerU 自己渲染的 images 到 preview 目录
         mineru_images = result_dir / "images"
         if mineru_images.exists():
             dst = preview_dir / "mineru_images"
@@ -181,6 +248,50 @@ class MinerUPipeline(BasePipeline):
             structured=structured,
             preview_image_paths=[str(p.image_path) for p in pages],
         )
+
+
+# ---------- 落盘工具 ----------
+
+
+def _dump(out_dir: Path, result: PipelineOutput) -> None:
+    (out_dir / FILE_RAW_TEXT).write_text(result.raw_text, encoding="utf-8")
+    (out_dir / FILE_MARKDOWN).write_text(result.markdown, encoding="utf-8")
+    (out_dir / FILE_STRUCTURED).write_text(
+        result.structured.model_dump_json(indent=2, exclude_none=False),
+        encoding="utf-8",
+    )
+    (out_dir / FILE_LAYOUT).write_text(
+        json.dumps(
+            [b.model_dump() for b in result.layout],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (out_dir / FILE_PIPELINE_META).write_text(
+        result.meta.model_dump_json(indent=2),
+        encoding="utf-8",
+    )
+
+
+def _dump_failure(
+    out_dir: Path, pdf_path: Path, started: datetime, err: str
+) -> None:
+    """失败时仍写一份 meta，附错误信息。"""
+    meta = PipelineMeta(
+        pipeline_name="mineru",
+        source_pdf=str(pdf_path),
+        started_at=started,
+        finished_at=datetime.now(),
+        duration_seconds=(datetime.now() - started).total_seconds(),
+        notes=f"FAILED: {err}",
+    )
+    (out_dir / FILE_PIPELINE_META).write_text(
+        meta.model_dump_json(indent=2), encoding="utf-8"
+    )
+
+
+# ---------- 解析 / 归一化 ----------
 
 
 def _locate_mineru_result(out_root: Path, stem: str) -> Path | None:

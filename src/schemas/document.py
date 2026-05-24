@@ -118,7 +118,7 @@ class StructuredDocument(BaseModel):
 
 
 class PipelineMeta(BaseModel):
-    pipeline_name: Literal["dashscope", "paddleocr", "mineru"]
+    pipeline_name: Literal["mineru"]
     pipeline_version: str = ""
     model: str = ""
     device: str = "cpu"

@@ -25,30 +25,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# DashScope (阿里百炼) 那一路 —— 纯 API，最轻量
-dashscope = [
-    "dashscope>=1.22.2",
-]
-
-# PaddleOCR + PP-StructureV3 那一路
-# - macOS arm64 / Linux x86 CPU 默认走 paddlepaddle (cpu wheel)
-# - 切到 RTX 5080 时在 .env 设 PADDLE_GPU=1，并改用 paddlepaddle-gpu (cu128 社区 wheel)
-paddleocr = [
-    "paddlepaddle>=3.0,<4.0",
-    "paddleocr[all]>=3.0",
-]
-
-# MinerU 3.x
-# 包含 CPU 兜底 backend (-b pipeline)；GPU 时用 -b vlm-transformers 自动启用 torch+cuda
+# MinerU 3.x —— 体积大（>1GB 模型），按需 `uv sync --extra mineru` 安装
 mineru = [
-    "mineru[core]>=3.1,<4.0",
-]
-
-# 一键全装（开发联调用）
-all = [
-    "dashscope>=1.22.2",
-    "paddlepaddle>=3.0,<4.0",
-    "paddleocr[all]>=3.0",
     "mineru[core]>=3.1,<4.0",
 ]
 
@@ -71,9 +49,6 @@ packages = ["src"]
 
 # ===== uv 配置 =====
 [tool.uv]
-# 多索引时允许从任一索引选最佳版本（避免 paddle 私源覆盖 fastapi 等）
-index-strategy = "unsafe-best-match"
-
 # 主索引：阿里云（实测 148KB/s，比清华源 19KB/s 快 6-8 倍）
 # 境外用户：把下面这个 default index 删掉即可走 PyPI 官方
 # 注意：不挂 fallback 镜像——腾讯源实测会偶发 567，引入随机失败
@@ -81,15 +56,6 @@ index-strategy = "unsafe-best-match"
 name = "aliyun"
 url = "https://mirrors.aliyun.com/pypi/simple/"
 default = true
-
-# paddlepaddle 私源（仅显式指定的包从这里取）
-[[tool.uv.index]]
-name = "paddle"
-url = "https://www.paddlepaddle.org.cn/packages/stable/cpu/"
-explicit = true
-
-[tool.uv.sources]
-paddlepaddle = { index = "paddle" }
 
 [tool.ruff]
 line-length = 100
