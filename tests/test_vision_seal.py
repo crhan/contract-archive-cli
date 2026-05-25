@@ -4,7 +4,9 @@
 """
 from __future__ import annotations
 
-from contract_archive.extraction.vision_seal import _issues_from_vision
+from pathlib import Path
+
+from contract_archive.extraction.vision_seal import _issues_from_vision, _signature_evidence
 
 
 def test_only_missing_reported():
@@ -52,3 +54,15 @@ def test_robust_against_garbage():
     assert _issues_from_vision({"units": "bad"}) == []
     # 无 role 的 party 跳过，不误报
     assert _issues_from_vision({"units": [{"parties": [{"has_seal": False}]}]}) == []
+
+
+def test_signature_evidence_from_page_names():
+    imgs = [Path("/x/preview_images/page_008.png"), Path("/x/preview_images/page_009.png")]
+    assert _signature_evidence(imgs) == "据落款页图：第 8、9 页"
+
+
+def test_issue_carries_evidence():
+    parsed = {"units": [{"agreement": "主协议", "parties": [
+        {"role": "甲方", "has_seal": False, "has_signature": False}]}]}
+    issues = _issues_from_vision(parsed, "据落款页图：第 8 页")
+    assert issues[0].evidence == "据落款页图：第 8 页"

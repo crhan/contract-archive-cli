@@ -115,8 +115,8 @@ def _call_vl(
     return resp.choices[0].message.content
 
 
-def _issues_from_vision(parsed: dict) -> list[CompletenessIssue]:
-    """VL 结果 → 签章缺陷 issues：某方既无章又无签字即为缺。只列缺的。"""
+def _issues_from_vision(parsed: dict, evidence: str = "") -> list[CompletenessIssue]:
+    """VL 结果 → 签章缺陷 issues：某方既无章又无签字即为缺。只列缺的。evidence=落款页出处。"""
     issues: list[CompletenessIssue] = []
     for unit in parsed.get("units") or []:
         if not isinstance(unit, dict):
@@ -133,8 +133,15 @@ def _issues_from_vision(parsed: dict) -> list[CompletenessIssue]:
                     item=f"{agreement}·{role}签章",
                     category="signature",
                     detail="落款页图像显示该处空白，无红章也无手写签字",
+                    evidence=evidence,
                 ))
     return issues
+
+
+def _signature_evidence(images: list[Path]) -> str:
+    """据落款页图文件名（page_NNN.png）拼出处定位，如 '据落款页图：第 8、9 页'。"""
+    nums = [p.stem.replace("page_", "").lstrip("0") or "0" for p in images]
+    return f"据落款页图：第 {'、'.join(nums)} 页"
 
 
 def augment_completeness_with_vision(env: DocumentExtraction, mineru_dir: Path) -> bool:
@@ -163,7 +170,7 @@ def augment_completeness_with_vision(env: DocumentExtraction, mineru_dir: Path) 
         logger.warning("VL 签章响应无法解析为 JSON: %s", text[:200])
         return False
 
-    sig_issues = _issues_from_vision(parsed)
+    sig_issues = _issues_from_vision(parsed, _signature_evidence(images))
     # 保留文本判出的要素(field)缺陷，签章(signature)缺陷整体换成 VL 看图的结果。
     field_issues = [i for i in env.completeness.issues if i.category != "signature"] if env.completeness else []
     all_issues = field_issues + sig_issues

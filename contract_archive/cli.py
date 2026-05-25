@@ -659,12 +659,15 @@ def show(
         if status == "complete":
             table.add_row("[bold]完整性[/bold]", "[green]✓ 要素与签章齐全[/green]")
         elif status == "incomplete":
-            lines = ["[red]⚠ 疑似不完整[/red] [dim](红章 OCR 不可靠，请人工复核)[/dim]"]
+            lines = ["[red]⚠ 疑似不完整[/red] [dim](签章经落款页核查；要素据原文，可翻回核对)[/dim]"]
             for it in issues:
                 cat = "签章" if it.get("category") == "signature" else "要素"
                 detail = it.get("detail") or ""
                 tail = f" — [dim]{detail}[/dim]" if detail else ""
                 lines.append(f"• [{cat}] {it.get('item', '')}{tail}")
+                evidence = it.get("evidence") or ""
+                if evidence:
+                    lines.append(f"    [dim]↳ 出处：{evidence}[/dim]")
             table.add_row("[bold]完整性[/bold]", "\n".join(lines))
         else:  # unknown
             table.add_row("[bold]完整性[/bold]", "[yellow]? 信息不足，未能判定[/yellow]")

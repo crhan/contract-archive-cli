@@ -66,7 +66,7 @@ JSON 字段定义：
   ],
   "completeness": {{
     "status": "complete|incomplete|unknown",
-    "issues": [{{"item": "缺失要素名（缺签章请标明所属协议，如 主协议·甲方签章）", "category": "signature|field", "detail": "缺在哪/证据"}}]
+    "issues": [{{"item": "缺失要素名（缺签章请标明所属协议，如 主协议·甲方签章）", "category": "signature|field", "detail": "缺什么", "evidence": "出处：第X页 + 原文留白片段 + 条款号，让人能翻回核对"}}]
   }}
 }}
 
@@ -109,7 +109,11 @@ JSON 字段定义：
       把"本就不该有"的判成缺失是错误。
   (2) 逐项核查实际是否齐全，缺的或留空白占位的（如"___年__月__日""甲方（盖章）："后空白）
       列进 issues。每条：item=要素名；category=signature(签章/签字类) 或 field(其他要素)；
-      detail=缺在哪+证据片段。
+      detail=缺什么（简述）；evidence=**出处定位**——注明页码（据每页页脚"第X页共Y页"）+
+      留白处的原文片段 + 条款号，让人能翻回原文核对。**定位不出出处的缺陷不要报**（宁缺毋滥）。
+  (3) 多选一条款不算缺：若某要素是"多选一"（典型：付款方式＝一次性付款 或 银行贷款分期），
+      当事人实际选用并填好其中一种即视为完整，**未选用方式的留白是正常的、不算缺失**，
+      不要报。只核查当事人实际选用方式内部的留白。
   签章核查要点：本文档每个协议单元——主协议 + 每一份 sub_agreements——都有自己的落款区，
   必须**逐个**核查各自"X方（盖章/签字）："处后面是否有实际印章文字或签名；空着=疑似缺。
   缺章的 issue.item 必须标明所属协议，如"主协议·甲方签章""补充协议·甲方签章"。
@@ -299,6 +303,7 @@ def _coerce_completeness(raw: Any, doc_type: str) -> Optional[Completeness]:
             item=name,
             category=category,
             detail=str(item.get("detail") or "").strip(),
+            evidence=str(item.get("evidence") or "").strip(),
         ))
     # 有缺项却被 LLM 标 complete：以缺项为准纠正（issues 是更硬的证据）。
     if issues and status == "complete":

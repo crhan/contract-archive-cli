@@ -233,7 +233,10 @@ class CompletenessIssue(BaseModel):
 
     item: str                                          # 缺失/异常要素，如"甲方签章""签订日期""转让价款"
     category: Literal["signature", "field"] = "field"  # signature=签章类，field=要素类
-    detail: str = ""                                   # 简述+证据位置，如"落款'甲方（盖章）'处空白无章"
+    detail: str = ""                                   # 缺什么（简述），如"落款处空白无章"
+    # 出处定位：页码 + 原文片段（签章类带落款页码），让人能翻回原文核对。
+    # 审计性结论的底线——不可追溯的缺陷不合格，宁可不报。
+    evidence: str = ""
 
 
 class Completeness(BaseModel):
