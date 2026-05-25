@@ -40,6 +40,7 @@ from ..schemas import (
     DocumentExtraction,
     ExtractionConfidence,
 )
+from .party_registry import PartyRegistry
 from .paths import ArchivePaths, SHA_SHORT_LEN, link_or_copy, safe_rmtree, sha256_of_file
 from .repository import (
     contract_to_envelope,
@@ -266,6 +267,22 @@ def ingest_pdf(
                     log_handle.write("[page-fix] 出处页码已据 content_list 校正\n")
             except Exception as e:  # noqa: BLE001 — 页码校正失败不能中断入库
                 log_handle.write(f"[page-fix] 跳过（异常）: {e}\n")
+
+            # ---- 2.7 身份基本信息核对：首见入库、再见校对（known_parties 基准库）----
+            # 把抽到的 person_identities（精确到人的身份证/电话/银行账号/开户行…）与
+            # 跨文档基准库比对：首次见到的录入为基准，再见到不一致即报 identity 缺陷。
+            try:
+                registry = PartyRegistry.load(paths.known_parties_path)
+                id_issues = registry.reconcile(envelope.person_identities, sha)
+                if registry.dirty:
+                    registry.save()
+                envelope.identity_issues = id_issues
+                if id_issues:
+                    log_handle.write(f"[identity] 身份核对：{len(id_issues)} 项与基准不一致\n")
+                elif envelope.person_identities:
+                    log_handle.write("[identity] 身份核对：与基准一致（或首见已入库）\n")
+            except Exception as e:  # noqa: BLE001 — 核对失败不能中断入库
+                log_handle.write(f"[identity] 跳过（异常）: {e}\n")
 
         # ---- 3. extracted.json 落盘（写通用信封；即使 partial 也写空对象，便于后续 extract 复跑） ----
         (tmp_doc_dir / FILE_EXTRACTION).write_text(
