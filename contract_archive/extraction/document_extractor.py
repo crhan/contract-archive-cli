@@ -17,6 +17,8 @@ from typing import Any, Optional
 
 from ..schemas import (
     DOC_TYPES,
+    Completeness,
+    CompletenessIssue,
     DocumentExtraction,
     LabeledAmount,
     LabeledDate,
@@ -56,7 +58,11 @@ JSON 字段定义：
   "seals": [{{"owner": "盖章主体全称或 null", "seal_type": "公章/合同专用章/财务专用章/发票专用章 等或 null", "raw_text": "印章上识别到的原文"}}],
   "obligations": [
     {{"actor": "party_a|party_b|both", "action": "动宾短语", "deadline": "YYYY-MM-DD 或 null", "evidence": "原文片段"}}
-  ]
+  ],
+  "completeness": {{
+    "status": "complete|incomplete|unknown",
+    "issues": [{{"item": "缺失要素名", "category": "signature|field", "detail": "缺在哪/证据"}}]
+  }}
 }}
 
 字段抽取要点：
@@ -81,6 +87,19 @@ JSON 字段定义：
   · 文档若没有任何印章痕迹，seals 填空数组 []。
 - obligations 仅当文档含明确"谁该在何时做什么"的待办/义务（合同尤甚）；
   证明、发票等通常为空数组。actor 只能是 party_a|party_b|both。
+- completeness 是合同完整性核查，**仅当 doc_type 为"合同协议"时填**，其他类型一律 null
+  （证明/发票没有"甲乙双方签章齐不齐"的概念）。两步判断：
+  (1) 先据**这份合同的类型**判断它应具备哪些要素——双方主体、标的物、价款/金额、
+      签订日期、双方签章等。要素清单因类型而异，自行判断，**不要套死清单**：
+      车位转让/买卖等一次性合同没有到期日属正常，框架协议没有具体金额属正常，
+      把"本就不该有"的判成缺失是错误。
+  (2) 逐项核查实际是否齐全，缺的或留空白占位的（如"___年__月__日""甲方（盖章）："后空白）
+      列进 issues。每条：item=要素名；category=signature(签章/签字类) 或 field(其他要素)；
+      detail=缺在哪+证据片段。
+  签章核查要点：看落款区"X方（盖章/签字）："处后面是否有实际印章文字或签名；空着=疑似缺。
+  **红章 OCR 经常读不出（淡红/模糊）**，所以凡判定缺章，detail 里务必注明"疑似，可能 OCR
+  漏识，需人工复核"——不要把"没读到章"当成"确认没盖章"。
+  status：要素与签章全齐=complete；存在任一缺项=incomplete；信息不足无法判断=unknown。
 """
 
 
@@ -240,6 +259,38 @@ def _coerce_seals(raw: Any) -> list[Seal]:
     return out
 
 
+def _coerce_completeness(raw: Any, doc_type: str) -> Optional[Completeness]:
+    """
+    LLM completeness 字段 → Completeness。仅合同协议保留；其他类型返回 None
+    （即便 LLM 误填了也丢弃，避免给证明/发票安上无意义的"缺签章"）。
+    缺字段/非法结构时返回 None，不硬塞。
+    """
+    if doc_type != "合同协议" or not isinstance(raw, dict):
+        return None
+    status = str(raw.get("status", "")).strip()
+    if status not in ("complete", "incomplete", "unknown"):
+        status = "unknown"
+    issues: list[CompletenessIssue] = []
+    for item in raw.get("issues") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("item") or "").strip()
+        if not name:
+            continue
+        category = str(item.get("category") or "").strip()
+        if category not in ("signature", "field"):
+            category = "field"
+        issues.append(CompletenessIssue(
+            item=name,
+            category=category,
+            detail=str(item.get("detail") or "").strip(),
+        ))
+    # 有缺项却被 LLM 标 complete：以缺项为准纠正（issues 是更硬的证据）。
+    if issues and status == "complete":
+        status = "incomplete"
+    return Completeness(status=status, issues=issues)
+
+
 def extract_document(
     document_text: str,
     llm_enabled: bool = True,
@@ -288,5 +339,6 @@ def extract_document(
         seals=_coerce_seals(raw.get("seals")),
         fields=_coerce_labeled_values(raw.get("fields")),
         obligations=coerce_obligations(raw.get("obligations")),
+        completeness=_coerce_completeness(raw.get("completeness"), doc_type),
         raw_evidence={},
     )

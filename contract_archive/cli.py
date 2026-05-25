@@ -3,7 +3,7 @@
 
 子命令：
   ingest <path>         扫描 PDF 文件/目录，跑 MinerU + 抽取，结果入库
-  list                  列出档案；status 颜色标注，支持排序
+  list                  列出档案；status 颜色标注，支持排序；--incomplete 只列疑似不完整合同
   search                按字段过滤（合同名/甲乙方/金额/日期/自动续约/风险）
   show <ident>          查看单条详情（id 或 sha 前缀 >=4 字符）
   extract <id>          只重跑抽取（不重跑 MinerU），适合 partial 修复 / 改 prompt 后重抽
@@ -52,6 +52,7 @@ from .archive import (
 )
 from .pipelines import MinerUPipeline
 from .cli_render import (
+    completeness_mark,
     display_amount,
     ingest_result_to_dict,
     local_time,
@@ -339,6 +340,9 @@ def list_cmd(
     doc_type: Optional[DocType] = typer.Option(
         None, "--type", help="按文档类型过滤"
     ),
+    incomplete: bool = typer.Option(
+        False, "--incomplete", help="只列疑似不完整的合同（缺签章/缺要素）"
+    ),
     fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
 ) -> None:
     """列出档案库内已索引文档。"""
@@ -352,6 +356,7 @@ def list_cmd(
         order_by=order_by.value,
         status=status.value if status else None,
         doc_type=doc_type.value if doc_type else None,
+        incomplete=incomplete,
     )
     conn.close()
 
@@ -367,6 +372,7 @@ def list_cmd(
     table.add_column("id", style="cyan", justify="right")
     table.add_column("status")
     table.add_column("type", style="magenta")
+    table.add_column("完整")  # 合同完整性：⚠ 疑似缺 / ✓ / -（非合同）
     table.add_column("title", overflow="fold")
     table.add_column("主体", overflow="fold")  # 区分同类文档（谁的/和谁签的）
     table.add_column("date")
@@ -377,6 +383,7 @@ def list_cmd(
             str(r.id),
             status_color(r.status),
             r.doc_type or "-",
+            completeness_mark(r),
             r.title or r.contract_name or "-",
             subject_of(r),
             r.primary_date or "-",
@@ -611,6 +618,24 @@ def show(
             raw = s.get("raw_text") or ""
             lines.append(f"• {head}  [dim]{raw}[/dim]" if raw else f"• {head}")
         table.add_row("[bold]印章[/bold]", "\n".join(lines))
+
+    # 完整性核查：仅合同有此块（非合同 details 里 completeness 为 None）。
+    comp = row.details().get("completeness")
+    if comp:
+        status = comp.get("status")
+        issues = comp.get("issues") or []
+        if status == "complete":
+            table.add_row("[bold]完整性[/bold]", "[green]✓ 要素与签章齐全[/green]")
+        elif status == "incomplete":
+            lines = ["[red]⚠ 疑似不完整[/red] [dim](红章 OCR 不可靠，请人工复核)[/dim]"]
+            for it in issues:
+                cat = "签章" if it.get("category") == "signature" else "要素"
+                detail = it.get("detail") or ""
+                tail = f" — [dim]{detail}[/dim]" if detail else ""
+                lines.append(f"• [{cat}] {it.get('item', '')}{tail}")
+            table.add_row("[bold]完整性[/bold]", "\n".join(lines))
+        else:  # unknown
+            table.add_row("[bold]完整性[/bold]", "[yellow]? 信息不足，未能判定[/yellow]")
 
     table.add_row(
         "overall_confidence",

@@ -62,6 +62,9 @@ class DocumentRow:
     expire_date: Optional[str]
     auto_renewal: Optional[int]
     overall_confidence: Optional[float]
+    # 完整性核查状态（仅合同协议判，其余 NULL）。详情在 details_json.completeness，
+    # 此列只为 list --incomplete 的 WHERE 过滤。默认 None 保证旧构造点不破。
+    completeness_status: Optional[str] = None
     risk_clauses: list[str] = field(default_factory=list)
     obligations: list[ObligationItem] = field(default_factory=list)
 
@@ -97,6 +100,11 @@ def _amount_to_cents(value: Optional[float]) -> Optional[int]:
     if value is None:
         return None
     return int(round(value * 100))
+
+
+def _completeness_status(env: DocumentExtraction) -> Optional[str]:
+    """envelope.completeness.status → 可索引列值；无核查（非合同/未判）返回 None。"""
+    return env.completeness.status if env.completeness else None
 
 
 def contract_to_envelope(ext: ContractExtraction) -> DocumentExtraction:
@@ -157,6 +165,7 @@ def _row_to_document(
         expire_date=row["expire_date"],
         auto_renewal=row["auto_renewal"],
         overall_confidence=row["overall_confidence"],
+        completeness_status=row["completeness_status"],
         risk_clauses=risks,
         obligations=obligations,
     )
@@ -369,8 +378,9 @@ def list_documents(
     order_by: str = "ingested_at",
     status: Optional[str] = None,
     doc_type: Optional[str] = None,
+    incomplete: bool = False,
 ) -> list[DocumentRow]:
-    """list 命令实现。status / doc_type=None 表示不过滤。"""
+    """list 命令实现。status / doc_type=None 表示不过滤；incomplete=True 只列疑似不完整。"""
     allowed_order = {
         "ingested_at", "sign_date", "expire_date", "amount_cents",
         "primary_date", "primary_amount_cents",
@@ -386,6 +396,8 @@ def list_documents(
     if doc_type:
         where.append("doc_type = ?")
         params.append(doc_type)
+    if incomplete:
+        where.append("completeness_status = 'incomplete'")
     sql = "SELECT * FROM documents"
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -571,8 +583,8 @@ def insert_document(
               contract_name, party_a, party_b,
               amount_text, amount_cents,
               sign_date, expire_date, auto_renewal,
-              overall_confidence
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              overall_confidence, completeness_status
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(sha256) DO NOTHING
             """,
             (
@@ -599,6 +611,7 @@ def insert_document(
                 ext.expire_date,
                 None if ext.auto_renewal is None else int(ext.auto_renewal),
                 conf.overall,
+                _completeness_status(env),
             ),
         )
         if cursor.rowcount == 0:
@@ -640,7 +653,7 @@ def update_extraction(
               contract_name = ?, party_a = ?, party_b = ?,
               amount_text = ?, amount_cents = ?,
               sign_date = ?, expire_date = ?, auto_renewal = ?,
-              overall_confidence = ?
+              overall_confidence = ?, completeness_status = ?
             WHERE id = ?
             """,
             (
@@ -662,6 +675,7 @@ def update_extraction(
                 ext.expire_date,
                 None if ext.auto_renewal is None else int(ext.auto_renewal),
                 confidence.overall,
+                _completeness_status(env),
                 doc_id,
             ),
         )
@@ -707,7 +721,7 @@ def replace_document(
               contract_name = ?, party_a = ?, party_b = ?,
               amount_text = ?, amount_cents = ?,
               sign_date = ?, expire_date = ?, auto_renewal = ?,
-              overall_confidence = ?
+              overall_confidence = ?, completeness_status = ?
             WHERE id = ?
             """,
             (
@@ -732,6 +746,7 @@ def replace_document(
                 ext.expire_date,
                 None if ext.auto_renewal is None else int(ext.auto_renewal),
                 confidence.overall,
+                _completeness_status(env),
                 doc_id,
             ),
         )

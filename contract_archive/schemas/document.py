@@ -228,6 +228,33 @@ class Seal(BaseModel):
     seal_type: Optional[str] = None  # "公章" / "合同专用章" / "财务专用章" / "发票专用章" ...
 
 
+class CompletenessIssue(BaseModel):
+    """单条完整性缺陷（缺签章 / 缺要素）。"""
+
+    item: str                                          # 缺失/异常要素，如"甲方签章""签订日期""转让价款"
+    category: Literal["signature", "field"] = "field"  # signature=签章类，field=要素类
+    detail: str = ""                                   # 简述+证据位置，如"落款'甲方（盖章）'处空白无章"
+
+
+class Completeness(BaseModel):
+    """
+    合同完整性核查（仅合同协议适用，LLM 判定）。
+
+    两类缺陷：
+      - signature：落款区应盖章/签字的主体空着（用户最初的痛点：甲方未签章）
+      - field：该合同类型应具备的要素缺失（双方/标的/价款/签订日 等）
+
+    两条诚实底线：
+      1. 红章 OCR 不可靠——检测不到章可能是真没盖，也可能是淡红/模糊没被识别。
+         故缺章一律表述为"疑似"、供人工复核，不作为终判。
+      2. 必填要素由 LLM 据合同类型自行判断（车位转让无到期日、框架协议无具体金额
+         都属正常），不套死清单——把"本就不该有"的当缺失是误报之源。
+    """
+
+    status: Literal["complete", "incomplete", "unknown"] = "unknown"
+    issues: list[CompletenessIssue] = Field(default_factory=list)
+
+
 # 粗粒度规范类型（用于 --type 过滤）。LLM 从中择一，更细的归类放进 title/fields。
 DOC_TYPES = ("合同协议", "证明", "发票票据", "报告", "证件", "其他")
 DocType = str  # 存库用 str（保持柔性，不上 Literal 以免 LLM 新类型被卡死）
@@ -257,6 +284,9 @@ class DocumentExtraction(BaseModel):
     seals: list[Seal] = Field(default_factory=list)   # 文档上的印章（有则可验真/索引）
     fields: list[LabeledValue] = Field(default_factory=list)
     obligations: list[ObligationItem] = Field(default_factory=list)
+    # 完整性核查：仅合同协议填，其他类型 None
+    # （"该不该有甲乙签章/要素齐不齐"对证明/发票无意义，强判只会制造噪声）。
+    completeness: Optional[Completeness] = None
     raw_evidence: dict[str, str] = Field(
         default_factory=dict, description="字段→原文证据片段，用于人工抽检"
     )
