@@ -384,7 +384,7 @@ def list_cmd(
             _subject_of(r),
             r.primary_date or "-",
             _display_amount(r),
-            r.ingested_at[:10],
+            _local_time(r.ingested_at)[:10],  # 本地日期，与 show 一致
         )
     console.print(table)
 
