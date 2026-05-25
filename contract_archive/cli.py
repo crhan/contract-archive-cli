@@ -361,7 +361,11 @@ def list_cmd(
         print(_json.dumps([_row_to_dict(r) for r in rows], ensure_ascii=False, indent=2))
         return
 
-    table = Table(title=f"Archive · {paths.root} ({len(rows)} of total)")
+    table = Table(
+        title=f"Archive · {paths.root} ({len(rows)} of total)",
+        caption="amount 带 * 为计算合计（如收入证明=年税前+股权），无 * 为抽取的主金额",
+        caption_justify="left",
+    )
     table.add_column("id", style="cyan", justify="right")
     table.add_column("status")
     table.add_column("type", style="magenta")
@@ -371,7 +375,6 @@ def list_cmd(
     table.add_column("amount", justify="right")
     table.add_column("ingested", style="dim")
     for r in rows:
-        amount = f"¥{r.primary_amount_value:,.0f}" if r.primary_amount_value is not None else "-"
         table.add_row(
             str(r.id),
             _status_color(r.status),
@@ -379,10 +382,31 @@ def list_cmd(
             r.title or r.contract_name or "-",
             _subject_of(r),
             r.primary_date or "-",
-            amount,
+            _display_amount(r),
             r.ingested_at[:10],
         )
     console.print(table)
+
+
+def _display_amount(r) -> str:
+    """
+    list 金额列：有计算合计（computed_total_value）优先显示并标 *，
+    否则回退抽取的主金额（primary_amount_value），都没有则 '-'。
+    """
+    total = r.details().get("computed_total_value")
+    if isinstance(total, (int, float)):
+        return f"¥{total:,.0f}[cyan]*[/cyan]"
+    if r.primary_amount_value is not None:
+        return f"¥{r.primary_amount_value:,.0f}"
+    return "-"
+
+
+def _period_str(a: dict) -> str:
+    """金额覆盖区间的展示标注，如 ' [2025-01-01~2025-12-31]'；无区间返回空串。"""
+    start, end = a.get("period_start"), a.get("period_end")
+    if not start and not end:
+        return ""
+    return f" [dim][{start or '?'}~{end or '?'}][/dim]"
 
 
 def _subject_of(r) -> str:
@@ -411,6 +435,7 @@ def _row_to_dict(r) -> dict:
         "summary": r.summary,
         "primary_date": r.primary_date,
         "primary_amount_value": r.primary_amount_value,
+        "computed_total_value": r.details().get("computed_total_value"),
         "details": r.details(),
         "contract_name": r.contract_name,
         "party_a": r.party_a,
@@ -608,8 +633,17 @@ def show(
             for a in amounts:
                 v = a.get("value")
                 vs = f"（¥{v:,.2f}）" if isinstance(v, (int, float)) else ""
-                lines.append(f"• {a.get('label', '')}: {a.get('text', '')}{vs}")
+                mark = " [cyan]✓计入合计[/cyan]" if a.get("is_total_component") else ""
+                lines.append(
+                    f"• {a.get('label', '')}: {a.get('text', '')}{vs}{_period_str(a)}{mark}"
+                )
             table.add_row("金额", "\n".join(lines))
+        total = det.get("computed_total_value")
+        if isinstance(total, (int, float)):
+            table.add_row(
+                "[bold]合计收入(计算)[/bold]",
+                f"[cyan]¥{total:,.2f}[/cyan] [dim](上方标✓项之和，非抽取值)[/dim]",
+            )
         key_dates = det.get("key_dates") or []
         if key_dates:
             table.add_row(

@@ -201,6 +201,12 @@ class LabeledAmount(BaseModel):
     label: str                      # "年收入" / "月均收入" / "公积金(个人)" / "合同金额"
     text: str                       # 原文（含大写/币种）
     value: Optional[float] = None   # 归一化数值（人民币元）
+    # 是否计入文档主合计：收入证明的"年度税前收入""年度股权收益"=True；
+    # "月均收入""公积金"等不该重复累加的=False。供 computed_total_value 求和。
+    is_total_component: bool = False
+    # 该金额覆盖的时间区间（ISO）。如"上年度""近12个月"由 LLM 据出具日解析为具体起止。
+    period_start: Optional[str] = None
+    period_end: Optional[str] = None
 
 
 class LabeledDate(BaseModel):
@@ -231,6 +237,9 @@ class DocumentExtraction(BaseModel):
     primary_date: Optional[str] = None      # 主日期 ISO（合同=签订日，证明=出具日）
     primary_amount_text: Optional[str] = None
     primary_amount_value: Optional[float] = None
+    # 计算值（非抽取）：amounts 中 is_total_component=True 项之和。
+    # 例：收入证明 = 年度税前收入 + 年度股权收益。无可累加项则为 None。
+    computed_total_value: Optional[float] = None
     key_dates: list[LabeledDate] = Field(default_factory=list)
     amounts: list[LabeledAmount] = Field(default_factory=list)
     fields: list[LabeledValue] = Field(default_factory=list)

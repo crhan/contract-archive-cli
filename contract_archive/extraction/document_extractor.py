@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Optional
 
 from ..schemas import (
     DOC_TYPES,
@@ -50,7 +50,7 @@ JSON 字段定义：
   "primary_date": "该文档最重要的日期 ISO（合同=签订日，证明=出具日，发票=开票日）或 null",
   "primary_amount": "该文档最重要的金额原文（合同=合同额，收入证明=年收入）或 null",
   "key_dates": [{{"label": "出具日/签订日/到期日/入职日 等", "date": "YYYY-MM-DD"}}],
-  "amounts": [{{"label": "年收入/月均收入/公积金(个人)/合同金额 等", "text": "金额原文"}}],
+  "amounts": [{{"label": "年收入/月均收入/公积金(个人)/合同金额 等", "text": "金额原文", "is_total_component": true_or_false, "period_start": "YYYY-MM-DD 或 null", "period_end": "YYYY-MM-DD 或 null"}}],
   "fields": [{{"label": "字段名", "value": "字段值"}}],
   "obligations": [
     {{"actor": "party_a|party_b|both", "action": "动宾短语", "deadline": "YYYY-MM-DD 或 null", "evidence": "原文片段"}}
@@ -63,7 +63,16 @@ JSON 字段定义：
   · 发票 → 发票号、税号、开票方、购买方、税额
   · 证件 → 证件号、有效期、签发机关
   把不属于 parties/amounts/key_dates 的有价值信息都放进 fields。
-- amounts 列出文档里**所有**金额（不止主金额），各带语义 label。
+- amounts 列出文档里**所有**金额（不止主金额），各带语义 label。每个金额还需给出：
+  · is_total_component：该金额是否计入"文档主合计"。收入证明的【年度税前收入】【年度股权应税收益】
+    等一次性年度收入项填 true；【月均收入】【公积金(个人/公司)】等会与年度项重复累加或非收入的填 false。
+    宁缺勿错：拿不准一律 false。
+  · period_start / period_end：该金额覆盖的时间区间（ISO）。把"上年度""近12个月"等相对表述
+    按【出具日】解析成具体起止：
+      - "上年度/上一年度" = 上一个完整自然年（出具于 2026 年 → 2025-01-01 ~ 2025-12-31）
+      - "本年度/今年" = 当年 1月1日 ~ 出具日
+      - "近N个月/过去N个月" = 出具日往前推 N 个月 ~ 出具日
+    文档若明写具体起止日期，以原文为准；无区间概念的金额（如合同总额）两者填 null。
 - obligations 仅当文档含明确"谁该在何时做什么"的待办/义务（合同尤甚）；
   证明、发票等通常为空数组。actor 只能是 party_a|party_b|both。
 """
@@ -138,8 +147,15 @@ def call_llm_document(
     return parsed
 
 
+def _norm_period(raw: Any) -> Optional[str]:
+    """区间端点 → ISO 日期；非字符串/空/无法解析返回 None。"""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return normalize_date(raw.strip())
+
+
 def _coerce_labeled_amounts(raw: Any) -> list[LabeledAmount]:
-    """LLM amounts 数组 → LabeledAmount，顺手算数值。跳过非法项。"""
+    """LLM amounts 数组 → LabeledAmount，顺手算数值、归一化区间日期。跳过非法项。"""
     if not isinstance(raw, list):
         return []
     out: list[LabeledAmount] = []
@@ -150,7 +166,14 @@ def _coerce_labeled_amounts(raw: Any) -> list[LabeledAmount]:
         if not text:
             continue
         label = str(item.get("label", "")).strip() or "金额"
-        out.append(LabeledAmount(label=label, text=text, value=parse_money_value(text)))
+        out.append(LabeledAmount(
+            label=label,
+            text=text,
+            value=parse_money_value(text),
+            is_total_component=bool(item.get("is_total_component", False)),
+            period_start=_norm_period(item.get("period_start")),
+            period_end=_norm_period(item.get("period_end")),
+        ))
     return out
 
 
@@ -222,6 +245,12 @@ def extract_document(
     primary_date = raw.get("primary_date")
     primary_date = normalize_date(primary_date) if isinstance(primary_date, str) and primary_date else None
 
+    amounts = _coerce_labeled_amounts(raw.get("amounts"))
+    # 计算值（非抽取）：把 LLM 标记为 is_total_component 的金额求和。
+    # 由代码做算术（LLM 只负责语义分类），避免 LLM 加法出错。
+    components = [a.value for a in amounts if a.is_total_component and a.value is not None]
+    computed_total = round(sum(components), 2) if components else None
+
     return DocumentExtraction(
         doc_type=doc_type,
         title=(str(raw["title"]).strip() if raw.get("title") else None),
@@ -230,8 +259,9 @@ def extract_document(
         primary_date=primary_date,
         primary_amount_text=primary_amount_text,
         primary_amount_value=parse_money_value(primary_amount_text),
+        computed_total_value=computed_total,
         key_dates=_coerce_labeled_dates(raw.get("key_dates")),
-        amounts=_coerce_labeled_amounts(raw.get("amounts")),
+        amounts=amounts,
         fields=_coerce_labeled_values(raw.get("fields")),
         obligations=coerce_obligations(raw.get("obligations")),
         raw_evidence={},
