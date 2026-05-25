@@ -57,7 +57,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 如果想在任意目录用 `contract-archive`（不必 `cd` 项目目录或 `uv run`），用 `uv tool install`：
 
 ```bash
-UV_LINK_MODE=copy uv tool install --reinstall --with mineru --force /path/to/contract-archive-cli
+# 注意是 ".[mineru]"（项目的 mineru extra = mineru[core]，含 torch 等模型依赖）。
+# 不要用 `--with mineru`——裸 mineru 不带 [core]，装出来的工具跑 ingest 会
+# ModuleNotFoundError: No module named 'torch'。
+UV_LINK_MODE=copy uv tool install --force "/path/to/contract-archive-cli[mineru]"
 ```
 
 `uv tool install` 会在 `~/.local/bin/contract-archive` 装独立 venv（与项目 venv 隔离）。

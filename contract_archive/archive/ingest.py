@@ -146,13 +146,25 @@ def ingest_pdf(
 
     existing_id = find_by_sha(conn, sha)
     if existing_id and not reingest:
-        return IngestResult(
-            pdf_path=pdf_path,
-            sha256=sha,
-            status="skipped",
-            doc_id=existing_id,
-            skipped_reason="sha256 already in archive (use --reingest to force)",
-        )
+        prev = get_document(conn, existing_id)
+        prev_status = prev.status if prev else None
+        if prev_status == "failed":
+            # 上次失败不算"已入库"——重跑就是想重试，自动按 reingest 处理，
+            # 不要 skip 后甩给用户一句"加 --reingest"（UX：见 id=6 排查）。
+            logger.info("sha=%s 上次 ingest 失败，自动重试", sha_short)
+            reingest = True
+        else:
+            if prev_status == "partial":
+                hint = f"（MinerU 已完成、抽取未完成；用 `extract {existing_id}` 只重跑抽取，省去 MinerU）"
+            else:
+                hint = "（已成功入库）"
+            return IngestResult(
+                pdf_path=pdf_path,
+                sha256=sha,
+                status="skipped",
+                doc_id=existing_id,
+                skipped_reason=f"sha256 已在档案库{hint}；要强制重跑整条流程加 --reingest",
+            )
 
     # 在 tmp 跑，全成功后 rename 到 documents/<sha-short>/
     tmp_doc_dir = paths.tmp_dir / sha_short
