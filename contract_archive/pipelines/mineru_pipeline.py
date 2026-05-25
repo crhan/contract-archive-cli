@@ -179,7 +179,7 @@ class MinerUPipeline:
             logger.error("[mineru] stdout=%s", proc.stdout[-2000:])
             logger.error("[mineru] stderr=%s", proc.stderr[-2000:])
             # 把 stderr 尾部带进异常——失败日志/DB error_message 才能看到真实原因，
-            # 不必回头翻控制台（见 id=6 李四收入证明排查）。
+            # 不必回头翻控制台（曾因失败日志没记 stderr 而难定位）。
             tail = (proc.stderr or proc.stdout or "").strip().splitlines()
             reason = tail[-1] if tail else "no stderr captured"
             raise RuntimeError(f"mineru CLI failed (rc={proc.returncode}): {reason}")
