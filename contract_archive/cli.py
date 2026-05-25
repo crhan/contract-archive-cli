@@ -52,6 +52,8 @@ from .archive import (
     search_documents,
     Stats,
 )
+from .archive.paths import sha256_of_file
+from .archive.repository import find_by_sha
 from .pipelines import MinerUPipeline
 from .config import load_settings
 from .cli_config import config_app
@@ -76,6 +78,13 @@ class OutputFormat(str, Enum):
 
     table = "table"
     json = "json"
+
+
+class ProgressFormat(str, Enum):
+    """--progress：none=现状（汇总在末尾）；ndjson=逐文件向 stdout 吐事件流，供 agent 流式消费。"""
+
+    none = "none"
+    ndjson = "ndjson"
 
 
 class OrderBy(str, Enum):
@@ -256,15 +265,42 @@ def ingest(
     fmt: OutputFormat = typer.Option(
         OutputFormat.table, "--format", help="table | json（json 把汇总+逐条结果打到 stdout）"
     ),
+    progress: ProgressFormat = typer.Option(
+        ProgressFormat.none, "--progress",
+        help="none | ndjson（ndjson 逐文件向 stdout 吐 JSON 事件流，供 agent 流式消费）",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="只预览将处理哪些文件 + 预计 API 调用，不跑 MinerU/不调 LLM/不写库",
+    ),
+    max_files: int = typer.Option(
+        0, "--max-files",
+        help="最多处理 N 个文件，超过则报错退出（0=不限；防误喂大目录烧钱，agent 应主动设）",
+    ),
 ) -> None:
     """跑 MinerU + 抽取，把合同入库。"""
     paths = _resolve_archive(archive)
-    paths.ensure()
-    conn = open_archive_db(paths.db_path)
 
     pdfs = discover_pdfs(path)
     if limit > 0:
         pdfs = pdfs[:limit]
+
+    # --dry-run：预览不建库/不跑 MinerU/不调 LLM，提前返回（预览不受 --max-files 限制）。
+    if dry_run:
+        _ingest_dry_run(pdfs, paths, fmt)
+        return
+
+    # --max-files 护栏：超上限直接报错退出，防 agent 误喂大目录烧钱（0=不限，保持兼容）。
+    if max_files > 0 and len(pdfs) > max_files:
+        err_console.print(
+            f"[red]发现 {len(pdfs)} 个 PDF，超过 --max-files {max_files}；"
+            f"确需处理请调大 --max-files[/red]"
+        )
+        raise typer.Exit(2)
+
+    paths.ensure()
+    conn = open_archive_db(paths.db_path)
+
     summary = {"ok": 0, "partial": 0, "failed": 0, "skipped": 0}
     if not pdfs:
         # 进度/提示走 stderr；json 模式仍向 stdout 吐合法 JSON，便于管道消费。
@@ -296,17 +332,23 @@ def ingest(
             err_console.print(f"[red]✗ unexpected error: {e}[/red]")
             logging.getLogger(__name__).exception("ingest crashed")
             summary["failed"] += 1
-            results.append({
+            fail_dict = {
                 "pdf_path": str(pdf), "sha256": None, "status": "failed",
                 "doc_id": None, "mineru_duration_s": None, "llm_duration_s": None,
                 "error_message": str(e),
                 "error": classify_exception(e).model_dump(),
                 "skipped_reason": None,
-            })
+            }
+            results.append(fail_dict)
+            if progress is ProgressFormat.ndjson:
+                _emit_progress(i, len(pdfs), fail_dict)
             continue
         summary[result.status] = summary.get(result.status, 0) + 1
-        results.append(ingest_result_to_dict(result))
+        result_dict = ingest_result_to_dict(result)
+        results.append(result_dict)
         _print_ingest_result(result)
+        if progress is ProgressFormat.ndjson:
+            _emit_progress(i, len(pdfs), result_dict)
 
     checkpoint(conn)
     conn.close()
@@ -315,7 +357,13 @@ def ingest(
         f"ok={summary['ok']} partial={summary['partial']} "
         f"failed={summary['failed']} skipped={summary['skipped']}"
     )
-    if fmt is OutputFormat.json:
+    if progress is ProgressFormat.ndjson:
+        # 流式模式：末行吐 summary 事件（逐文件事件已在循环里吐过）。
+        print(_json.dumps(
+            {"event": "summary", "archive": str(paths.root), **summary},
+            ensure_ascii=False,
+        ))
+    elif fmt is OutputFormat.json:
         print(_json.dumps(
             {"archive": str(paths.root), "summary": summary, "results": results},
             ensure_ascii=False, indent=2,
@@ -339,6 +387,62 @@ def _print_ingest_result(r) -> None:
     if r.skipped_reason:
         msg += f"  [blue]{r.skipped_reason}[/blue]"
     err_console.print(msg)
+
+
+def _emit_progress(seq: int, total: int, result_dict: dict) -> None:
+    """--progress ndjson：每处理完一个文件，向 stdout 吐一行 file_done 事件（机器流式消费）。"""
+    print(_json.dumps(
+        {"event": "file_done", "seq": seq, "total": total, **result_dict},
+        ensure_ascii=False,
+    ))
+
+
+def _ingest_dry_run(pdfs: list[Path], paths: ArchivePaths, fmt: OutputFormat) -> None:
+    """
+    预览将处理哪些文件 + 预计 API 调用，不产生任何副作用（不建库/不跑 MinerU/不调 LLM）。
+
+    用已有库做 sha256 去重预览（库不存在则全部视为新增，且不创建库）；成本预估：
+    每个新增文件至少 1 次 LLM 文本抽取，合同还会有最多 1 次 VL 签章核查。
+    """
+    conn = open_archive_db(paths.db_path) if paths.db_path.exists() else None
+    files: list[dict] = []
+    new_count = 0
+    for pdf in pdfs:
+        sha = sha256_of_file(pdf)
+        existing = find_by_sha(conn, sha) if conn is not None else None
+        action = "skip" if existing else "new"
+        if action == "new":
+            new_count += 1
+        files.append({
+            "pdf_path": str(pdf), "sha256": sha,
+            "action": action, "existing_doc_id": existing,
+        })
+    if conn is not None:
+        conn.close()
+
+    payload = {
+        "dry_run": True,
+        "archive": str(paths.root),
+        "total": len(pdfs),
+        "new": new_count,
+        "already_ingested": len(pdfs) - new_count,
+        "estimated_llm_calls": new_count,
+        "estimated_vl_calls_max": new_count,
+        "files": files,
+    }
+    if fmt is OutputFormat.json:
+        print(_json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    err_console.print(
+        f"[cyan]dry-run: 共 {len(pdfs)} 个 PDF，新增 {new_count}，"
+        f"已存在 {len(pdfs) - new_count}[/cyan]"
+    )
+    err_console.print(
+        f"预计 LLM 文本抽取 {new_count} 次，VL 签章核查最多 {new_count} 次（仅合同）"
+    )
+    for f in files:
+        mark = "[green]new [/green]" if f["action"] == "new" else "[blue]skip[/blue]"
+        err_console.print(f"  {mark} {f['sha256'][:12]} {f['pdf_path']}")
 
 
 # ---------- list ----------
