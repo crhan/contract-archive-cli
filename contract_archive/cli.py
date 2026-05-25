@@ -46,6 +46,7 @@ from .archive import (
     open_archive_db,
     re_extract,
     search_documents,
+    Stats,
 )
 from .pipelines import MinerUPipeline
 
@@ -723,11 +724,17 @@ def stats(
 ) -> None:
     """档案库统计：总数 / status 分布 / 按月签订分布 / 近 30 天到期数。"""
     paths = _resolve_archive(archive)
-    if _archive_empty(paths, fmt):
-        return
-    conn = open_archive_db(paths.db_path)
-    s = collect_stats(conn)
-    conn.close()
+    # 库不存在 = 零文档档案：合成零值 Stats，走同一条渲染路径，
+    # 不为"空库"单开分支——json 形状始终是对象（不会退化成 list 的 []）。
+    if paths.db_path.exists():
+        conn = open_archive_db(paths.db_path)
+        s = collect_stats(conn)
+        conn.close()
+    else:
+        s = Stats(
+            total=0, by_status={}, by_sign_month={},
+            new_this_month=0, expiring_within_30d=0,
+        )
 
     if fmt is OutputFormat.json:
         print(_json.dumps(asdict(s), ensure_ascii=False, indent=2))
