@@ -380,4 +380,6 @@ def extract_document(
         sub_agreements=_coerce_sub_agreements(raw.get("sub_agreements")),
         completeness=_coerce_completeness(raw.get("completeness"), doc_type),
         raw_evidence={},
+        # raw 非空=本次确实跑通了 LLM，记下实际模型（与 call_llm_document 内同一 settings）。
+        llm_model=load_settings().dashscope_model,
     )

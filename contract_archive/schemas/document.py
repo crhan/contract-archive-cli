@@ -310,6 +310,10 @@ class DocumentExtraction(BaseModel):
     raw_evidence: dict[str, str] = Field(
         default_factory=dict, description="字段→原文证据片段，用于人工抽检"
     )
+    # 抽取元数据（非文档内容）：本次实际调用的 LLM 模型名（如 qwen3.7-max）。
+    # 随 extraction_result.json 留存，并镜像到 documents.llm_model，供 show 追溯抽取来源。
+    # 仅成功调用 LLM 时填；--no-llm / 无 key / 调用失败为 None。
+    llm_model: Optional[str] = None
 
 
 class FieldConfidence(BaseModel):

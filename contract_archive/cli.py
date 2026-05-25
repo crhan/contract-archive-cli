@@ -670,6 +670,10 @@ def show(
             table.add_row("[bold]完整性[/bold]", "[yellow]? 信息不足，未能判定[/yellow]")
 
     table.add_row(
+        "llm_model",
+        row.details().get("llm_model") or "[dim]- (旧抽取未记录，重抽后显示)[/dim]",
+    )
+    table.add_row(
         "overall_confidence",
         f"{row.overall_confidence:.2f}" if row.overall_confidence is not None else "-",
     )

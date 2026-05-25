@@ -121,6 +121,7 @@ def row_to_dict(r) -> dict:
         "sub_agreements": details.get("sub_agreements"),
         "completeness": details.get("completeness"),
         "completeness_status": r.completeness_status,
+        "llm_model": details.get("llm_model"),
         "details": details,
         "contract_name": r.contract_name,
         "party_a": r.party_a,
