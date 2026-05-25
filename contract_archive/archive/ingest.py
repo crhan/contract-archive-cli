@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from ..errors import ErrorInfo, classify_exception, extract_empty, mineru_failed
 from ..extraction import extract_contract, extract_document
 from ..extraction.vision_seal import augment_completeness_with_vision
 from ..extraction.evidence_page_fix import correct_evidence_pages
@@ -66,7 +67,8 @@ class IngestResult:
     doc_id: Optional[int]     # 写入/已存在的 documents.id
     mineru_duration_s: Optional[float] = None
     llm_duration_s: Optional[float] = None
-    error_message: Optional[str] = None
+    error_message: Optional[str] = None        # 人类可读错误（同时写入 DB documents.error_message）
+    error: Optional[ErrorInfo] = None          # 结构化错误（仅 CLI --format json 输出，不入库）
     skipped_reason: Optional[str] = None
 
 
@@ -185,6 +187,7 @@ def ingest_pdf(
     confidence: Optional[ExtractionConfidence] = None
     envelope: Optional[DocumentExtraction] = None
     error_message: Optional[str] = None
+    error_info: Optional[ErrorInfo] = None
     status = "ok"
 
     try:
@@ -211,6 +214,7 @@ def ingest_pdf(
                 existing_id=existing_id,
                 mineru_duration=mineru_duration,
                 error_message=error_message,
+                error=mineru_failed(str(e)),
             )
 
         # ---- 2. 抽取（基于 mineru 产物的 raw_text.txt 优先） ----
@@ -237,6 +241,9 @@ def ingest_pdf(
                 and not envelope.seals
             ):
                 status = "partial"
+                # 结构化 error 优先用 envelope 透上来的（精确区分缺 key / 限流 / 网络），
+                # 缺失才兜底 EXTRACT_EMPTY；error_message 仍是人类可读提示，不变。
+                error_info = envelope.extraction_error or extract_empty("LLM 抽取为空")
                 error_message = (
                     "LLM 抽取为空——通常是缺 DASHSCOPE_API_KEY（全局工具需在 shell "
                     "export，不读项目 .env）或 LLM 调用失败；补好后用 `extract <id>` 重抽"
@@ -246,6 +253,7 @@ def ingest_pdf(
             llm_duration = time.perf_counter() - t1
             status = "partial"
             error_message = f"extract: {e}"
+            error_info = classify_exception(e)
             extraction = ContractExtraction()
             confidence = ExtractionConfidence()
             envelope = DocumentExtraction()
@@ -351,6 +359,7 @@ def ingest_pdf(
             mineru_duration_s=mineru_duration,
             llm_duration_s=llm_duration,
             error_message=error_message,
+            error=error_info,
         )
     finally:
         try:
@@ -370,6 +379,7 @@ def _commit_failed(
     existing_id: Optional[int],
     mineru_duration: Optional[float],
     error_message: str,
+    error: Optional[ErrorInfo] = None,
 ) -> IngestResult:
     """
     MinerU 失败的收尾。DB 仍要记一条 status=failed 便于查问题，但 tmp 目录清掉。
@@ -435,6 +445,7 @@ def _commit_failed(
         doc_id=doc_id,
         mineru_duration_s=mineru_duration,
         error_message=error_message,
+        error=error,
     )
 
 
@@ -464,6 +475,7 @@ def re_extract(
     document_text = _load_document_text(mineru_dir)
     t0 = time.perf_counter()
     error_message: Optional[str] = None
+    error_info: Optional[ErrorInfo] = None
     status = "ok"
     envelope = DocumentExtraction()
     try:
@@ -473,6 +485,7 @@ def re_extract(
     except Exception as e:
         status = "partial"
         error_message = f"extract: {e}"
+        error_info = classify_exception(e)
         extraction = ContractExtraction()
         confidence = ExtractionConfidence()
         envelope = DocumentExtraction()
@@ -528,6 +541,7 @@ def re_extract(
         doc_id=doc_id,
         llm_duration_s=llm_duration,
         error_message=error_message,
+        error=error_info or envelope.extraction_error,
     )
 
 

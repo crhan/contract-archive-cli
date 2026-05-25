@@ -15,6 +15,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from ..errors import ErrorInfo
+
 # -------- 共用基本块 --------
 
 
@@ -327,6 +329,9 @@ class DocumentExtraction(BaseModel):
     # 抽取元数据（非文档内容）：本次 LLM 调用的 token 用量（input/output/total_tokens）。
     # 来源 DashScope resp["usage"]；供评测算成本、生产侧成本追踪。读不到 / 未调用为 None。
     llm_usage: Optional[dict] = None
+    # 抽取元数据（非文档内容）：本次抽取失败的结构化错误，含 retryable 供 Agent 判重试。
+    # 成功 / --no-llm 为 None。随 extraction_result.json 留存，并由 ingest 读出填 IngestResult.error。
+    extraction_error: Optional[ErrorInfo] = None
 
 
 class FieldConfidence(BaseModel):

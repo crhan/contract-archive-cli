@@ -27,6 +27,7 @@ from ..schemas import (
     SubAgreement,
 )
 from ..config import load_settings
+from ..errors import classify_exception, config_missing, extract_empty
 from .llm_extractor import (
     LlmResult,
     _call_openai_compat,
@@ -155,14 +156,17 @@ def call_llm_document(
     base_url = base_url or settings.dashscope_base_url
     if not api_key:
         logger.warning("DASHSCOPE_API_KEY missing; skip LLM document extraction")
-        return LlmResult(parsed={}, model=model)
+        return LlmResult(
+            parsed={}, model=model,
+            error=config_missing("DASHSCOPE_API_KEY 缺失，跳过 LLM 文档抽取"),
+        )
 
     user_msg = f"以下是文档正文，请判类型并抽取字段：\n\n{_truncate_middle(document_text, max_chars)}"
     try:
         content, usage = _call_openai_compat(DOC_EXTRACT_SYSTEM_PROMPT, user_msg, model, api_key, base_url)
-    except Exception as e:  # noqa: BLE001 — 外部调用，任何异常都降级返回空，由调用方处理
+    except Exception as e:  # noqa: BLE001 — 外部调用降级返回空，但保留结构化 error 供上层判重试
         logger.exception("DashScope document LLM call failed: %s", e)
-        return LlmResult(parsed={}, model=model)
+        return LlmResult(parsed={}, model=model, error=classify_exception(e))
 
     if not content:
         logger.warning("LLM empty response (document extract)")
@@ -338,7 +342,12 @@ def extract_document(
     res = call_llm_document(document_text, model=model)
     raw = res.parsed
     if not raw:
-        return DocumentExtraction()
+        # 抽取为空：带上结构化 error（缺 key→CONFIG_MISSING / API 异常→分类；
+        # 调用成功却返回空 JSON→兜底 EXTRACT_EMPTY），供 ingest 判可否重试。
+        return DocumentExtraction(
+            llm_model=res.model,
+            extraction_error=res.error or extract_empty("LLM 返回空或无法解析为 JSON"),
+        )
 
     doc_type = str(raw.get("doc_type", "")).strip()
     if doc_type not in DOC_TYPES:
@@ -389,4 +398,6 @@ def extract_document(
         llm_model=res.model,
         # token 用量（评测算成本的旁证）；生产侧也可用于成本追踪。读不到为 None。
         llm_usage=res.usage,
+        # 结构化错误：成功为 None；用于 ingest 失败诊断与 Agent 重试决策。
+        extraction_error=res.error,
     )

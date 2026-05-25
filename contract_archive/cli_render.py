@@ -86,6 +86,8 @@ def ingest_result_to_dict(r) -> dict:
         "mineru_duration_s": r.mineru_duration_s,
         "llm_duration_s": r.llm_duration_s,
         "error_message": r.error_message,
+        # 结构化错误（code/category/retryable）；成功/跳过为 None。供 Agent 判可否重试。
+        "error": r.error.model_dump() if r.error else None,
         "skipped_reason": r.skipped_reason,
     }
 

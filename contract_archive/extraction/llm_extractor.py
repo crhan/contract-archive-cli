@@ -14,9 +14,10 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from ..config import load_settings
+from ..errors import ErrorInfo, classify_exception, config_missing
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class LlmResult:
     parsed: dict[str, Any]                # 解析后的 JSON；失败为空 dict
     model: str                            # 本次实际请求的 model id
     usage: dict[str, Any] | None = None   # token 用量（DashScope resp["usage"]）；读不到为 None
+    error: Optional[ErrorInfo] = None     # 结构化错误（缺 key / API 异常）；成功为 None
 
 
 LLM_SYSTEM_PROMPT = """你是一名严谨的法律助理。请从给定的合同文本中抽取结构化字段。
@@ -103,14 +105,17 @@ def call_llm_extract(
     base_url = base_url or settings.dashscope_base_url
     if not api_key:
         logger.warning("DASHSCOPE_API_KEY missing; skip LLM extraction")
-        return LlmResult(parsed={}, model=model)
+        return LlmResult(
+            parsed={}, model=model,
+            error=config_missing("DASHSCOPE_API_KEY 缺失，跳过 LLM 抽取"),
+        )
 
     user_msg = f"以下是合同正文，请抽取字段：\n\n{_truncate_middle(document_text, max_chars)}"
     try:
         content, usage = _call_openai_compat(LLM_SYSTEM_PROMPT, user_msg, model, api_key, base_url)
-    except Exception as e:  # noqa: BLE001 — 外部调用，任何异常都降级返回空，由调用方处理
+    except Exception as e:  # noqa: BLE001 — 外部调用降级返回空，但保留结构化 error 供上层判重试
         logger.exception("DashScope LLM call failed: %s", e)
-        return LlmResult(parsed={}, model=model)
+        return LlmResult(parsed={}, model=model, error=classify_exception(e))
 
     if not content:
         logger.warning("LLM empty response")

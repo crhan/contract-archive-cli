@@ -32,6 +32,7 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
+from .errors import classify_exception
 from .archive import (
     ArchivePaths,
     SearchFilter,
@@ -295,7 +296,9 @@ def ingest(
             results.append({
                 "pdf_path": str(pdf), "sha256": None, "status": "failed",
                 "doc_id": None, "mineru_duration_s": None, "llm_duration_s": None,
-                "error_message": str(e), "skipped_reason": None,
+                "error_message": str(e),
+                "error": classify_exception(e).model_dump(),
+                "skipped_reason": None,
             })
             continue
         summary[result.status] = summary.get(result.status, 0) + 1
