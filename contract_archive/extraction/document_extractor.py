@@ -23,6 +23,7 @@ from ..schemas import (
     LabeledAmount,
     LabeledDate,
     LabeledValue,
+    PersonIdentity,
     Seal,
     SubAgreement,
 )
@@ -63,6 +64,7 @@ JSON 字段定义：
   "key_dates": [{{"label": "出具日/签订日/到期日/入职日 等", "date": "YYYY-MM-DD"}}],
   "amounts": [{{"label": "年收入/月均收入/合同金额/首期款/余款 等", "text": "金额原文", "is_total_component": true_or_false, "is_installment": true_or_false, "period_start": "YYYY-MM-DD 或 null", "period_end": "YYYY-MM-DD 或 null", "evidence": "第X页 + 原文片段"}}],
   "fields": [{{"label": "字段名", "value": "字段值"}}],
+  "person_identities": [{{"name": "主体名（须与 parties 对应）", "role": "甲方/乙方/买受人/持证人 等或 null", "identifiers": [{{"label": "身份证号/电话/银行账号/开户行/统一社会信用代码 等", "value": "值"}}]}}],
   "seals": [{{"owner": "盖章主体全称或 null", "seal_type": "公章/合同专用章/财务专用章/发票专用章 等或 null", "raw_text": "印章上识别到的原文"}}],
   "obligations": [
     {{"actor": "party_a|party_b|both", "action": "动宾短语", "deadline": "YYYY-MM-DD 或 null", "evidence": "原文片段"}}
@@ -82,6 +84,14 @@ JSON 字段定义：
   · 发票 → 发票号、税号、开票方、购买方、税额
   · 证件 → 证件号、有效期、签发机关
   把不属于 parties/amounts/key_dates 的有价值信息都放进 fields。
+- person_identities 是 fields 的"精确到人"版：把每个**具体的人/机构**与其固有标识精确绑定。
+  fields 里"乙方身份证号: A；B"分不清谁是谁，这里必须按人拆开，供跨文档逐人核对。
+  · 每个主体一个对象：name（与 parties 对应的姓名/全称）、role（其在本文档的角色）、
+    identifiers（该主体的身份证号/电话/银行账号/开户行/税号等键值，label+value）。
+  · 同一文档里多个自然人的身份证、电话**必须分别绑到各自名下，禁止混填或合并**。
+    例：买受人张三→身份证A、电话X；李四→身份证B、电话Y，务必拆成两个对象。
+  · 只放"主体固有"的稳定标识（身份证/电话/账号/税号），不放金额、日期、地址这类
+    随文档变化的信息。一个标识都绑不出则填空数组 []。
 - amounts 列出文档里**所有**金额（不止主金额），各带语义 label。每个金额还需给出：
   · is_total_component：该金额是否计入"文档主合计"。收入证明的【年度税前收入】【年度股权应税收益】
     等一次性年度收入项填 true；【月均收入】【公积金(个人/公司)】等会与年度项重复累加或非收入的填 false。
@@ -239,6 +249,30 @@ def _coerce_labeled_values(raw: Any) -> list[LabeledValue]:
     return out
 
 
+def _coerce_person_identities(raw: Any) -> list[PersonIdentity]:
+    """
+    LLM person_identities 数组 → PersonIdentity（精确到人的固有标识）。
+
+    跳过无 name 或无任何有效 identifier 的项——光有名字没标识对核对无意义。
+    identifiers 复用 _coerce_labeled_values 的清洗（去空 label/value）。
+    """
+    if not isinstance(raw, list):
+        return []
+    out: list[PersonIdentity] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        identifiers = _coerce_labeled_values(item.get("identifiers"))
+        if not identifiers:
+            continue
+        role = str(item.get("role") or "").strip() or None
+        out.append(PersonIdentity(name=name, role=role, identifiers=identifiers))
+    return out
+
+
 def _coerce_parties(raw: Any) -> list[str]:
     if not isinstance(raw, list):
         return []
@@ -380,6 +414,7 @@ def extract_document(
         amounts=amounts,
         seals=_coerce_seals(raw.get("seals")),
         fields=_coerce_labeled_values(raw.get("fields")),
+        person_identities=_coerce_person_identities(raw.get("person_identities")),
         obligations=coerce_obligations(raw.get("obligations")),
         sub_agreements=_coerce_sub_agreements(raw.get("sub_agreements")),
         completeness=completeness,
