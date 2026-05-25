@@ -224,6 +224,21 @@ def ingest_pdf(
             log_handle.write(
                 f"[extract] OK in {llm_duration:.2f}s (doc_type={envelope.doc_type})\n"
             )
+            # 抽取空跑护栏：开了 LLM 却啥都没抽到（最常见是缺 DASHSCOPE_API_KEY——
+            # 全局工具需 shell export，不读项目 .env），别静默标 ok 误导用户。
+            if (
+                llm_enabled
+                and not extraction.contract_name
+                and not envelope.title
+                and not envelope.fields
+                and not envelope.amounts
+            ):
+                status = "partial"
+                error_message = (
+                    "LLM 抽取为空——通常是缺 DASHSCOPE_API_KEY（全局工具需在 shell "
+                    "export，不读项目 .env）或 LLM 调用失败；补好后用 `extract <id>` 重抽"
+                )
+                log_handle.write(f"\n[extract] WARNING: {error_message}\n")
         except Exception as e:
             llm_duration = time.perf_counter() - t1
             status = "partial"

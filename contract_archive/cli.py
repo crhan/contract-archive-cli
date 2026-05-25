@@ -205,24 +205,34 @@ def list_cmd(
     table.add_column("status")
     table.add_column("type", style="magenta")
     table.add_column("title", overflow="fold")
+    table.add_column("主体", overflow="fold")  # 区分同类文档（谁的/和谁签的）
     table.add_column("date")
     table.add_column("amount", justify="right")
-    table.add_column("conf", justify="right")
     table.add_column("ingested", style="dim")
     for r in rows:
         amount = f"¥{r.primary_amount_value:,.0f}" if r.primary_amount_value is not None else "-"
-        conf = f"{r.overall_confidence:.2f}" if r.overall_confidence is not None else "-"
         table.add_row(
             str(r.id),
             _status_color(r.status),
             r.doc_type or "-",
             r.title or r.contract_name or "-",
+            _subject_of(r),
             r.primary_date or "-",
             amount,
-            conf,
             r.ingested_at[:10],
         )
     console.print(table)
+
+
+def _subject_of(r) -> str:
+    """list 用的『主体』列：优先信封 parties，回退合同甲乙方。截断防撑宽。"""
+    parties = r.details().get("parties") or []
+    if not parties:
+        parties = [p for p in (r.party_a, r.party_b) if p]
+    if not parties:
+        return "-"
+    s = "、".join(parties[:2])
+    return s if len(s) <= 20 else s[:19] + "…"
 
 
 def _status_color(s: str) -> str:
