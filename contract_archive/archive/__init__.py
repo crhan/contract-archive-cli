@@ -12,6 +12,7 @@ from .ingest import IngestResult, discover_pdfs, ingest_pdf, re_extract
 from .paths import ArchivePaths, default_archive_root, link_or_copy, sha256_of_file
 from .repository import (
     DocumentRow,
+    SealRow,
     SearchFilter,
     Stats,
     TodoItem,
@@ -23,6 +24,7 @@ from .repository import (
     insert_document,
     list_documents,
     list_obligations,
+    list_seals,
     replace_document,
     search_documents,
     update_extraction,
@@ -38,10 +40,12 @@ __all__ = [
     "link_or_copy",
     "sha256_of_file",
     "DocumentRow",
+    "SealRow",
     "SearchFilter",
     "Stats",
     "TodoItem",
     "list_obligations",
+    "list_seals",
     "find_by_sha",
     "find_by_sha_prefix",
     "get_document",

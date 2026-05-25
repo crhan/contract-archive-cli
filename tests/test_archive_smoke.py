@@ -14,9 +14,7 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
-from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -273,7 +271,8 @@ def test_list_and_search(archive_root, conn, sample_pdf, tmp_path):
         r2 = ingest_pdf(pdf2, archive_root, conn, llm_enabled=False)
 
     # 直接灌可控的字段值
-    conf = ExtractionConfidence(); conf.overall = 0.8
+    conf = ExtractionConfidence()
+    conf.overall = 0.8
     update_extraction(conn, r1.doc_id, status="ok", llm_duration_s=0.1,
         error_message=None,
         extraction=ContractExtraction(
@@ -471,3 +470,142 @@ def test_obligations_coerce_chinese_actor(archive_root, conn, sample_pdf):
     assert [o.actor for o in out] == ["party_a", "party_b", "both"]
     # 日期归一化
     assert out[1].deadline == "2025-01-15"
+
+
+def test_seals_and_subjects_storage_search_cascade(archive_root, conn, sample_pdf):
+    """印章/主体：写入 details_json + 子表索引、search EXISTS 过滤、re-extract 不堆积、delete 级联。"""
+    from contract_archive.archive import list_seals, update_extraction
+    from contract_archive.schemas import (
+        ContractExtraction, DocumentExtraction, ExtractionConfidence, Seal
+    )
+
+    with _patch_pipeline(StubMineruPipeline(markdown_text="# placeholder")):
+        r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
+
+    env = DocumentExtraction(
+        doc_type="合同协议",
+        parties=["示例置业有限公司", "张三"],
+        seals=[
+            Seal(raw_text="示例置业有限公司 销售合同专用章",
+                 owner="示例置业有限公司", seal_type="销售合同专用章"),
+            Seal(raw_text="销", owner=None, seal_type=None),  # 残缺 OCR：仍保留 raw_text
+        ],
+    )
+    update_extraction(
+        conn, r.doc_id, status="ok", llm_duration_s=0.1, error_message=None,
+        extraction=ContractExtraction(party_a="甲方公司", party_b="乙方个人"),
+        confidence=ExtractionConfidence(), envelope=env,
+    )
+
+    # 1) seals 进 details_json（展示源）
+    doc = get_document(conn, r.doc_id)
+    assert len(doc.details()["seals"]) == 2
+
+    # 2) list_seals 聚合 + owner/type 过滤
+    assert len(list_seals(conn)) == 2
+    assert len(list_seals(conn, owner="示例")) == 1
+    assert len(list_seals(conn, seal_type="合同专用章")) == 1
+
+    # 3) search 跨表 EXISTS：印章存在性 / owner / type
+    assert len(search_documents(conn, SearchFilter(has_seal=True))) == 1
+    assert len(search_documents(conn, SearchFilter(has_seal=False))) == 0
+    assert len(search_documents(conn, SearchFilter(seal_owner="示例"))) == 1
+    assert len(search_documents(conn, SearchFilter(seal_type="销售合同专用章"))) == 1
+
+    # 4) subject 覆盖信封 parties + 合同甲乙方
+    assert len(search_documents(conn, SearchFilter(subject="张三"))) == 1
+    assert len(search_documents(conn, SearchFilter(subject="甲方公司"))) == 1  # 来自 ext.party_a
+    assert len(search_documents(conn, SearchFilter(subject="查无此人"))) == 0
+
+    # 5) re-extract 不堆积（子表先 DELETE 再 INSERT）
+    update_extraction(
+        conn, r.doc_id, status="ok", llm_duration_s=0.1, error_message=None,
+        extraction=ContractExtraction(),
+        confidence=ExtractionConfidence(),
+        envelope=DocumentExtraction(
+            parties=["新主体"],
+            seals=[Seal(raw_text="新章", owner="新公司", seal_type="公章")],
+        ),
+    )
+    assert len(list_seals(conn)) == 1
+    assert len(search_documents(conn, SearchFilter(subject="张三"))) == 0
+    assert len(search_documents(conn, SearchFilter(subject="新主体"))) == 1
+
+    # 6) delete 级联：删主表行后子表清空（conn 走 connect() 开了 foreign_keys）
+    delete_document(conn, r.doc_id)
+    assert conn.execute("SELECT COUNT(*) AS c FROM document_seals").fetchone()["c"] == 0
+    assert conn.execute("SELECT COUNT(*) AS c FROM document_subjects").fetchone()["c"] == 0
+
+
+def test_coerce_seals_skips_empty_keeps_partial():
+    """_coerce_seals：跳过全空/非 dict，保留 owner-only 与 raw_text-only（残章）。"""
+    from contract_archive.extraction.document_extractor import _coerce_seals
+
+    raw = [
+        {"owner": "X公司", "seal_type": "公章", "raw_text": "X公司公章"},
+        {"owner": "Y公司", "seal_type": None, "raw_text": ""},   # owner-only
+        {"owner": None, "seal_type": None, "raw_text": "销"},     # 残章：仅 raw_text
+        {"owner": "", "seal_type": "", "raw_text": ""},           # 全空 → 跳
+        {"owner": None, "raw_text": None},                       # 全空 → 跳
+        "not-a-dict",                                            # 非 dict → 跳
+    ]
+    out = _coerce_seals(raw)
+    assert len(out) == 3
+    assert out[0].owner == "X公司" and out[0].seal_type == "公章"
+    assert out[1].owner == "Y公司" and out[1].raw_text == ""
+    assert out[2].raw_text == "销" and out[2].owner is None
+    assert _coerce_seals(None) == [] and _coerce_seals("x") == []
+
+
+def test_search_seal_subject_combined_param_order(archive_root, conn, sample_pdf, tmp_path):
+    """跨表过滤组合锁参数顺序 + has_seal=False 混合库 + LIKE 子串 + row_to_dict.seals。"""
+    from contract_archive.archive import update_extraction
+    from contract_archive.cli_render import row_to_dict
+    from contract_archive.schemas import (
+        ContractExtraction, DocumentExtraction, ExtractionConfidence, ObligationItem, Seal
+    )
+
+    pdf2 = tmp_path / "input" / "plain.pdf"
+    pdf2.parent.mkdir(parents=True, exist_ok=True)
+    pdf2.write_bytes(b"%PDF-1.4 plain\n" + b"z" * 1500)
+
+    with _patch_pipeline(StubMineruPipeline(markdown_text="# placeholder")):
+        r1 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)   # 有章+主体
+    with _patch_pipeline(StubMineruPipeline(markdown_text="# placeholder")):
+        r2 = ingest_pdf(pdf2, archive_root, conn, llm_enabled=False)         # 无章
+
+    obl = [ObligationItem(actor="party_b", action="支付定金", deadline="2026-06-01")]
+    update_extraction(
+        conn, r1.doc_id, status="ok", llm_duration_s=0.1, error_message=None,
+        extraction=ContractExtraction(
+            contract_name="商品房认购协议",
+            party_a="示例置业有限公司", party_b="张三", obligations=obl),
+        confidence=ExtractionConfidence(),
+        envelope=DocumentExtraction(
+            doc_type="合同协议", parties=["示例置业有限公司", "张三"], obligations=obl,
+            seals=[Seal(raw_text="示例置业有限公司 销售合同专用章",
+                        owner="示例置业有限公司", seal_type="销售合同专用章")]),
+    )
+    update_extraction(
+        conn, r2.doc_id, status="ok", llm_duration_s=0.1, error_message=None,
+        extraction=ContractExtraction(contract_name="无章协议", party_a="某公司", party_b="某人"),
+        confidence=ExtractionConfidence(),
+        envelope=DocumentExtraction(doc_type="合同协议", parties=["某公司", "某人"]),
+    )
+
+    # 1) 七条件全命中——锁参数顺序：任一 ? 与 params 错位都会把结果打成 0
+    hits = search_documents(conn, SearchFilter(
+        name="认购", has_seal=True, seal_owner="示例", seal_type="销售",
+        subject="张三", deadline_before="2026-12-31", actor="party_b"))
+    assert len(hits) == 1 and hits[0].id == r1.doc_id
+
+    # 2) has_seal=False 在混合库里只返无章那条（正向验证 --no-seal）
+    assert [h.id for h in search_documents(conn, SearchFilter(has_seal=False))] == [r2.doc_id]
+
+    # 3) search 路径的 LIKE 子串：'合同专用章' 命中 '销售合同专用章'；'示例' 命中全称
+    assert len(search_documents(conn, SearchFilter(seal_type="合同专用章"))) == 1
+    assert len(search_documents(conn, SearchFilter(subject="示例"))) == 1
+
+    # 4) row_to_dict 暴露 seals（有则带，无则空列表）
+    assert row_to_dict(get_document(conn, r1.doc_id))["seals"][0]["owner"] == "示例置业有限公司"
+    assert row_to_dict(get_document(conn, r2.doc_id))["seals"] == []

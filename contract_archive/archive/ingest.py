@@ -232,6 +232,7 @@ def ingest_pdf(
                 and not envelope.title
                 and not envelope.fields
                 and not envelope.amounts
+                and not envelope.seals
             ):
                 status = "partial"
                 error_message = (

@@ -21,6 +21,7 @@ from ..schemas import (
     LabeledAmount,
     LabeledDate,
     LabeledValue,
+    Seal,
 )
 from .llm_extractor import _extract_text, _parse_json_loose
 from .normalize import coerce_obligations, normalize_date, parse_money_value
@@ -52,6 +53,7 @@ JSON 字段定义：
   "key_dates": [{{"label": "出具日/签订日/到期日/入职日 等", "date": "YYYY-MM-DD"}}],
   "amounts": [{{"label": "年收入/月均收入/公积金(个人)/合同金额 等", "text": "金额原文", "is_total_component": true_or_false, "period_start": "YYYY-MM-DD 或 null", "period_end": "YYYY-MM-DD 或 null"}}],
   "fields": [{{"label": "字段名", "value": "字段值"}}],
+  "seals": [{{"owner": "盖章主体全称或 null", "seal_type": "公章/合同专用章/财务专用章/发票专用章 等或 null", "raw_text": "印章上识别到的原文"}}],
   "obligations": [
     {{"actor": "party_a|party_b|both", "action": "动宾短语", "deadline": "YYYY-MM-DD 或 null", "evidence": "原文片段"}}
   ]
@@ -73,6 +75,10 @@ JSON 字段定义：
       - "本年度/今年" = 当年 1月1日 ~ 出具日
       - "近N个月/过去N个月" = 出具日往前推 N 个月 ~ 出具日
     文档若明写具体起止日期，以原文为准；无区间概念的金额（如合同总额）两者填 null。
+- seals 是文档上的印章（红章）。从盖章处识别到的文字（公司名/章类型/编号）填进来：
+  · raw_text 照实填识别到的原文，OCR 可能残缺、乱序甚至只剩单字——有什么填什么，不要编造。
+  · owner（盖章主体全称）/ seal_type（章类型）能判断就填，拿不准一律 null，禁止猜测编号。
+  · 文档若没有任何印章痕迹，seals 填空数组 []。
 - obligations 仅当文档含明确"谁该在何时做什么"的待办/义务（合同尤甚）；
   证明、发票等通常为空数组。actor 只能是 party_a|party_b|both。
 """
@@ -217,6 +223,23 @@ def _coerce_parties(raw: Any) -> list[str]:
     return [str(p).strip() for p in raw if p and str(p).strip()]
 
 
+def _coerce_seals(raw: Any) -> list[Seal]:
+    """LLM seals 数组 → Seal。跳过 raw_text 与 owner 全空的垃圾项。"""
+    if not isinstance(raw, list):
+        return []
+    out: list[Seal] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        raw_text = str(item.get("raw_text") or "").strip()
+        owner = str(item.get("owner") or "").strip() or None
+        seal_type = str(item.get("seal_type") or "").strip() or None
+        if not raw_text and not owner:
+            continue
+        out.append(Seal(raw_text=raw_text, owner=owner, seal_type=seal_type))
+    return out
+
+
 def extract_document(
     document_text: str,
     llm_enabled: bool = True,
@@ -262,6 +285,7 @@ def extract_document(
         computed_total_value=computed_total,
         key_dates=_coerce_labeled_dates(raw.get("key_dates")),
         amounts=amounts,
+        seals=_coerce_seals(raw.get("seals")),
         fields=_coerce_labeled_values(raw.get("fields")),
         obligations=coerce_obligations(raw.get("obligations")),
         raw_evidence={},

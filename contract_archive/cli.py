@@ -8,6 +8,7 @@
   show <ident>          查看单条详情（id 或 sha 前缀 >=4 字符）
   extract <id>          只重跑抽取（不重跑 MinerU），适合 partial 修复 / 改 prompt 后重抽
   stats                 总数 / status 分布 / 按月签订分布 / 近 30 天到期数
+  seals                 跨文档列印章（某主体有哪些章、各在哪些文档）
   delete <id>           删除档案记录；默认仅删 DB 行，--purge-files 同时删文件
   vacuum                VACUUM 数据库（碎片整理）
 
@@ -43,6 +44,7 @@ from .archive import (
     ingest_pdf,
     list_documents,
     list_obligations,
+    list_seals,
     open_archive_db,
     re_extract,
     search_documents,
@@ -55,6 +57,7 @@ from .cli_render import (
     local_time,
     period_str,
     row_to_dict,
+    seal_rows_to_dict,
     status_color,
     subject_of,
 )
@@ -426,6 +429,18 @@ def search(
         None, "--actor", help="义务 actor"
     ),
     status: Optional[DocStatus] = typer.Option(None, "--status", help="过滤状态"),
+    has_seal: Optional[bool] = typer.Option(
+        None, "--has-seal/--no-seal", help="有/无印章（默认不过滤）"
+    ),
+    seal_owner: Optional[str] = typer.Option(
+        None, "--seal-owner", help="盖章主体包含（LIKE）"
+    ),
+    seal_type: Optional[str] = typer.Option(
+        None, "--seal-type", help="印章类型包含（LIKE），如 合同专用章/公章"
+    ),
+    subject: Optional[str] = typer.Option(
+        None, "--subject", help="主体包含（LIKE），覆盖所有文档类型（含合同甲乙方）"
+    ),
     limit: int = typer.Option(50, "--limit", "-n"),
     fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
 ) -> None:
@@ -448,6 +463,10 @@ def search(
         deadline_after=deadline_after,
         actor=actor.value if actor else None,
         status=status.value if status else None,
+        has_seal=has_seal,
+        seal_owner=seal_owner,
+        seal_type=seal_type,
+        subject=subject,
         limit=limit,
     )
     rows = search_documents(conn, flt)
@@ -579,6 +598,19 @@ def show(
                 "字段",
                 "\n".join(f"• {f.get('label', '')}: {f.get('value', '')}" for f in fields),
             )
+
+    # 印章：跨文档类型通用，放分支外（合同恰恰最常盖章）。det 只在非合同分支定义，
+    # 这里用 row.details() 现取，避免合同分支 NameError。
+    seals = row.details().get("seals") or []
+    if seals:
+        lines = []
+        for s in seals:
+            owner = s.get("owner") or "?"
+            stype = s.get("seal_type")
+            head = owner + (f" · {stype}" if stype else "")
+            raw = s.get("raw_text") or ""
+            lines.append(f"• {head}  [dim]{raw}[/dim]" if raw else f"• {head}")
+        table.add_row("[bold]印章[/bold]", "\n".join(lines))
 
     table.add_row(
         "overall_confidence",
@@ -870,6 +902,55 @@ def todo(
             it.action,
             it.contract_name or "-",
             f"#{it.doc_id}",
+        )
+    console.print(table)
+
+
+# ---------- seals ----------
+
+
+@app.command("seals")
+def seals_cmd(
+    archive: Optional[Path] = _archive_opt,
+    owner: Optional[str] = typer.Option(None, "--owner", help="盖章主体包含（LIKE）"),
+    seal_type: Optional[str] = typer.Option(
+        None, "--type", help="印章类型包含（LIKE），如 合同专用章/公章"
+    ),
+    limit: int = typer.Option(200, "--limit", "-n"),
+    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
+) -> None:
+    """
+    跨文档列印章：某主体有哪些章、各出现在哪些文档（按主体/类型聚合阅读）。
+
+    用例：
+      contract-archive seals                  全部印章
+      contract-archive seals --owner 示例公司   某公司的章
+      contract-archive seals --type 合同专用章
+    """
+    paths = _resolve_archive(archive)
+    if _archive_empty(paths, fmt):
+        return
+    conn = open_archive_db(paths.db_path)
+    rows = list_seals(conn, owner=owner, seal_type=seal_type, limit=limit)
+    conn.close()
+
+    if fmt is OutputFormat.json:
+        print(_json.dumps(seal_rows_to_dict(rows), ensure_ascii=False, indent=2))
+        return
+
+    table = Table(title=f"Seals · {len(rows)} 枚")
+    table.add_column("owner", overflow="fold", style="magenta")
+    table.add_column("type")
+    table.add_column("raw_text", overflow="fold", style="dim")
+    table.add_column("doc", overflow="fold")
+    table.add_column("id", justify="right", style="dim")
+    for r in rows:
+        table.add_row(
+            r.owner or "?",
+            r.seal_type or "-",
+            r.raw_text,
+            r.title or "-",
+            f"#{r.doc_id}",
         )
     console.print(table)
 

@@ -22,6 +22,7 @@ from ..schemas import (
     LabeledAmount,
     LabeledDate,
     ObligationItem,
+    Seal,
 )
 from .db import transaction, utc_now_iso
 
@@ -288,6 +289,62 @@ def list_obligations(
     ]
 
 
+@dataclass
+class SealRow:
+    """跨文档印章视图（list_seals 的返回行）。"""
+
+    seal_id: int
+    doc_id: int
+    title: Optional[str]        # 文档标题（COALESCE title, contract_name）
+    owner: Optional[str]
+    seal_type: Optional[str]
+    raw_text: str
+
+
+def list_seals(
+    conn: sqlite3.Connection,
+    *,
+    owner: Optional[str] = None,
+    seal_type: Optional[str] = None,
+    limit: int = 200,
+) -> list[SealRow]:
+    """
+    跨文档列印章（"某公司有哪些章、各出现在哪些文档"）。
+    owner / seal_type 为 LIKE 过滤。按 owner、seal_type 排序便于聚合阅读。
+    """
+    where: list[str] = []
+    params: list[Any] = []
+    if owner:
+        where.append("s.owner LIKE ?")
+        params.append(f"%{owner}%")
+    if seal_type:
+        where.append("s.seal_type LIKE ?")
+        params.append(f"%{seal_type}%")
+
+    sql = """
+        SELECT s.id AS sid, s.doc_id, s.owner, s.seal_type, s.raw_text,
+               COALESCE(d.title, d.contract_name) AS title
+          FROM document_seals s JOIN documents d ON d.id = s.doc_id
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY s.owner IS NULL, s.owner, s.seal_type, s.doc_id LIMIT ?"
+    params.append(limit)
+
+    rows = conn.execute(sql, params).fetchall()
+    return [
+        SealRow(
+            seal_id=r["sid"],
+            doc_id=r["doc_id"],
+            title=r["title"],
+            owner=r["owner"],
+            seal_type=r["seal_type"],
+            raw_text=r["raw_text"],
+        )
+        for r in rows
+    ]
+
+
 def _load_obligations(conn: sqlite3.Connection, doc_id: int) -> list[ObligationItem]:
     rows = conn.execute(
         """SELECT actor, action, deadline, evidence
@@ -357,6 +414,11 @@ class SearchFilter:
     deadline_before: Optional[str] = None   # 找近期到期的待办
     deadline_after: Optional[str] = None
     actor: Optional[str] = None             # party_a / party_b / both
+    # 印章 / 主体过滤：跨表 EXISTS
+    has_seal: Optional[bool] = None         # True=有章 / False=无章 / None=不过滤
+    seal_owner: Optional[str] = None        # LIKE 盖章主体
+    seal_type: Optional[str] = None         # LIKE 章类型
+    subject: Optional[str] = None           # LIKE 主体（覆盖所有文档类型）
     limit: int = 50
 
 
@@ -364,10 +426,13 @@ def search_documents(
     conn: sqlite3.Connection, flt: SearchFilter
 ) -> list[DocumentRow]:
     """
-    多字段过滤查询。
-    - name / party 走 FTS5（trigram tokenizer 支持中文子串）
-    - 其他字段走主表索引
-    - FTS 用 IN 子查询绑定 id，避免 JOIN 后字段冲突
+    多字段过滤查询（全 AND）。
+
+    - name/party/seal/subject 用 LIKE '%kw%'，跨表条件用 EXISTS 子查询。
+      不用 FTS5：千级档案库全表扫毫秒级，且 2 字中文人名/词 trigram 会 miss
+      （见 001_init.sql 设计注释）。
+    - 参数顺序：where 子句与其 ? 参数严格同序——每个带参条件「先 append param
+      再 append clause」，多条件 EXISTS 块整段追加在已有条件之后、limit 之前。
     """
     where: list[str] = []
     params: list[Any] = []
@@ -418,16 +483,44 @@ def search_documents(
         obl_where.append("actor = ?")
         params.append(flt.actor)
     if obl_where:
-        # 注意把 obligation 条件参数插到主表参数之前——这里 params 是按顺序拼接的，
-        # 所以 obligation 条件必须在 SQL 中先出现：放到 where 列表开头
+        # obl 参数已逐个 append 到 params 末尾，这里把整个 EXISTS clause 也 append
+        # 到 where 末尾——两者同序，? 与 params 自然对齐。
         clause = (
             "EXISTS (SELECT 1 FROM obligations WHERE doc_id = documents.id AND "
             + " AND ".join(obl_where)
             + ")"
         )
-        # 因为 params 是按 where 列表顺序追加的，且 obl 参数已经追加在末尾，
-        # 这里把 clause 也加到末尾保持参数顺序一致
         where.append(clause)
+
+    # 印章过滤：存在性（无参数）+ owner/type（LIKE）。
+    # 参数顺序铁律：每个带 ? 的 clause，其参数 append 到 params 的位置必须与
+    # clause 在 where 里的位置一致——这里一律"先 append param 再 append clause"，
+    # 且整段在 obligations 块之后、limit 之前，顺序自然对齐。
+    if flt.has_seal is True:
+        where.append("EXISTS (SELECT 1 FROM document_seals WHERE doc_id = documents.id)")
+    elif flt.has_seal is False:
+        where.append("NOT EXISTS (SELECT 1 FROM document_seals WHERE doc_id = documents.id)")
+    seal_where: list[str] = []
+    if flt.seal_owner:
+        seal_where.append("owner LIKE ?")
+        params.append(f"%{flt.seal_owner}%")
+    if flt.seal_type:
+        seal_where.append("seal_type LIKE ?")
+        params.append(f"%{flt.seal_type}%")
+    if seal_where:
+        where.append(
+            "EXISTS (SELECT 1 FROM document_seals WHERE doc_id = documents.id AND "
+            + " AND ".join(seal_where)
+            + ")"
+        )
+
+    # 主体过滤：document_subjects 覆盖所有文档类型（含合同甲乙方）
+    if flt.subject:
+        where.append(
+            "EXISTS (SELECT 1 FROM document_subjects "
+            "WHERE doc_id = documents.id AND subject LIKE ?)"
+        )
+        params.append(f"%{flt.subject}%")
 
     sql = "SELECT * FROM documents"
     if where:
@@ -513,6 +606,8 @@ def insert_document(
         doc_id = cursor.lastrowid
         _insert_risks(conn, doc_id, ext.risk_clauses)
         _insert_obligations(conn, doc_id, env.obligations)
+        _insert_seals(conn, doc_id, env.seals)
+        _insert_subjects(conn, doc_id, _subjects_for(env, ext))
         return doc_id
 
 
@@ -572,8 +667,12 @@ def update_extraction(
         )
         conn.execute("DELETE FROM risk_clauses WHERE doc_id = ?", (doc_id,))
         conn.execute("DELETE FROM obligations WHERE doc_id = ?", (doc_id,))
+        conn.execute("DELETE FROM document_seals WHERE doc_id = ?", (doc_id,))
+        conn.execute("DELETE FROM document_subjects WHERE doc_id = ?", (doc_id,))
         _insert_risks(conn, doc_id, ext.risk_clauses)
         _insert_obligations(conn, doc_id, env.obligations)
+        _insert_seals(conn, doc_id, env.seals)
+        _insert_subjects(conn, doc_id, _subjects_for(env, ext))
 
 
 def replace_document(
@@ -638,8 +737,12 @@ def replace_document(
         )
         conn.execute("DELETE FROM risk_clauses WHERE doc_id = ?", (doc_id,))
         conn.execute("DELETE FROM obligations WHERE doc_id = ?", (doc_id,))
+        conn.execute("DELETE FROM document_seals WHERE doc_id = ?", (doc_id,))
+        conn.execute("DELETE FROM document_subjects WHERE doc_id = ?", (doc_id,))
         _insert_risks(conn, doc_id, ext.risk_clauses)
         _insert_obligations(conn, doc_id, env.obligations)
+        _insert_seals(conn, doc_id, env.seals)
+        _insert_subjects(conn, doc_id, _subjects_for(env, ext))
 
 
 def _insert_risks(
@@ -675,10 +778,54 @@ def _insert_obligations(
     )
 
 
+def _insert_seals(
+    conn: sqlite3.Connection, doc_id: int, seals: Iterable[Seal]
+) -> None:
+    """批量插 document_seals，跳过 raw_text 与 owner 全空的垃圾项，ordering 递增。"""
+    rows = [
+        (doc_id, s.owner, s.seal_type, (s.raw_text or "").strip(), i)
+        for i, s in enumerate(seals)
+        if (s.raw_text and s.raw_text.strip()) or (s.owner and s.owner.strip())
+    ]
+    if not rows:
+        return
+    conn.executemany(
+        """INSERT INTO document_seals(doc_id, owner, seal_type, raw_text, ordering)
+             VALUES (?, ?, ?, ?, ?)""",
+        rows,
+    )
+
+
+def _insert_subjects(
+    conn: sqlite3.Connection, doc_id: int, subjects: Iterable[str]
+) -> None:
+    """批量插 document_subjects（调用方已去重去空），ordering 递增。"""
+    rows = [(doc_id, s, i) for i, s in enumerate(subjects)]
+    if not rows:
+        return
+    conn.executemany(
+        "INSERT INTO document_subjects(doc_id, subject, ordering) VALUES (?, ?, ?)",
+        rows,
+    )
+
+
+def _subjects_for(env: DocumentExtraction, ext: ContractExtraction) -> list[str]:
+    """
+    文档主体集合：信封 parties + 合同甲乙方，保序去重去空。
+    合同的 party_a/b 一并纳入，保证 --subject 对合同也命中（信封 parties 不保证含全称）。
+    """
+    seen: dict[str, None] = {}
+    for s in list(env.parties) + [ext.party_a, ext.party_b]:
+        if s and s.strip():
+            seen[s.strip()] = None
+    return list(seen)
+
+
 def delete_document(conn: sqlite3.Connection, doc_id: int) -> Optional[str]:
     """
     删档案记录。返回 output_dir 路径（让调用方决定是否删文件）。
-    DB 中 risk_clauses 由 ON DELETE CASCADE 自动级联。
+    DB 中 risk_clauses / obligations / document_seals / document_subjects
+    全部由 ON DELETE CASCADE 自动级联（依赖 connect() 的 PRAGMA foreign_keys=ON）。
     """
     with transaction(conn):
         row = conn.execute(

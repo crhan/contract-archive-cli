@@ -77,6 +77,20 @@ def ingest_result_to_dict(r) -> dict:
     }
 
 
+def seal_rows_to_dict(rows) -> list[dict]:
+    """SealRow 列表 → JSON 友好 dict 列表（seals --format json 用）。"""
+    return [
+        {
+            "doc_id": r.doc_id,
+            "title": r.title,
+            "owner": r.owner,
+            "seal_type": r.seal_type,
+            "raw_text": r.raw_text,
+        }
+        for r in rows
+    ]
+
+
 def row_to_dict(r) -> dict:
     """DocumentRow → JSON 友好 dict（list/search/show 的 --format json 用）。"""
     details = r.details()

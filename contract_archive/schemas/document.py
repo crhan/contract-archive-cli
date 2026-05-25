@@ -216,6 +216,18 @@ class LabeledDate(BaseModel):
     date: Optional[str] = None      # ISO 8601 'YYYY-MM-DD'
 
 
+class Seal(BaseModel):
+    """
+    印章（红章）。来源是 MinerU 检测+OCR 的盖章文字，质量参差：
+    清晰的能给出主体+章类型（"XX有限公司 合同专用章"），残缺的可能只剩单字。
+    不强求拆出编号——OCR 残字硬塞编号是幻觉，宁可只留 raw_text。
+    """
+
+    raw_text: str                   # 印章 OCR 原文（可能残缺/乱序），可追溯
+    owner: Optional[str] = None     # 盖章主体（公司/机构全称），认不出留 None
+    seal_type: Optional[str] = None  # "公章" / "合同专用章" / "财务专用章" / "发票专用章" ...
+
+
 # 粗粒度规范类型（用于 --type 过滤）。LLM 从中择一，更细的归类放进 title/fields。
 DOC_TYPES = ("合同协议", "证明", "发票票据", "报告", "证件", "其他")
 DocType = str  # 存库用 str（保持柔性，不上 Literal 以免 LLM 新类型被卡死）
@@ -242,6 +254,7 @@ class DocumentExtraction(BaseModel):
     computed_total_value: Optional[float] = None
     key_dates: list[LabeledDate] = Field(default_factory=list)
     amounts: list[LabeledAmount] = Field(default_factory=list)
+    seals: list[Seal] = Field(default_factory=list)   # 文档上的印章（有则可验真/索引）
     fields: list[LabeledValue] = Field(default_factory=list)
     obligations: list[ObligationItem] = Field(default_factory=list)
     raw_evidence: dict[str, str] = Field(
