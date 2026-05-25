@@ -56,6 +56,10 @@ ISSUE_FBETA = 2.0          # 完整性 issues 偏召回
 STR_SIM_THRESHOLD = 0.6    # 文本相似度匹配阈值
 PAGE_RE = re.compile(r"第\s*(\d+)\s*页")
 
+# 替换决策参数（report / seal 共用）：非劣边际 + JSON 解析成功率绝对地板。
+DELTA = 0.03               # 候选指标允许比 champion 低的上限（非劣性 margin）
+PARSE_FLOOR = 0.98         # JSON 解析成功率绝对地板（一条非法 JSON=整篇抽取归零）
+
 
 # ============================================================================
 # 基础工具

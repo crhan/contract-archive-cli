@@ -23,11 +23,14 @@ from typing import Any, Optional
 from contract_archive.schemas import DocumentExtraction
 
 from .run import DEFAULT_CASES
-from .score import CRITICAL_FIELDS, EnvelopeScore, bootstrap_ci, score_envelope
-
-# 决策参数（显式、可审计）
-DELTA = 0.03          # 非劣边际：候选指标允许比 champion 低的上限
-PARSE_FLOOR = 0.98    # JSON 解析成功率绝对地板
+from .score import (
+    CRITICAL_FIELDS,
+    DELTA,
+    PARSE_FLOOR,
+    EnvelopeScore,
+    bootstrap_ci,
+    score_envelope,
+)
 
 # 价格表（¥ / 百万 token，查询日期 2026-05-25，**估算，以阿里云百炼控制台为准**）。
 # 文本模型；带小版本号的是当前在售命名，无版本别名会随官方升级漂移（评测请锁 snapshot）。

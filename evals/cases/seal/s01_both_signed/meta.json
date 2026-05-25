@@ -1,0 +1,10 @@
+{
+  "stratum": "合成-plumbing",
+  "difficulty": "n/a",
+  "exercises": [
+    "check_seals_on_images 调用链",
+    "签章缺陷打分"
+  ],
+  "warning": "PIL 合成图，仅验调用链与打分逻辑，不代表真实红章识别精度",
+  "provenance": "合成匿名（示例置业/张三），可入库"
+}
