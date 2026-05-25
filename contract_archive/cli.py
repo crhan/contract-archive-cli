@@ -196,27 +196,22 @@ def list_cmd(
     table = Table(title=f"Archive · {paths.root} ({len(rows)} of total)")
     table.add_column("id", style="cyan", justify="right")
     table.add_column("status")
-    table.add_column("contract_name", overflow="fold")
-    table.add_column("party_a", overflow="fold")
-    table.add_column("party_b", overflow="fold")
+    table.add_column("type", style="magenta")
+    table.add_column("title", overflow="fold")
+    table.add_column("date")
     table.add_column("amount", justify="right")
-    table.add_column("sign_date")
-    table.add_column("expire_date")
     table.add_column("conf", justify="right")
     table.add_column("ingested", style="dim")
     for r in rows:
-        status_styled = _status_color(r.status)
-        amount = f"¥{r.amount_value:,.0f}" if r.amount_value is not None else "-"
+        amount = f"¥{r.primary_amount_value:,.0f}" if r.primary_amount_value is not None else "-"
         conf = f"{r.overall_confidence:.2f}" if r.overall_confidence is not None else "-"
         table.add_row(
             str(r.id),
-            status_styled,
-            r.contract_name or "-",
-            r.party_a or "-",
-            r.party_b or "-",
+            _status_color(r.status),
+            r.doc_type or "-",
+            r.title or r.contract_name or "-",
+            r.primary_date or "-",
             amount,
-            r.sign_date or "-",
-            r.expire_date or "-",
             conf,
             r.ingested_at[:10],
         )
@@ -233,6 +228,12 @@ def _row_to_dict(r) -> dict:
         "id": r.id,
         "sha256": r.sha256,
         "status": r.status,
+        "doc_type": r.doc_type,
+        "title": r.title,
+        "summary": r.summary,
+        "primary_date": r.primary_date,
+        "primary_amount_value": r.primary_amount_value,
+        "details": r.details(),
         "contract_name": r.contract_name,
         "party_a": r.party_a,
         "party_b": r.party_b,
@@ -380,7 +381,7 @@ def show(
         print(_json.dumps(_row_to_dict(row), ensure_ascii=False, indent=2))
         return
 
-    table = Table(title=f"Document #{row.id} ({_status_color(row.status)})")
+    table = Table(title=f"Document #{row.id} · {row.doc_type or '?'} ({_status_color(row.status)})")
     table.add_column("field", style="cyan", no_wrap=True)
     table.add_column("value", overflow="fold")
     table.add_row("sha256", row.sha256)
@@ -393,22 +394,58 @@ def show(
     table.add_row("llm_s", f"{row.llm_duration_s:.2f}" if row.llm_duration_s else "-")
     if row.error_message:
         table.add_row("[red]error[/red]", row.error_message)
+
+    # ---- 通用信封（任何文档类型）----
     table.add_row("", "")
-    table.add_row("[bold]contract_name[/bold]", row.contract_name or "-")
-    table.add_row("party_a", row.party_a or "-")
-    table.add_row("party_b", row.party_b or "-")
-    table.add_row(
-        "amount",
-        f"{row.amount_text or '-'} (¥{row.amount_value:,.2f})"
-        if row.amount_value is not None
-        else (row.amount_text or "-"),
-    )
-    table.add_row("sign_date", row.sign_date or "-")
-    table.add_row("expire_date", row.expire_date or "-")
-    table.add_row(
-        "auto_renewal",
-        "是" if row.auto_renewal == 1 else ("否" if row.auto_renewal == 0 else "-"),
-    )
+    table.add_row("[bold]doc_type[/bold]", row.doc_type or "-")
+    table.add_row("[bold]title[/bold]", row.title or row.contract_name or "-")
+    if row.summary:
+        table.add_row("summary", row.summary)
+
+    # 合同有专属列（party/到期/续约）；其余类型渲染柔性 details
+    is_contract = bool(row.contract_name or row.party_a or row.party_b)
+    if is_contract:
+        table.add_row("", "")
+        table.add_row("party_a", row.party_a or "-")
+        table.add_row("party_b", row.party_b or "-")
+        table.add_row(
+            "amount",
+            f"{row.amount_text or '-'} (¥{row.amount_value:,.2f})"
+            if row.amount_value is not None
+            else (row.amount_text or "-"),
+        )
+        table.add_row("sign_date", row.sign_date or "-")
+        table.add_row("expire_date", row.expire_date or "-")
+        table.add_row(
+            "auto_renewal",
+            "是" if row.auto_renewal == 1 else ("否" if row.auto_renewal == 0 else "-"),
+        )
+    else:
+        det = row.details()
+        parties = det.get("parties") or []
+        if parties:
+            table.add_row("主体", "\n".join(f"• {p}" for p in parties))
+        amounts = det.get("amounts") or []
+        if amounts:
+            lines = []
+            for a in amounts:
+                v = a.get("value")
+                vs = f"（¥{v:,.2f}）" if isinstance(v, (int, float)) else ""
+                lines.append(f"• {a.get('label', '')}: {a.get('text', '')}{vs}")
+            table.add_row("金额", "\n".join(lines))
+        key_dates = det.get("key_dates") or []
+        if key_dates:
+            table.add_row(
+                "日期",
+                "\n".join(f"• {d.get('label', '')}: {d.get('date') or '-'}" for d in key_dates),
+            )
+        fields = det.get("fields") or []
+        if fields:
+            table.add_row(
+                "字段",
+                "\n".join(f"• {f.get('label', '')}: {f.get('value', '')}" for f in fields),
+            )
+
     table.add_row(
         "overall_confidence",
         f"{row.overall_confidence:.2f}" if row.overall_confidence is not None else "-",
