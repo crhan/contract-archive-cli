@@ -61,8 +61,22 @@ def test_signature_evidence_from_page_names():
     assert _signature_evidence(imgs) == "据落款页图：第 8、9 页"
 
 
-def test_issue_carries_evidence():
+def test_issue_falls_back_when_no_page():
+    """unit 没回填 page 时，用 fallback 出处。"""
     parsed = {"units": [{"agreement": "主协议", "parties": [
         {"role": "甲方", "has_seal": False, "has_signature": False}]}]}
-    issues = _issues_from_vision(parsed, "据落款页图：第 8 页")
+    issues = _issues_from_vision(parsed, "据落款页图：第 8、9 页")
+    assert issues[0].evidence == "据落款页图：第 8、9 页"
+
+
+def test_issue_uses_each_unit_page():
+    """各落款区用自己回填的 page：主协议→第8页、补充协议→第9页，不再笼统堆叠。"""
+    parsed = {"units": [
+        {"agreement": "主协议", "page": 8, "parties": [
+            {"role": "甲方", "has_seal": False, "has_signature": False}]},
+        {"agreement": "补充协议", "page": 9, "parties": [
+            {"role": "甲方", "has_seal": False, "has_signature": False}]},
+    ]}
+    issues = _issues_from_vision(parsed, "fallback")
     assert issues[0].evidence == "据落款页图：第 8 页"
+    assert issues[1].evidence == "据落款页图：第 9 页"
