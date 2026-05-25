@@ -29,6 +29,7 @@ from ..schemas import (
 from ..config import load_settings
 from .llm_extractor import _extract_text, _parse_json_loose
 from .normalize import coerce_obligations, normalize_date, parse_money_value
+from .amount_check import check_amount_consistency
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +56,7 @@ JSON 字段定义：
   "primary_date": "该文档最重要的日期 ISO（合同=签订日，证明=出具日，发票=开票日）或 null",
   "primary_amount": "该文档最重要的金额原文（合同=合同额，收入证明=年收入）或 null",
   "key_dates": [{{"label": "出具日/签订日/到期日/入职日 等", "date": "YYYY-MM-DD"}}],
-  "amounts": [{{"label": "年收入/月均收入/公积金(个人)/合同金额 等", "text": "金额原文", "is_total_component": true_or_false, "period_start": "YYYY-MM-DD 或 null", "period_end": "YYYY-MM-DD 或 null"}}],
+  "amounts": [{{"label": "年收入/月均收入/合同金额/首期款/余款 等", "text": "金额原文", "is_total_component": true_or_false, "is_installment": true_or_false, "period_start": "YYYY-MM-DD 或 null", "period_end": "YYYY-MM-DD 或 null", "evidence": "出处：第X页 + 原文片段"}}],
   "fields": [{{"label": "字段名", "value": "字段值"}}],
   "seals": [{{"owner": "盖章主体全称或 null", "seal_type": "公章/合同专用章/财务专用章/发票专用章 等或 null", "raw_text": "印章上识别到的原文"}}],
   "obligations": [
@@ -80,6 +81,10 @@ JSON 字段定义：
   · is_total_component：该金额是否计入"文档主合计"。收入证明的【年度税前收入】【年度股权应税收益】
     等一次性年度收入项填 true；【月均收入】【公积金(个人/公司)】等会与年度项重复累加或非收入的填 false。
     宁缺勿错：拿不准一律 false。
+  · is_installment：该金额是否为某总价的"分期/部分付款"项（首期款/定金/余款/尾款 等）。
+    车位/房屋合同的【首期款】【余款】填 true；一次性付款总额、单价(元/月·个、元/日)、
+    服务费、违约金等非分期项填 false。供代码校验"分期之和是否等于总价"以发现金额笔误。
+  · evidence：这笔金额的出处——页码(据页脚"第X页共Y页")+ 原文片段，便于翻回原文核对。
   · period_start / period_end：该金额覆盖的时间区间（ISO）。把"上年度""近12个月"等相对表述
     按【出具日】解析成具体起止：
       - "上年度/上一年度" = 上一个完整自然年（出具于 2026 年 → 2025-01-01 ~ 2025-12-31）
@@ -215,8 +220,10 @@ def _coerce_labeled_amounts(raw: Any) -> list[LabeledAmount]:
             text=text,
             value=parse_money_value(text),
             is_total_component=bool(item.get("is_total_component", False)),
+            is_installment=bool(item.get("is_installment", False)),
             period_start=_norm_period(item.get("period_start")),
             period_end=_norm_period(item.get("period_end")),
+            evidence=str(item.get("evidence") or "").strip(),
         ))
     return out
 
@@ -368,6 +375,16 @@ def extract_document(
     components = [a.value for a in amounts if a.is_total_component and a.value is not None]
     computed_total = round(sum(components), 2) if components else None
 
+    # 完整性 = LLM 判的签章/要素 + 代码确定性判的金额自洽异常（分期之和≠总价 等）。
+    # 金额异常只对合同挂（completeness 是合同概念）；有异常必判 incomplete。
+    # 注：vision_seal.augment 重判签章时保留 category!="signature" 的 issue，amount 类不受影响。
+    completeness = _coerce_completeness(raw.get("completeness"), doc_type)
+    if doc_type == "合同协议":
+        amount_issues = check_amount_consistency(amounts, computed_total)
+        if amount_issues:
+            base_issues = completeness.issues if completeness else []
+            completeness = Completeness(status="incomplete", issues=base_issues + amount_issues)
+
     return DocumentExtraction(
         doc_type=doc_type,
         title=(str(raw["title"]).strip() if raw.get("title") else None),
@@ -383,7 +400,7 @@ def extract_document(
         fields=_coerce_labeled_values(raw.get("fields")),
         obligations=coerce_obligations(raw.get("obligations")),
         sub_agreements=_coerce_sub_agreements(raw.get("sub_agreements")),
-        completeness=_coerce_completeness(raw.get("completeness"), doc_type),
+        completeness=completeness,
         raw_evidence={},
         # raw 非空=本次确实跑通了 LLM，记下实际模型（与 call_llm_document 内同一 settings）。
         llm_model=load_settings().dashscope_model,

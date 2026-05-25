@@ -204,9 +204,15 @@ class LabeledAmount(BaseModel):
     # 是否计入文档主合计：收入证明的"年度税前收入""年度股权收益"=True；
     # "月均收入""公积金"等不该重复累加的=False。供 computed_total_value 求和。
     is_total_component: bool = False
+    # 是否为某总价的"分期/部分付款"项（首期款/余款/定金/尾款）。供金额自洽校验：
+    # 同一总价的各分期项之和应≈总价(合计)，不符即疑似金额笔误
+    # （如车位首期误填 500000 > 总价 200000）。一次性付款、单价(元/月)等非分期项=False。
+    is_installment: bool = False
     # 该金额覆盖的时间区间（ISO）。如"上年度""近12个月"由 LLM 据出具日解析为具体起止。
     period_start: Optional[str] = None
     period_end: Optional[str] = None
+    # 出处定位：页码 + 原文片段，让人能翻回原文核对这笔金额从哪来（与签章缺陷出处同一原则）。
+    evidence: str = ""
 
 
 class LabeledDate(BaseModel):
@@ -232,8 +238,9 @@ class CompletenessIssue(BaseModel):
     """单条完整性缺陷（缺签章 / 缺要素）。"""
 
     item: str                                          # 缺失/异常要素，如"甲方签章""签订日期""转让价款"
-    category: Literal["signature", "field"] = "field"  # signature=签章类，field=要素类
-    detail: str = ""                                   # 缺什么（简述），如"落款处空白无章"
+    # signature=签章类，field=要素缺失类，amount=金额自洽异常类（如分期之和≠总价，代码确定性判出）
+    category: Literal["signature", "field", "amount"] = "field"
+    detail: str = ""                                   # 缺什么/异常什么（简述），如"落款处空白无章"
     # 出处定位：页码 + 原文片段（签章类带落款页码），让人能翻回原文核对。
     # 审计性结论的底线——不可追溯的缺陷不合格，宁可不报。
     evidence: str = ""

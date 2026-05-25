@@ -597,9 +597,14 @@ def show(
             v = a.get("value")
             vs = f"（¥{v:,.2f}）" if isinstance(v, (int, float)) else ""
             mark = " [cyan]✓计入合计[/cyan]" if a.get("is_total_component") else ""
+            if a.get("is_installment"):
+                mark += " [magenta]分期[/magenta]"
             lines.append(
                 f"• {a.get('label', '')}: {a.get('text', '')}{vs}{period_str(a)}{mark}"
             )
+            ev = a.get("evidence") or ""
+            if ev:
+                lines.append(f"    [dim]↳ 出处：{ev}[/dim]")
         table.add_row("金额", "\n".join(lines))
     elif row.amount_text:  # details 无 amounts 的旧数据/回退，至少显示表列主金额
         table.add_row(
@@ -661,9 +666,10 @@ def show(
         if status == "complete":
             table.add_row("[bold]完整性[/bold]", "[green]✓ 要素与签章齐全[/green]")
         elif status == "incomplete":
-            lines = ["[red]⚠ 疑似不完整[/red] [dim](签章经落款页核查；要素据原文，可翻回核对)[/dim]"]
+            lines = ["[red]⚠ 疑似不完整[/red] [dim](签章经落款页核查；要素/金额据原文，可翻回核对)[/dim]"]
+            cat_label = {"signature": "签章", "amount": "金额", "field": "要素"}
             for it in issues:
-                cat = "签章" if it.get("category") == "signature" else "要素"
+                cat = cat_label.get(it.get("category"), "要素")
                 detail = it.get("detail") or ""
                 tail = f" — [dim]{detail}[/dim]" if detail else ""
                 lines.append(f"• [{cat}] {it.get('item', '')}{tail}")
