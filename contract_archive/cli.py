@@ -564,18 +564,13 @@ def show(
     if row.summary:
         table.add_row("summary", row.summary)
 
-    # 合同有专属列（party/到期/续约）；其余类型渲染柔性 details
+    # 合同有专属列（party/到期/续约），日期走表列；其余类型走 details 的主体/日期。
+    det = row.details()
     is_contract = bool(row.contract_name or row.party_a or row.party_b)
     if is_contract:
         table.add_row("", "")
         table.add_row("party_a", row.party_a or "-")
         table.add_row("party_b", row.party_b or "-")
-        table.add_row(
-            "amount",
-            f"{row.amount_text or '-'} (¥{row.amount_value:,.2f})"
-            if row.amount_value is not None
-            else (row.amount_text or "-"),
-        )
         table.add_row("sign_date", row.sign_date or "-")
         table.add_row("expire_date", row.expire_date or "-")
         table.add_row(
@@ -583,39 +578,46 @@ def show(
             "是" if row.auto_renewal == 1 else ("否" if row.auto_renewal == 0 else "-"),
         )
     else:
-        det = row.details()
         parties = det.get("parties") or []
         if parties:
             table.add_row("主体", "\n".join(f"• {p}" for p in parties))
-        amounts = det.get("amounts") or []
-        if amounts:
-            lines = []
-            for a in amounts:
-                v = a.get("value")
-                vs = f"（¥{v:,.2f}）" if isinstance(v, (int, float)) else ""
-                mark = " [cyan]✓计入合计[/cyan]" if a.get("is_total_component") else ""
-                lines.append(
-                    f"• {a.get('label', '')}: {a.get('text', '')}{vs}{period_str(a)}{mark}"
-                )
-            table.add_row("金额", "\n".join(lines))
-        total = det.get("computed_total_value")
-        if isinstance(total, (int, float)):
-            table.add_row(
-                "[bold]合计收入(计算)[/bold]",
-                f"[cyan]¥{total:,.2f}[/cyan] [dim](上方标✓项之和，非抽取值)[/dim]",
-            )
         key_dates = det.get("key_dates") or []
         if key_dates:
             table.add_row(
                 "日期",
                 "\n".join(f"• {d.get('label', '')}: {d.get('date') or '-'}" for d in key_dates),
             )
-        fields = det.get("fields") or []
-        if fields:
-            table.add_row(
-                "字段",
-                "\n".join(f"• {f.get('label', '')}: {f.get('value', '')}" for f in fields),
+
+    # ---- 金额 / 合计 / 字段：所有类型通用 ----
+    # 合同此前只显示单个主金额，付款明细（首期/余款）和付款方式（fields）被吞；提到这里通用展示。
+    amounts = det.get("amounts") or []
+    if amounts:
+        lines = []
+        for a in amounts:
+            v = a.get("value")
+            vs = f"（¥{v:,.2f}）" if isinstance(v, (int, float)) else ""
+            mark = " [cyan]✓计入合计[/cyan]" if a.get("is_total_component") else ""
+            lines.append(
+                f"• {a.get('label', '')}: {a.get('text', '')}{vs}{period_str(a)}{mark}"
             )
+        table.add_row("金额", "\n".join(lines))
+    elif row.amount_text:  # details 无 amounts 的旧数据/回退，至少显示表列主金额
+        table.add_row(
+            "金额",
+            f"{row.amount_text} (¥{row.amount_value:,.2f})" if row.amount_value is not None else row.amount_text,
+        )
+    total = det.get("computed_total_value")
+    if isinstance(total, (int, float)):
+        table.add_row(
+            "[bold]合计(计算)[/bold]",
+            f"[cyan]¥{total:,.2f}[/cyan] [dim](上方标✓项之和，非抽取值)[/dim]",
+        )
+    fields = det.get("fields") or []
+    if fields:
+        table.add_row(
+            "字段",
+            "\n".join(f"• {f.get('label', '')}: {f.get('value', '')}" for f in fields),
+        )
 
     # 印章：跨文档类型通用，放分支外（合同恰恰最常盖章）。det 只在非合同分支定义，
     # 这里用 row.details() 现取，避免合同分支 NameError。
