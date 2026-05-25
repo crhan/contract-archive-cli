@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import copy
 import json
-from datetime import datetime
 from pathlib import Path
 
 from contract_archive.schemas import DocumentExtraction
@@ -68,15 +67,12 @@ def _bad_candidate_pred(case_id: str, gold: DocumentExtraction) -> DocumentExtra
 
 
 def generate() -> Path:
+    """伪造三模型预测，写成与 evals.run 同格式的 results.jsonl（重跑前先清空，幂等）。"""
     cases = sorted(p.name for p in (DEFAULT_CASES / SUITE).iterdir() if p.is_dir())
     DEMO_DIR.mkdir(parents=True, exist_ok=True)
+    jsonl = DEMO_DIR / "results.jsonl"
+    jsonl.unlink(missing_ok=True)
     models = ["qwen3.7-max", "qwen-plus", "qwen-flash"]
-    (DEMO_DIR / "run_meta.json").write_text(json.dumps({
-        "suite": SUITE, "models": models, "repeat": 1,
-        "cases_dir": str(DEFAULT_CASES), "ts": datetime.now().isoformat(),
-        "note": "DEMO 伪造数据，非真实跑分",
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
-
     builders = {
         "qwen3.7-max": lambda cid, g: _champion_pred(g),
         "qwen-plus": _good_candidate_pred,
@@ -85,25 +81,19 @@ def generate() -> Path:
     usages = {"qwen3.7-max": (1800, 650), "qwen-plus": (1800, 640), "qwen-flash": (1800, 600)}
     latencies = {"qwen3.7-max": 2.6, "qwen-plus": 1.5, "qwen-flash": 0.7}
 
-    for model in models:
-        mdir = DEMO_DIR / model.replace("/", "_")
-        mdir.mkdir(exist_ok=True)
-        for cid in cases:
-            gold = _load_gold(cid)
-            pred = builders[model](cid, gold)
-            usage = _fake_usage(*usages[model]) if pred.llm_model else None
-            record = {
-                "case_id": cid, "model": model, "suite": SUITE,
-                "meta": json.loads((DEFAULT_CASES / SUITE / cid / "meta.json").read_text(encoding="utf-8")),
-                "runs": [{
+    with jsonl.open("w", encoding="utf-8") as f:
+        for model in models:
+            for cid in cases:
+                gold = _load_gold(cid)
+                pred = builders[model](cid, gold)
+                usage = _fake_usage(*usages[model]) if pred.llm_model else None
+                rec = {
+                    "suite": SUITE, "case_id": cid, "model": model, "repeat_idx": 0,
+                    "meta": json.loads((DEFAULT_CASES / SUITE / cid / "meta.json").read_text(encoding="utf-8")),
                     "pred": pred.model_dump(mode="json"),
-                    "latency_s": latencies[model],
-                    "usage": usage,
-                    "llm_model": pred.llm_model,
-                }],
-            }
-            (mdir / f"{cid}.json").write_text(
-                json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
+                    "latency_s": latencies[model], "usage": usage, "llm_model": pred.llm_model,
+                }
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     return DEMO_DIR
 
 

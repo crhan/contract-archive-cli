@@ -18,7 +18,7 @@ import argparse
 import json
 import statistics
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from contract_archive.schemas import DocumentExtraction
 
@@ -59,16 +59,31 @@ def load_gold(cases_dir: Path, suite: str, case_id: str) -> DocumentExtraction:
     return DocumentExtraction.model_validate(json.loads(gold_path.read_text(encoding="utf-8")))
 
 
-def load_results(results_dir: Path) -> tuple[dict[str, Any], dict[str, list[dict]]]:
-    """读 results 目录 → (run_meta, {model: [case_record, ...]})。"""
-    run_meta = json.loads((results_dir / "run_meta.json").read_text(encoding="utf-8"))
-    by_model: dict[str, list[dict]] = {}
-    for model in run_meta["models"]:
-        model_dir = results_dir / model.replace("/", "_")
-        records = [json.loads(p.read_text(encoding="utf-8"))
-                   for p in sorted(model_dir.glob("*.json"))]
-        by_model[model] = records
-    return run_meta, by_model
+def load_results(results_dir: Path) -> tuple[str, int, dict[str, dict[str, list[dict]]]]:
+    """
+    读 results.jsonl → (suite, repeat, by_model)。
+    by_model[model][case_id] = [记录按 repeat_idx 排序]；保留模型首次出现顺序（dict 有序）。
+    全量读取——这正是两阶段的价值：增量 append 的新模型会自然进入对比。
+    """
+    jsonl = results_dir / "results.jsonl"
+    if not jsonl.exists():
+        raise FileNotFoundError(f"没有 {jsonl}（先跑一阶段：python -m evals.run）")
+    by_model: dict[str, dict[str, list[dict]]] = {}
+    suite = "extraction"
+    max_repeat = 1
+    with jsonl.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            suite = rec.get("suite", suite)
+            max_repeat = max(max_repeat, rec.get("repeat_idx", 0) + 1)
+            by_model.setdefault(rec["model"], {}).setdefault(rec["case_id"], []).append(rec)
+    for cases in by_model.values():
+        for runs in cases.values():
+            runs.sort(key=lambda r: r.get("repeat_idx", 0))
+    return suite, max_repeat, by_model
 
 
 class ModelAgg:
@@ -124,20 +139,19 @@ def _cost_of(model: str, usage: Optional[dict]) -> Optional[float]:
     return itok / 1e6 * pin + otok / 1e6 * pout
 
 
-def aggregate(by_model: dict[str, list[dict]], run_meta: dict, cases_dir: Path) -> dict[str, ModelAgg]:
-    suite = run_meta["suite"]
+def aggregate(by_model: dict[str, dict[str, list[dict]]], suite: str, cases_dir: Path
+              ) -> dict[str, ModelAgg]:
     out: dict[str, ModelAgg] = {}
-    for model, records in by_model.items():
+    for model, cases in by_model.items():
         agg = ModelAgg(model)
-        for rec in records:
-            gold = load_gold(cases_dir, suite, rec["case_id"])
-            runs = rec["runs"]
-            pred = DocumentExtraction.model_validate(runs[0]["pred"])
-            agg.envelopes.append(score_envelope(rec["case_id"], gold, pred))
+        for case_id, runs in cases.items():
+            gold = load_gold(cases_dir, suite, case_id)
+            pred = DocumentExtraction.model_validate(runs[0]["pred"])  # repeat_idx 0 用于打分
+            agg.envelopes.append(score_envelope(case_id, gold, pred))
             agg.latencies.append(runs[0]["latency_s"])
             agg.cost_per_doc.append(_cost_of(model, runs[0].get("usage")))
             if len(runs) > 1:
-                # 自一致性：多次跑的 doc_type + parties 是否完全一致
+                # 自一致性：多次跑的 doc_type 是否完全一致
                 types = {r["pred"].get("doc_type") for r in runs}
                 agg.determinism_flags.append(len(types) == 1)
         out[model] = agg
@@ -277,21 +291,23 @@ def _micro_fbeta(tp: float, fp: float, fn: float, beta: float) -> float:
 
 
 def build_report(results_dir: Path, cases_dir: Path, champion: Optional[str]) -> str:
-    run_meta, by_model = load_results(results_dir)
-    aggs = aggregate(by_model, run_meta, cases_dir)
-    champ = champion or run_meta["models"][0]
+    suite, repeat, by_model = load_results(results_dir)
+    aggs = aggregate(by_model, suite, cases_dir)
+    if not aggs:
+        raise ValueError("results.jsonl 为空")
+    champ = champion or next(iter(aggs))
     if champ not in aggs:
         raise ValueError(f"champion `{champ}` 不在结果中：{list(aggs)}")
     # 让 champion 排在表首
     ordered = {champ: aggs[champ], **{m: a for m, a in aggs.items() if m != champ}}
-    return render_markdown(run_meta, ordered, champ)
+    return render_markdown({"suite": suite, "repeat": repeat}, ordered, champ)
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="评测报告：gate 决策表")
     ap.add_argument("results_dir", type=Path)
     ap.add_argument("--cases-dir", type=Path, default=DEFAULT_CASES)
-    ap.add_argument("--champion", default=None, help="基准模型（默认 run_meta 里第一个）")
+    ap.add_argument("--champion", default=None, help="基准模型（默认 JSONL 里首个出现的模型）")
     ap.add_argument("--out", type=Path, default=None, help="报告输出路径（默认 results_dir/report.md）")
     args = ap.parse_args(argv)
 

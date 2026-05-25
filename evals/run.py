@@ -1,16 +1,20 @@
 """
-评测执行器：跑 cases × 候选模型，调项目自己的 extract_document() 整条链路，
-计时 + 取 token usage，原始产出落 results/<timestamp>/<model>/<case>.json。
+评测一阶段：跑 cases × 候选模型，调项目自己的 extract_document() 整条链路，
+计时 + 取 token usage，把每条 (模型×case×repeat) 结果 **append** 进 results.jsonl。
+
+两阶段设计：
+  一阶段(run)：只管跑模型、把结果落 JSONL（增量累积——同一 --out 目录可多次 run 不同模型，
+              新模型 append 进去，已有结果不重跑）。
+  二阶段(report)：读全量 results.jsonl，按模型分组对比、出 gate 决策报告。
 
 用法：
-  uv run --no-sync python -m evals.run --models qwen3.7-max,qwen-plus --suite extraction
-  uv run --no-sync python -m evals.run --models qwen3.7-max --repeat 3   # 自一致性
+  uv run --no-sync python -m evals.run --models qwen3.7-max,qwen-plus --out evals/results/r1
+  uv run --no-sync python -m evals.run --models deepseek-v4-pro --out evals/results/r1  # 增量追加
+  uv run --no-sync python -m evals.run --models qwen3.7-max --repeat 3                  # 自一致性
 
-需 DASHSCOPE_API_KEY（走 .env / config）。无 key 时各 case 会得到空信封，
-report 会把它标成 parse 失败——这本身就是"该候选不可用"的有效信号。
-
-注意：换模型在生产里就是改 dashscope.model；这里用 extract_document(text, model=m)
-显式覆盖，跑的就是生产实际链路（prompt+后处理+归一化+completeness 纠正）。
+需 DASHSCOPE_API_KEY（走 .env / config）。换模型在生产里就是改 dashscope.model；这里
+用 extract_document(text, model=m) 显式覆盖，跑的就是生产实际链路（prompt+后处理+归一化）。
+百炼托管的第三方模型（deepseek-*/glm-* 等）同一 key+endpoint 直接传 model id 即可。
 """
 from __future__ import annotations
 
@@ -26,6 +30,7 @@ from contract_archive.extraction import extract_document
 EVALS_DIR = Path(__file__).resolve().parent
 DEFAULT_CASES = EVALS_DIR / "cases"
 DEFAULT_RESULTS = EVALS_DIR / "results"
+RESULTS_JSONL = "results.jsonl"
 
 
 def load_cases(suite_dir: Path) -> list[dict[str, Any]]:
@@ -51,7 +56,7 @@ def load_cases(suite_dir: Path) -> list[dict[str, Any]]:
 
 
 def run_extraction_case(text: str, model: str) -> dict[str, Any]:
-    """跑一次抽取，返回 {pred(信封 json), latency_s, usage}。"""
+    """跑一次抽取，返回 {pred(信封 json), latency_s, usage, llm_model}。"""
     start = time.perf_counter()
     envelope = extract_document(text, model=model)
     latency = time.perf_counter() - start
@@ -63,11 +68,16 @@ def run_extraction_case(text: str, model: str) -> dict[str, Any]:
     }
 
 
+def append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="评测执行器：跑 cases × 候选模型")
+    ap = argparse.ArgumentParser(description="评测一阶段：跑 cases × 候选模型 → results.jsonl")
     ap.add_argument("--models", required=True, help="逗号分隔的 model id 列表（建议锁 snapshot）")
     ap.add_argument("--suite", default="extraction", choices=["extraction"],
-                    help="评测套件（seal 见 Phase 2）")
+                    help="评测套件（seal 见 evals.seal）")
     ap.add_argument("--cases-dir", type=Path, default=DEFAULT_CASES)
     ap.add_argument("--out", type=Path, default=None, help="结果目录（默认 results/<时间戳>）")
     ap.add_argument("--repeat", type=int, default=1, help=">1 时同输入重复跑，供自一致性检查")
@@ -81,26 +91,22 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir = args.out or (DEFAULT_RESULTS / datetime.now().strftime("%Y%m%d_%H%M%S"))
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "run_meta.json").write_text(json.dumps({
-        "suite": args.suite, "models": models, "repeat": args.repeat,
-        "cases_dir": str(args.cases_dir), "ts": datetime.now().isoformat(),
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    jsonl_path = out_dir / RESULTS_JSONL
 
     for model in models:
-        model_dir = out_dir / model.replace("/", "_")
-        model_dir.mkdir(exist_ok=True)
         for case in cases:
-            runs = [run_extraction_case(case["input"], model) for _ in range(max(1, args.repeat))]
-            record = {
-                "case_id": case["case_id"], "model": model, "suite": args.suite,
-                "meta": case["meta"], "runs": runs,
-            }
-            (model_dir / f"{case['case_id']}.json").write_text(
-                json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
-            print(f"  [{model}] {case['case_id']}: {runs[0]['latency_s']}s "
-                  f"model={runs[0]['llm_model']}")
+            for r in range(max(1, args.repeat)):
+                rec = run_extraction_case(case["input"], model)
+                append_jsonl(jsonl_path, {
+                    "suite": args.suite, "case_id": case["case_id"], "model": model,
+                    "repeat_idx": r, "meta": case["meta"], **rec,
+                })
+                tag = "" if args.repeat == 1 else f" r{r}"
+                print(f"  [{model}] {case['case_id']}{tag}: {rec['latency_s']}s "
+                      f"model={rec['llm_model']}")
 
-    print(f"\n✅ 结果已写入 {out_dir}\n   下一步：uv run --no-sync python -m evals.report {out_dir}")
+    print(f"\n✅ 已追加到 {jsonl_path}\n"
+          f"   下一步（二阶段）：uv run --no-sync python -m evals.report {out_dir}")
     return 0
 
 
