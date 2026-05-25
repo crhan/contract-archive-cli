@@ -1,0 +1,36 @@
+{
+  "doc_type": "证明",
+  "title": "张三在职收入证明（示例科技）",
+  "summary": "示例科技有限公司出具的张三在职收入证明，2026-03-10出具，上年度税前年收入50万元、股权应税收益10万元。",
+  "parties": ["张三", "示例科技有限公司"],
+  "primary_date": "2026-03-10",
+  "primary_amount_text": "人民币伍拾万元整（¥500,000.00）",
+  "primary_amount_value": 500000.0,
+  "computed_total_value": 600000.0,
+  "key_dates": [
+    {"label": "出具日", "date": "2026-03-10"},
+    {"label": "入职日", "date": "2019-07-01"}
+  ],
+  "amounts": [
+    {"label": "年度税前收入", "text": "人民币伍拾万元整（¥500,000.00）", "value": 500000.0, "is_total_component": true, "period_start": "2025-01-01", "period_end": "2025-12-31"},
+    {"label": "年度股权应税收益", "text": "人民币壹拾万元整（¥100,000.00）", "value": 100000.0, "is_total_component": true, "period_start": "2025-01-01", "period_end": "2025-12-31"},
+    {"label": "月均收入", "text": "人民币叁万元整（¥30,000.00）", "value": 30000.0, "is_total_component": false, "period_start": "2025-03-10", "period_end": "2026-03-10"}
+  ],
+  "seals": [
+    {"raw_text": "示例科技有限公司公章", "owner": "示例科技有限公司", "seal_type": "公章"}
+  ],
+  "fields": [
+    {"label": "持证人", "value": "张三"},
+    {"label": "职务", "value": "高级工程师"},
+    {"label": "入职日期", "value": "2019-07-01"},
+    {"label": "用人单位", "value": "示例科技有限公司"},
+    {"label": "联系人", "value": "李四"},
+    {"label": "单位地址", "value": "示例市示例区示例路1号"}
+  ],
+  "obligations": [],
+  "sub_agreements": [],
+  "completeness": null,
+  "raw_evidence": {},
+  "llm_model": null,
+  "llm_usage": null
+}

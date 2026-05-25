@@ -1,0 +1,7 @@
+{
+  "doc_type": "合同协议",
+  "stratum": "完整合同",
+  "difficulty": "low",
+  "exercises": ["双方签章齐全status=complete(无误报缺陷)", "到期日存在(与车位一次性合同对照)", "义务抽取"],
+  "provenance": "合成匿名（李四/示例物业），非真实合同；可安全入库"
+}

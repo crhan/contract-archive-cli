@@ -1,0 +1,7 @@
+{
+  "doc_type": "发票票据",
+  "stratum": "发票",
+  "difficulty": "low",
+  "exercises": ["键值字段(发票号/税率)", "金额价税合计is_total_component=true而金额/税额=false", "completeness应为null"],
+  "provenance": "合成匿名（张三/示例商贸），非真实发票；可安全入库"
+}

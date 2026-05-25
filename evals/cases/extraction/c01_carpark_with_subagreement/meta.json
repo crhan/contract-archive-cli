@@ -1,0 +1,7 @@
+{
+  "doc_type": "合同协议",
+  "stratum": "含补充协议",
+  "difficulty": "high",
+  "exercises": ["补充协议嵌套", "签章缺陷(乙方补充协议落款空白)带页码出处", "金额is_total_component", "多落款"],
+  "provenance": "合成匿名（张三/示例置业），非真实合同；可安全入库"
+}

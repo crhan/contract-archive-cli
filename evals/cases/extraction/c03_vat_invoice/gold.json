@@ -1,0 +1,32 @@
+{
+  "doc_type": "发票票据",
+  "title": "示例商贸开具给张三的办公设备增值税专用发票",
+  "summary": "示例商贸有限公司2026-04-05向张三开具的办公设备增值税专用发票，价税合计1万元。",
+  "parties": ["张三", "示例商贸有限公司"],
+  "primary_date": "2026-04-05",
+  "primary_amount_text": "￥10,000.00",
+  "primary_amount_value": 10000.0,
+  "computed_total_value": null,
+  "key_dates": [
+    {"label": "开票日", "date": "2026-04-05"}
+  ],
+  "amounts": [
+    {"label": "金额", "text": "￥8,849.56", "value": 8849.56, "is_total_component": false, "period_start": null, "period_end": null},
+    {"label": "税额", "text": "￥1,150.44", "value": 1150.44, "is_total_component": false, "period_start": null, "period_end": null},
+    {"label": "价税合计", "text": "￥10,000.00", "value": 10000.0, "is_total_component": true, "period_start": null, "period_end": null}
+  ],
+  "seals": [
+    {"raw_text": "示例商贸有限公司发票专用章", "owner": "示例商贸有限公司", "seal_type": "发票专用章"}
+  ],
+  "fields": [
+    {"label": "发票号码", "value": "01234567"},
+    {"label": "税率", "value": "13%"},
+    {"label": "货物名称", "value": "办公设备一批"}
+  ],
+  "obligations": [],
+  "sub_agreements": [],
+  "completeness": null,
+  "raw_evidence": {},
+  "llm_model": null,
+  "llm_usage": null
+}

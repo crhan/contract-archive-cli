@@ -1,0 +1,33 @@
+{
+  "doc_type": "合同协议",
+  "title": "示例大厦301室房屋租赁合同（乙方李四）",
+  "summary": "示例物业管理有限公司将示例大厦301室以月租1万元租给李四，租期2025全年，2024-12-20签订，双方签章齐全。",
+  "parties": ["示例物业管理有限公司", "李四"],
+  "primary_date": "2024-12-20",
+  "primary_amount_text": "人民币壹万元整（¥10,000.00）",
+  "primary_amount_value": 10000.0,
+  "computed_total_value": null,
+  "key_dates": [
+    {"label": "签订日", "date": "2024-12-20"},
+    {"label": "起租日", "date": "2025-01-01"},
+    {"label": "到期日", "date": "2025-12-31"}
+  ],
+  "amounts": [
+    {"label": "月租金", "text": "人民币壹万元整（¥10,000.00）", "value": 10000.0, "is_total_component": false, "period_start": null, "period_end": null}
+  ],
+  "seals": [
+    {"raw_text": "示例物业管理有限公司合同专用章", "owner": "示例物业管理有限公司", "seal_type": "合同专用章"}
+  ],
+  "fields": [],
+  "obligations": [
+    {"actor": "party_b", "action": "按季度支付租金", "deadline": null, "evidence": "押一付三，乙方按季度支付"}
+  ],
+  "sub_agreements": [],
+  "completeness": {
+    "status": "complete",
+    "issues": []
+  },
+  "raw_evidence": {},
+  "llm_model": null,
+  "llm_usage": null
+}

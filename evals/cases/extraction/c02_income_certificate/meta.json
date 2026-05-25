@@ -1,0 +1,7 @@
+{
+  "doc_type": "证明",
+  "stratum": "证明-相对日期",
+  "difficulty": "medium",
+  "exercises": ["相对日期解析(上年度→2025全年/近12个月→出具日往前推)", "is_total_component分类(年度项true,月均false)", "completeness应为null(证明无完整性)"],
+  "provenance": "合成匿名（张三/示例科技），非真实证明；可安全入库"
+}

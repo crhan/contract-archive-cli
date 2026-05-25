@@ -33,3 +33,7 @@ modelscope_cache/
 # Logs
 *.log
 logs/
+
+# 评测产物（每次跑 evals.run 生成）+ 本地脱敏真实样例（绝不入库，见 evals/README PII 红线）
+evals/results/
+evals/cases/**/private/

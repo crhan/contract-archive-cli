@@ -1,0 +1,38 @@
+{
+  "doc_type": "合同协议",
+  "title": "示例花园18号地下车位使用权转让协议（乙方张三）",
+  "summary": "示例置业有限公司将示例花园18号地下车位使用权以人民币20万元转让给张三，2025-03-15签订；含一份将交付时间由2025-04-01变更为2025-05-01的补充协议。",
+  "parties": ["示例置业有限公司", "张三"],
+  "primary_date": "2025-03-15",
+  "primary_amount_text": "人民币贰拾万元整（¥200,000.00）",
+  "primary_amount_value": 200000.0,
+  "computed_total_value": 200000.0,
+  "key_dates": [
+    {"label": "签订日", "date": "2025-03-15"},
+    {"label": "原交付日", "date": "2025-04-01"},
+    {"label": "变更后交付日", "date": "2025-05-01"}
+  ],
+  "amounts": [
+    {"label": "转让价款", "text": "人民币贰拾万元整（¥200,000.00）", "value": 200000.0, "is_total_component": true, "period_start": null, "period_end": null}
+  ],
+  "seals": [
+    {"raw_text": "示例置业有限公司合同专用章", "owner": "示例置业有限公司", "seal_type": "合同专用章"}
+  ],
+  "fields": [],
+  "obligations": [
+    {"actor": "party_b", "action": "一次性支付转让价款", "deadline": null, "evidence": "乙方于签订本协议之日一次性支付全部价款"},
+    {"actor": "party_a", "action": "交付车位", "deadline": "2025-05-01", "evidence": "车位交付时间由2025年4月1日变更为2025年5月1日"}
+  ],
+  "sub_agreements": [
+    {"title": "补充协议", "summary": "车位交付时间由2025-04-01变更为2025-05-01", "sign_date": "2025-03-20", "seals": [{"raw_text": "示例置业有限公司", "owner": "示例置业有限公司", "seal_type": null}], "evidence": "车位交付时间由 2025年4月1日 变更为 2025年5月1日"}
+  ],
+  "completeness": {
+    "status": "incomplete",
+    "issues": [
+      {"item": "补充协议·乙方签章", "category": "signature", "detail": "落款处空白，无签字（疑似，可能OCR漏识，需人工复核）", "evidence": "第 2 页 乙方（签字）：____________ 处空白"}
+    ]
+  },
+  "raw_evidence": {},
+  "llm_model": null,
+  "llm_usage": null
+}
