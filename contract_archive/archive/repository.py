@@ -312,17 +312,27 @@ def list_documents(
     limit: int = 50,
     order_by: str = "ingested_at",
     status: Optional[str] = None,
+    doc_type: Optional[str] = None,
 ) -> list[DocumentRow]:
-    """list 命令实现。status=None 表示全部。"""
-    allowed_order = {"ingested_at", "sign_date", "expire_date", "amount_cents"}
+    """list 命令实现。status / doc_type=None 表示不过滤。"""
+    allowed_order = {
+        "ingested_at", "sign_date", "expire_date", "amount_cents",
+        "primary_date", "primary_amount_cents",
+    }
     if order_by not in allowed_order:
         raise ValueError(f"order_by must be one of {allowed_order}")
 
-    sql = "SELECT * FROM documents"
+    where: list[str] = []
     params: list[Any] = []
     if status:
-        sql += " WHERE status = ?"
+        where.append("status = ?")
         params.append(status)
+    if doc_type:
+        where.append("doc_type = ?")
+        params.append(doc_type)
+    sql = "SELECT * FROM documents"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
     sql += f" ORDER BY {order_by} DESC LIMIT ?"
     params.append(limit)
 

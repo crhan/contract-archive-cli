@@ -92,10 +92,20 @@ def _cn_money_to_value(s: str) -> float | None:
     "贰万元" → 20000.0
     解析失败返回 None。
     """
-    s = (s.replace("元", "").replace("圆", "")
-          .replace("整", "").replace("人民币", "").strip())
+    s = s.replace("人民币", "").replace("圆", "元").replace("整", "").strip()
     if not s:
         return None
+    # 小数部分：元后的 角(0.1) / 分(0.01)，如"…元柒角壹分" = .71
+    frac = 0.0
+    if "元" in s:
+        intpart, _, fracpart = s.partition("元")
+        for unit_ch, unit_val in (("角", 0.1), ("分", 0.01)):
+            idx = fracpart.find(unit_ch)
+            if idx >= 1:
+                d = _CN_MONEY_DIGITS.get(fracpart[idx - 1])
+                if d is not None:
+                    frac += d * unit_val
+        s = intpart
     total = 0
     section = 0   # 当前"万"以下的累加
     digit = 0     # 上一个数字
@@ -122,7 +132,8 @@ def _cn_money_to_value(s: str) -> float | None:
             return None  # 不认识的字符（含混阿拉伯/中文），交给阿拉伯路径
     section += digit
     total += section
-    return float(total) if saw_any and total > 0 else None
+    result = float(total) + frac
+    return result if (saw_any or frac) and result > 0 else None
 
 
 def parse_money_value(value: str | None) -> float | None:

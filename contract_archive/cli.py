@@ -171,22 +171,29 @@ def list_cmd(
     order_by: str = typer.Option(
         "ingested_at",
         "--order-by",
-        help="ingested_at | sign_date | expire_date | amount_cents",
+        help="ingested_at | primary_date | primary_amount_cents | sign_date | expire_date | amount_cents",
     ),
     status: Optional[str] = typer.Option(
         None,
         "--status",
         help="过滤状态：ok | partial | failed；默认 None=全部",
     ),
+    doc_type: Optional[str] = typer.Option(
+        None,
+        "--type",
+        help="按文档类型过滤：合同协议 | 证明 | 发票票据 | 报告 | 证件 | 其他",
+    ),
     fmt: str = typer.Option("table", "--format", help="table | json"),
 ) -> None:
-    """列出档案库内已索引合同。"""
+    """列出档案库内已索引文档。"""
     paths = _resolve_archive(archive)
     if not paths.db_path.exists():
         console.print(f"[yellow]archive empty: {paths.db_path} not found[/yellow]")
         raise typer.Exit(0)
     conn = open_archive_db(paths.db_path)
-    rows = list_documents(conn, limit=limit, order_by=order_by, status=status)
+    rows = list_documents(
+        conn, limit=limit, order_by=order_by, status=status, doc_type=doc_type
+    )
     conn.close()
 
     if fmt == "json":
