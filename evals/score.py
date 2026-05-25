@@ -123,10 +123,14 @@ class FieldScore:
         return self.tp / d if d else 1.0
 
     def fbeta(self) -> float:
-        b2 = self.beta * self.beta
+        # 真空（无 gold 无 pred，本 case 对该字段无期望）→ 1.0，不失分。
+        if self.tp + self.fp + self.fn == 0:
+            return 1.0
         p, r = self.precision(), self.recall()
+        b2 = self.beta * self.beta
         d = b2 * p + r
-        return (1 + b2) * p * r / d if d else 1.0
+        # p=r=0（全错，如标量值抽错→fp=fn=1）→ 0.0。不可落回 1.0：那是把全错当满分。
+        return (1 + b2) * p * r / d if d else 0.0
 
 
 def _align(
@@ -173,6 +177,27 @@ def score_scalar(
         if g:
             fs.fn = 1
         if p:
+            fs.fp = 1
+    return fs
+
+
+def score_scalar_amount(field: str, gold_val: Optional[float], pred_val: Optional[float]) -> FieldScore:
+    """
+    标量金额按**归一化数值**比，不比原文——同一金额 "¥200,000.00" 与 "人民币贰拾万元整"
+    数值相同应算对。生产已用 parse_money_value 把文本算成 value，这里直接比 value。
+    """
+    fs = FieldScore(field, "scalar", weight=FIELD_WEIGHTS.get(field, 1.0),
+                    critical=field in CRITICAL_FIELDS)
+    gv = round(gold_val, 2) if gold_val is not None else None
+    pv = round(pred_val, 2) if pred_val is not None else None
+    if gv is None and pv is None:
+        return fs
+    if gv is not None and gv == pv:
+        fs.tp = 1
+    else:
+        if gv is not None:
+            fs.fn = 1
+        if pv is not None:
             fs.fp = 1
     return fs
 
@@ -353,7 +378,7 @@ def score_envelope(case_id: str, gold: DocumentExtraction, pred: DocumentExtract
     es.fields.append(score_scalar("title", gold.title, pred.title))
     es.fields.append(score_scalar("summary", gold.summary, pred.summary))
     es.fields.append(score_scalar("primary_date", gold.primary_date, pred.primary_date, is_date=True))
-    es.fields.append(score_scalar("primary_amount", gold.primary_amount_text, pred.primary_amount_text))
+    es.fields.append(score_scalar_amount("primary_amount", gold.primary_amount_value, pred.primary_amount_value))
     es.fields.append(score_str_list("parties", gold.parties, pred.parties))
     es.fields.append(score_amounts(gold.amounts, pred.amounts))
     es.fields.append(score_labeled_dates(gold.key_dates, pred.key_dates))

@@ -115,6 +115,38 @@ def test_empty_pred_is_parse_failure():
     assert es.parse_ok is False
 
 
+def test_fbeta_wrong_is_zero_not_one():
+    """回归：p=r=0（全错，如标量抽错 fp=fn=1）的 fbeta 必须为 0，不能落回 1.0 把全错当满分。"""
+    from evals.score import FieldScore
+    assert FieldScore("x", "scalar", tp=0, fp=1, fn=1).fbeta() == 0.0   # 全错
+    assert FieldScore("x", "scalar", tp=0, fp=0, fn=0).fbeta() == 1.0   # 真空：无期望
+    assert FieldScore("x", "scalar", tp=1, fp=0, fn=0).fbeta() == 1.0   # 全对
+    assert FieldScore("x", "set", tp=1, fp=1, fn=1).fbeta() == pytest.approx(0.5)
+
+
+def test_wrong_scalar_field_scores_zero_in_envelope():
+    """信封级回归：primary_amount 抽错 → 该字段 fbeta=0（门禁 field_values 才能正确卡）。"""
+    gold = _load_gold("c03_vat_invoice")
+    pred = copy.deepcopy(gold)
+    pred.llm_model = "x"
+    pred.primary_amount_value = 99999.99   # 抽错主金额（按数值比）
+    es = score_envelope("c03", gold, pred)
+    pa = next(f for f in es.fields if f.field == "primary_amount")
+    assert pa.fbeta() == 0.0
+
+
+def test_primary_amount_scored_by_value_not_text():
+    """金额按归一化数值比：文本写法不同但数值相同 → 算对（不假阴性）。"""
+    gold = _load_gold("c01_carpark_with_subagreement")
+    pred = copy.deepcopy(gold)
+    pred.llm_model = "x"
+    pred.primary_amount_text = "¥200,000.00"   # 文本不同
+    pred.primary_amount_value = 200000.0       # 数值相同
+    es = score_envelope("c01", gold, pred)
+    pa = next(f for f in es.fields if f.field == "primary_amount")
+    assert pa.fbeta() == 1.0
+
+
 def test_bootstrap_ci_bounds():
     mean, lo, hi = bootstrap_ci([1.0, 1.0, 1.0, 0.0], n=500)
     assert 0.0 <= lo <= mean <= hi <= 1.0
