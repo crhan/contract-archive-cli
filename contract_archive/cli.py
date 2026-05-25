@@ -20,7 +20,6 @@ import logging
 import os
 import sys
 from dataclasses import asdict
-from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -50,6 +49,15 @@ from .archive import (
     Stats,
 )
 from .pipelines import MinerUPipeline
+from .cli_render import (
+    display_amount,
+    ingest_result_to_dict,
+    local_time,
+    period_str,
+    row_to_dict,
+    status_color,
+    subject_of,
+)
 
 # ---------- 参数枚举（parse-time 校验：坏值由 typer 报 exit 2，不再漏到数据层 ValueError）----------
 
@@ -276,7 +284,7 @@ def ingest(
             })
             continue
         summary[result.status] = summary.get(result.status, 0) + 1
-        results.append(_ingest_result_to_dict(result))
+        results.append(ingest_result_to_dict(result))
         _print_ingest_result(result)
 
     checkpoint(conn)
@@ -293,20 +301,6 @@ def ingest(
         ))
     if summary["failed"]:
         raise typer.Exit(1)
-
-
-def _ingest_result_to_dict(r) -> dict:
-    """IngestResult → JSON 友好 dict（pdf_path 转字符串）。"""
-    return {
-        "pdf_path": str(r.pdf_path),
-        "sha256": r.sha256,
-        "status": r.status,
-        "doc_id": r.doc_id,
-        "mineru_duration_s": r.mineru_duration_s,
-        "llm_duration_s": r.llm_duration_s,
-        "error_message": r.error_message,
-        "skipped_reason": r.skipped_reason,
-    }
 
 
 def _print_ingest_result(r) -> None:
@@ -359,7 +353,7 @@ def list_cmd(
     conn.close()
 
     if fmt is OutputFormat.json:
-        print(_json.dumps([_row_to_dict(r) for r in rows], ensure_ascii=False, indent=2))
+        print(_json.dumps([row_to_dict(r) for r in rows], ensure_ascii=False, indent=2))
         return
 
     table = Table(
@@ -378,99 +372,15 @@ def list_cmd(
     for r in rows:
         table.add_row(
             str(r.id),
-            _status_color(r.status),
+            status_color(r.status),
             r.doc_type or "-",
             r.title or r.contract_name or "-",
-            _subject_of(r),
+            subject_of(r),
             r.primary_date or "-",
-            _display_amount(r),
-            _local_time(r.ingested_at)[:10],  # 本地日期，与 show 一致
+            display_amount(r),
+            local_time(r.ingested_at)[:10],  # 本地日期，与 show 一致
         )
     console.print(table)
-
-
-def _display_amount(r) -> str:
-    """
-    list 金额列：有计算合计（computed_total_value）优先显示并标 *，
-    否则回退抽取的主金额（primary_amount_value），都没有则 '-'。
-    """
-    total = r.details().get("computed_total_value")
-    if isinstance(total, (int, float)):
-        return f"¥{total:,.0f}[cyan]*[/cyan]"
-    if r.primary_amount_value is not None:
-        return f"¥{r.primary_amount_value:,.0f}"
-    return "-"
-
-
-def _period_str(a: dict) -> str:
-    """金额覆盖区间的展示标注，如 ' [2025-01-01~2025-12-31]'；无区间返回空串。"""
-    start, end = a.get("period_start"), a.get("period_end")
-    if not start and not end:
-        return ""
-    return f" [dim][{start or '?'}~{end or '?'}][/dim]"
-
-
-def _local_time(iso_utc: Optional[str]) -> str:
-    """
-    入库时间 UTC ISO（'2026-05-24T23:05:04Z'）→ 本地时区展示串。
-    存储保持 UTC（可移植、可比较），仅展示时转本地。解析失败则原样返回。
-    """
-    if not iso_utc:
-        return "-"
-    try:
-        dt = datetime.strptime(iso_utc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-    except (ValueError, TypeError):
-        return iso_utc
-
-
-def _subject_of(r) -> str:
-    """list 用的『主体』列：优先信封 parties，回退合同甲乙方。截断防撑宽。"""
-    parties = r.details().get("parties") or []
-    if not parties:
-        parties = [p for p in (r.party_a, r.party_b) if p]
-    if not parties:
-        return "-"
-    s = "、".join(parties[:2])
-    return s if len(s) <= 20 else s[:19] + "…"
-
-
-def _status_color(s: str) -> str:
-    color = {"ok": "green", "partial": "yellow", "failed": "red"}.get(s, "white")
-    return f"[{color}]{s}[/{color}]"
-
-
-def _row_to_dict(r) -> dict:
-    return {
-        "id": r.id,
-        "sha256": r.sha256,
-        "status": r.status,
-        "doc_type": r.doc_type,
-        "title": r.title,
-        "summary": r.summary,
-        "primary_date": r.primary_date,
-        "primary_amount_value": r.primary_amount_value,
-        "computed_total_value": r.details().get("computed_total_value"),
-        "details": r.details(),
-        "contract_name": r.contract_name,
-        "party_a": r.party_a,
-        "party_b": r.party_b,
-        "amount_text": r.amount_text,
-        "amount_value": r.amount_value,
-        "sign_date": r.sign_date,
-        "expire_date": r.expire_date,
-        "auto_renewal": bool(r.auto_renewal) if r.auto_renewal is not None else None,
-        "risk_clauses": r.risk_clauses,
-        "obligations": [
-            {"actor": o.actor, "action": o.action,
-             "deadline": o.deadline, "evidence": o.evidence}
-            for o in r.obligations
-        ],
-        "overall_confidence": r.overall_confidence,
-        "source_path": r.source_path,
-        "output_dir": r.output_dir,
-        "ingested_at": r.ingested_at,
-    }
 
 
 # ---------- search ----------
@@ -544,7 +454,7 @@ def search(
     conn.close()
 
     if fmt is OutputFormat.json:
-        print(_json.dumps([_row_to_dict(r) for r in rows], ensure_ascii=False, indent=2))
+        print(_json.dumps([row_to_dict(r) for r in rows], ensure_ascii=False, indent=2))
         return
 
     table = Table(title=f"Search · {len(rows)} hit(s)")
@@ -595,16 +505,16 @@ def show(
         raise typer.Exit(1)
 
     if fmt is OutputFormat.json:
-        print(_json.dumps(_row_to_dict(row), ensure_ascii=False, indent=2))
+        print(_json.dumps(row_to_dict(row), ensure_ascii=False, indent=2))
         return
 
-    table = Table(title=f"Document #{row.id} · {row.doc_type or '?'} ({_status_color(row.status)})")
+    table = Table(title=f"Document #{row.id} · {row.doc_type or '?'} ({status_color(row.status)})")
     table.add_column("field", style="cyan", no_wrap=True)
     table.add_column("value", overflow="fold")
     table.add_row("sha256", row.sha256)
     table.add_row("source_path", row.source_path)
     table.add_row("output_dir", row.output_dir)
-    table.add_row("ingested_at", _local_time(row.ingested_at))
+    table.add_row("ingested_at", local_time(row.ingested_at))
     # mineru_s/llm_s（执行耗时）是运维遥测，不属于档案内容——不在 show 展示。
     # DB 列仍保留并由 ingest 写入，需要时可查 jsonl 日志。
     if row.error_message:
@@ -648,7 +558,7 @@ def show(
                 vs = f"（¥{v:,.2f}）" if isinstance(v, (int, float)) else ""
                 mark = " [cyan]✓计入合计[/cyan]" if a.get("is_total_component") else ""
                 lines.append(
-                    f"• {a.get('label', '')}: {a.get('text', '')}{vs}{_period_str(a)}{mark}"
+                    f"• {a.get('label', '')}: {a.get('text', '')}{vs}{period_str(a)}{mark}"
                 )
             table.add_row("金额", "\n".join(lines))
         total = det.get("computed_total_value")
