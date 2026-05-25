@@ -25,6 +25,7 @@ from ..schemas import (
     LabeledValue,
     Seal,
 )
+from ..config import load_settings
 from .llm_extractor import _extract_text, _parse_json_loose
 from .normalize import coerce_obligations, normalize_date, parse_money_value
 
@@ -117,13 +118,12 @@ def call_llm_document(
     刻意不复用其函数体——合同那条路保持不动，避免改动牵连。
     """
     import dashscope  # lazy import
-    import os
 
-    model = model or os.getenv("DASHSCOPE_LLM_MODEL", "qwen3.7-max")
-    api_key = api_key or os.getenv("DASHSCOPE_API_KEY", "")
-    base_url = base_url or os.getenv(
-        "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1"
-    )
+    # 统一从 config 层取（env > 配置文件 > 默认）；显式传参仍优先（param or settings）。
+    s = load_settings()
+    model = model or s.dashscope_model
+    api_key = api_key or s.dashscope_api_key
+    base_url = base_url or s.dashscope_base_url
     if not api_key:
         logger.warning("DASHSCOPE_API_KEY missing; skip LLM document extraction")
         return {}

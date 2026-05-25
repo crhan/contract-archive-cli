@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 from typing import Any
+
+from ..config import load_settings
 
 logger = logging.getLogger(__name__)
 
@@ -78,11 +79,11 @@ def call_llm_extract(
     """
     import dashscope  # lazy import
 
-    model = model or os.getenv("DASHSCOPE_LLM_MODEL", "qwen3.7-max")
-    api_key = api_key or os.getenv("DASHSCOPE_API_KEY", "")
-    base_url = base_url or os.getenv(
-        "DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/api/v1"
-    )
+    # 统一从 config 层取（env > 配置文件 > 默认）；显式传参仍优先（param or settings）。
+    s = load_settings()
+    model = model or s.dashscope_model
+    api_key = api_key or s.dashscope_api_key
+    base_url = base_url or s.dashscope_base_url
     if not api_key:
         logger.warning("DASHSCOPE_API_KEY missing; skip LLM extraction")
         return {}

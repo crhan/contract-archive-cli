@@ -11,8 +11,9 @@
   seals                 跨文档列印章（某主体有哪些章、各在哪些文档）
   delete <id>           删除档案记录；默认仅删 DB 行，--purge-files 同时删文件
   vacuum                VACUUM 数据库（碎片整理）
+  config                查看/设置全局配置（XDG ~/.config/contract-archive/config.json）
 
-档案库路径优先级：--archive flag > CONTRACT_ARCHIVE_DIR env > XDG 默认 (~/.local/share/contract-archive)
+档案库路径优先级：--archive flag > CONTRACT_ARCHIVE_DIR env > config archive.dir > XDG 默认 (~/.local/share/contract-archive)
 """
 from __future__ import annotations
 
@@ -51,6 +52,8 @@ from .archive import (
     Stats,
 )
 from .pipelines import MinerUPipeline
+from .config import load_settings
+from .cli_config import config_app
 from .cli_render import (
     completeness_mark,
     display_amount,
@@ -137,6 +140,7 @@ app = typer.Typer(
         "\n文档：https://github.com/crhan/contract-archive-cli"
     ),
 )
+app.add_typer(config_app, name="config")
 
 
 @app.callback()
@@ -187,14 +191,19 @@ def main(
 
 
 def _resolve_archive(archive_opt: Optional[Path]) -> ArchivePaths:
-    """--archive flag > CONTRACT_ARCHIVE_DIR env > XDG 默认 (~/.local/share/contract-archive)"""
+    """
+    --archive flag > CONTRACT_ARCHIVE_DIR env > config archive.dir > XDG 默认。
+
+    env 与 config 的合并交给 load_settings()（其 archive_dir 已是 env>config 短路结果，
+    env 严格优先、空串当未设），这里只在 flag 之后接住它，再回退 XDG 默认。
+    统一 expanduser：修掉历史上 CONTRACT_ARCHIVE_DIR=~/x 不展开 ~ 的坑。
+    """
     if archive_opt:
         root = archive_opt
-    elif os.getenv("CONTRACT_ARCHIVE_DIR"):
-        root = Path(os.getenv("CONTRACT_ARCHIVE_DIR"))
     else:
-        root = default_archive_root()
-    return ArchivePaths(root=root.resolve())
+        configured = load_settings().archive_dir
+        root = Path(configured) if configured else default_archive_root()
+    return ArchivePaths(root=root.expanduser().resolve())
 
 
 _archive_opt = typer.Option(
