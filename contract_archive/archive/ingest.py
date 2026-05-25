@@ -86,7 +86,8 @@ def _run_extraction(
     document_text: str, llm_enabled: bool
 ) -> tuple[ContractExtraction, ExtractionConfidence, DocumentExtraction]:
     """
-    LLM-first 抽取：先判类型抽通用信封；若是合同，再跑 hybrid 补合同专属列。
+    LLM-first 抽取：先判类型抽通用信封；若是合同，再跑合同抽取补专属列。
+    （合同抽取自 Phase 2 起也是纯 LLM，不再有 rule/hybrid。）
     返回 (合同抽取, 置信度, 通用信封)——三者一并交给 repository 落库。
     """
     if not llm_enabled:
@@ -98,9 +99,9 @@ def _run_extraction(
     envelope = extract_document(document_text, llm_enabled=llm_enabled)
     if envelope.doc_type == "合同协议" and llm_enabled:
         ext, conf = extract_contract(document_text, llm_enabled=llm_enabled)
-        # 合同义务用 hybrid 的（rule+LLM 交叉验证，比通用信封更准）
+        # 合同义务用合同抽取的（专属 prompt 对义务/罚则区分更细）
         envelope.obligations = ext.obligations
-        # 标题/摘要若 hybrid 没给，回退用信封的
+        # 标题若合同抽取没给，回退用信封的
         if not ext.contract_name and envelope.title:
             ext.contract_name = envelope.title
         return ext, conf, envelope

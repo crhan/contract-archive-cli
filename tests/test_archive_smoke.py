@@ -429,8 +429,8 @@ def test_obligations_storage_and_filter(archive_root, conn, sample_pdf):
 
 
 def test_obligations_coerce_chinese_actor(archive_root, conn, sample_pdf):
-    """LLM 偶尔返回 actor=甲方/乙方 中文，hybrid 应归一为 party_a/party_b。"""
-    from contract_archive.extraction.hybrid import _coerce_obligations
+    """LLM 偶尔返回 actor=甲方/乙方 中文，coerce 应归一为 party_a/party_b。"""
+    from contract_archive.extraction.normalize import coerce_obligations as _coerce_obligations
 
     raw = [
         {"actor": "甲方", "action": "交付", "deadline": "2026-12-31",

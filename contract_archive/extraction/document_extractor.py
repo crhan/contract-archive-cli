@@ -1,8 +1,9 @@
 """
 通用文档抽取（LLM-first，跨类型）。
 
-与合同专用的 hybrid（rule + LLM 交叉验证）不同，这里走纯 LLM：
-一次调用完成「判类型 + 抽字段」，结果归一化到 DocumentExtraction 信封。
+与合同专用抽取（自带一份调校过的合同 prompt + ContractExtraction schema）相对，
+这里是面向任意类型的通用路径：一次调用完成「判类型 + 抽字段」，
+结果归一化到 DocumentExtraction 信封。两者都是纯 LLM（Phase 2 起无 rule）。
 死代码 rule 仅保留为确定性数值归一化（中文大写金额→数值、日期→ISO），
 不参与字段抽取——加新文档类型只需扩 prompt 里的举例，无需写代码。
 
@@ -21,8 +22,8 @@ from ..schemas import (
     LabeledDate,
     LabeledValue,
 )
-from .hybrid import _coerce_obligations, normalize_date, parse_money_value
 from .llm_extractor import _extract_text, _parse_json_loose
+from .normalize import coerce_obligations, normalize_date, parse_money_value
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +233,6 @@ def extract_document(
         key_dates=_coerce_labeled_dates(raw.get("key_dates")),
         amounts=_coerce_labeled_amounts(raw.get("amounts")),
         fields=_coerce_labeled_values(raw.get("fields")),
-        obligations=_coerce_obligations(raw.get("obligations")),
+        obligations=coerce_obligations(raw.get("obligations")),
         raw_evidence={},
     )

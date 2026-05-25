@@ -6,7 +6,7 @@ LLM-based 合同字段抽取。
 策略：
 - 一次性把 markdown / raw_text 喂给 LLM，让其返回结构化 JSON
 - 用 JSON Schema/示例约束输出
-- 失败/超时时返回空字典，由 hybrid 层 fallback 到 rule
+- 失败/超时时返回空字典，由调用方（contract_extractor）处理为空抽取
 """
 from __future__ import annotations
 
