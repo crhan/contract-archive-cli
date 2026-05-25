@@ -26,9 +26,22 @@ def test_installment_sum_exceeds_total_flagged():
     issues = check_amount_consistency(amounts, 200000.0)
     assert len(issues) == 1
     assert issues[0].category == "amount"
-    assert issues[0].item == "分期款与总价不符"
+    assert issues[0].item == "分期款超过总价"
     # 出处拼接了各分期项，能翻回原文
     assert "首期款" in issues[0].evidence and "余款" in issues[0].evidence
+
+
+def test_installment_below_total_not_flagged():
+    """认购/预售：预付房款＋定金 < 房屋总价是正常的（余款待签正式合同再付），不报。
+
+    这是 id=3 认购协议的真实场景——曾因规则 A 用'≠'报负差而误报，收紧为'只报正差'后修复。
+    """
+    amounts = [
+        _amt("房屋总价", 12279889.0, total=True),
+        _amt("预付房款", 500000.0, installment=True),
+        _amt("定金", 500000.0, installment=True),
+    ]
+    assert check_amount_consistency(amounts, 12279889.0) == []
 
 
 def test_installment_sum_matches_total_ok():

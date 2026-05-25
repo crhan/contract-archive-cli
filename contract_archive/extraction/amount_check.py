@@ -6,8 +6,9 @@
 比较交给代码，LLM 只负责语义标注（is_total_component / is_installment）。
 
 两条规则，都只产出"疑似异常、请人工核对"——属辅助筛查、非终判：
-  规则A 分期失衡：同一总价的各分期付款项(is_installment)之和应≈合计(总价)，
-        偏差超容差即报（如首期50W＋余款15W=65W ≠ 总价20W）。
+  规则A 分期超额：各分期付款项(is_installment)之和 > 总价(合计) 即报（如首期50W＋
+        余款15W=65W > 总价20W，首期多打一个0）。**只报正差**——分期和 < 总价是认购预付、
+        首付+贷款等正常场景（认购预付50W+定金50W ≪ 房屋总价1228W），报了是误报。
   规则B 单项越界：未计入合计、也未标分期的单项金额却 > 合计，疑似多填/笔误，
         作为 LLM 漏标分期时的兜底。
 """
@@ -44,19 +45,23 @@ def check_amount_consistency(
         return issues
     tol = _tolerance(computed_total)
 
-    # 规则A：分期付款项之和 vs 合计（总价）。
+    # 规则A：分期付款项之和 **超过** 总价才报（只报正差）。
+    # 不报负差：认购/预售先付定金预付款、首付+贷款等，已列分期项之和本就小于总价
+    # 属正常（认购预付50W+定金50W ≪ 房屋总价1228W），报负差是误报。
+    # 分期之和 > 总价 才是硬矛盾（29号首期50W＋余款15W=65W > 总价20W，首期误填）。
     installments = [a for a in amounts if a.is_installment and a.value is not None]
     if installments:
         inst_sum = round(sum(a.value for a in installments), 2)
-        if abs(inst_sum - computed_total) > tol:
+        overshoot = round(inst_sum - computed_total, 2)
+        if overshoot > tol:
             labels = "＋".join(a.label for a in installments)
             issues.append(CompletenessIssue(
-                item="分期款与总价不符",
+                item="分期款超过总价",
                 category="amount",
                 detail=(
                     f"分期款之和（{labels}）={inst_sum:,.0f}元，"
-                    f"与总价/合计 {computed_total:,.0f}元 不符"
-                    f"（差 {inst_sum - computed_total:+,.0f}元），疑似金额笔误，请人工核对"
+                    f"超过总价/合计 {computed_total:,.0f}元（多 {overshoot:,.0f}元），"
+                    f"疑似金额笔误，请人工核对"
                 ),
                 evidence=_merge_evidence(installments),
             ))
