@@ -29,6 +29,7 @@ from typing import Optional
 
 from ..extraction import extract_contract, extract_document
 from ..extraction.vision_seal import augment_completeness_with_vision
+from ..extraction.evidence_page_fix import correct_evidence_pages
 from ..pipelines import MinerUPipeline
 from ..schemas import (
     FILE_EXTRACTION,
@@ -259,6 +260,13 @@ def ingest_pdf(
             except Exception as e:  # noqa: BLE001 — VL 失败不能中断入库
                 log_handle.write(f"[seal-vision] 跳过（异常）: {e}\n")
 
+            # ---- 2.6 出处页码校正：用 content_list 的 page_idx 覆盖 LLM 猜的页码 ----
+            try:
+                if correct_evidence_pages(envelope, mineru_dir):
+                    log_handle.write("[page-fix] 出处页码已据 content_list 校正\n")
+            except Exception as e:  # noqa: BLE001 — 页码校正失败不能中断入库
+                log_handle.write(f"[page-fix] 跳过（异常）: {e}\n")
+
         # ---- 3. extracted.json 落盘（写通用信封；即使 partial 也写空对象，便于后续 extract 复跑） ----
         (tmp_doc_dir / FILE_EXTRACTION).write_text(
             envelope.model_dump_json(indent=2), encoding="utf-8"
@@ -476,6 +484,10 @@ def re_extract(
             augment_completeness_with_vision(envelope, mineru_dir)
         except Exception as e:  # noqa: BLE001 — VL 失败不能中断重抽
             logger.warning("seal-vision 跳过（异常）: %s", e)
+        try:
+            correct_evidence_pages(envelope, mineru_dir)
+        except Exception as e:  # noqa: BLE001 — 页码校正失败不能中断重抽
+            logger.warning("page-fix 跳过（异常）: %s", e)
 
     # 落盘新 extracted.json（通用信封）
     (Path(doc.output_dir) / FILE_EXTRACTION).write_text(
