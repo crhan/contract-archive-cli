@@ -37,3 +37,5 @@ logs/
 # 评测产物（每次跑 evals.run 生成）+ 本地脱敏真实样例（绝不入库，见 evals/README PII 红线）
 evals/results/
 evals/cases/**/private/
+# make_gold 从真实合同生成的脱敏 draft case（未经人工核对脱敏完整性前一律不入库）
+evals/cases_private/
