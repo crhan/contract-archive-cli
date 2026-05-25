@@ -56,7 +56,7 @@ JSON 字段定义：
   "primary_date": "该文档最重要的日期 ISO（合同=签订日，证明=出具日，发票=开票日）或 null",
   "primary_amount": "该文档最重要的金额原文（合同=合同额，收入证明=年收入）或 null",
   "key_dates": [{{"label": "出具日/签订日/到期日/入职日 等", "date": "YYYY-MM-DD"}}],
-  "amounts": [{{"label": "年收入/月均收入/合同金额/首期款/余款 等", "text": "金额原文", "is_total_component": true_or_false, "is_installment": true_or_false, "period_start": "YYYY-MM-DD 或 null", "period_end": "YYYY-MM-DD 或 null", "evidence": "出处：第X页 + 原文片段"}}],
+  "amounts": [{{"label": "年收入/月均收入/合同金额/首期款/余款 等", "text": "金额原文", "is_total_component": true_or_false, "is_installment": true_or_false, "period_start": "YYYY-MM-DD 或 null", "period_end": "YYYY-MM-DD 或 null", "evidence": "第X页 + 原文片段"}}],
   "fields": [{{"label": "字段名", "value": "字段值"}}],
   "seals": [{{"owner": "盖章主体全称或 null", "seal_type": "公章/合同专用章/财务专用章/发票专用章 等或 null", "raw_text": "印章上识别到的原文"}}],
   "obligations": [
@@ -67,7 +67,7 @@ JSON 字段定义：
   ],
   "completeness": {{
     "status": "complete|incomplete|unknown",
-    "issues": [{{"item": "缺失要素名（缺签章请标明所属协议，如 主协议·甲方签章）", "category": "signature|field", "detail": "缺什么", "evidence": "出处：第X页 + 原文留白片段 + 条款号，让人能翻回核对"}}]
+    "issues": [{{"item": "缺失要素名（缺签章请标明所属协议，如 主协议·甲方签章）", "category": "signature|field", "detail": "缺什么", "evidence": "第X页 + 原文留白片段 + 条款号，让人能翻回核对"}}]
   }}
 }}
 
@@ -84,7 +84,8 @@ JSON 字段定义：
   · is_installment：该金额是否为某总价的"分期/部分付款"项（首期款/定金/余款/尾款 等）。
     车位/房屋合同的【首期款】【余款】填 true；一次性付款总额、单价(元/月·个、元/日)、
     服务费、违约金等非分期项填 false。供代码校验"分期之和是否等于总价"以发现金额笔误。
-  · evidence：这笔金额的出处——页码(据页脚"第X页共Y页")+ 原文片段，便于翻回原文核对。
+  · evidence：这笔金额在原文的定位，页码(据页脚"第X页共Y页")+ 原文片段，便于翻回核对。
+    值本身只填"第X页 + 片段"，勿带"出处"二字——展示时会自动加前缀。
   · period_start / period_end：该金额覆盖的时间区间（ISO）。把"上年度""近12个月"等相对表述
     按【出具日】解析成具体起止：
       - "上年度/上一年度" = 上一个完整自然年（出具于 2026 年 → 2025-01-01 ~ 2025-12-31）
