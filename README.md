@@ -1,25 +1,32 @@
-# 本地合同档案库 CLI
+# 本地文档档案库 CLI
 
-> 把合同 PDF 批量入库——MinerU 解析版面文本，qwen3.7-max LLM + 正则 hybrid
-> 抽取合同字段（合同名/甲乙方/金额/签订日/到期日/自动续约/风险条款），
-> 索引到本地 SQLite，支持多字段过滤检索。
+> 把各类文档 PDF 批量入库、归档、可追溯——合同、协议、证明、发票、报告……
+> MinerU 解析版面文本，qwen3.7-max LLM 判类型 + 抽字段，索引到本地 SQLite，
+> 支持按类型/字段过滤检索。
+
+**LLM-first**：文档类型与字段抽取都交给 LLM，统一归一化到一个「通用信封」
+（doc_type / title / summary / 主体 / 金额 / 日期 / 柔性字段）。加新文档类型
+**无需写代码**——LLM 自行决定抽什么。死代码 rule 仅保留为确定性数值归一化
+（中文大写金额→数值、日期→ISO）。合同另有专属抽取层（rule+LLM hybrid 交叉验证），
+仍保留全部合同字段（甲乙方/到期日/自动续约/风险条款/义务清单）。
 
 历史：本项目最初是 DashScope / PaddleOCR / MinerU 三路 OCR 对比 playground，
-对比验证后选定 MinerU。重构为面向档案库的 CLI，删除其余 pipeline、
-HTTP 服务、跨路对比工具，但保留了 LLM 字段抽取层。
+选定 MinerU 后重构为档案库 CLI；再从「合同专用」扩展为「通用文档档案库」。
 
 ## ✦ 数据流
 
 ```
-PDF ─► sha256 去重 ─► MinerU 解析 ─► (rule + qwen3.7-max LLM) 抽取
+PDF ─► sha256 去重 ─► MinerU 解析 ─► LLM 判类型 + 抽字段（合同再走 hybrid）
                                           │
               ┌───────────────────────────┴──┐
               ▼                              ▼
-  archive/db.sqlite (索引)        archive/documents/<sha-12>/
+   db.sqlite (通用信封 + 索引)     documents/<sha-12>/
                                     ├── source.pdf  (硬链接)
                                     ├── mineru/markdown.md ...
-                                    ├── extracted.json
+                                    ├── extraction_result.json  (通用信封)
                                     └── ingest.log
+
+档案库默认在 XDG 数据目录：~/.local/share/contract-archive/
 ```
 
 ## ✦ 安装
