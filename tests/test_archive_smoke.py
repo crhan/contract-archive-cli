@@ -227,6 +227,32 @@ def test_ingest_mineru_failure_writes_failed_status(
     assert doc.status == "failed"
 
 
+def test_ingest_failed_then_retry_not_skipped(
+    archive_root, conn, sample_pdf, sample_markdown
+):
+    """上次 failed 的文档，再次 ingest（不加 --reingest）应自动重试而非 skip。"""
+
+    class FailingPipeline:
+        name = "mineru"
+
+        def run(self, *_a, **_kw):
+            raise RuntimeError("boom")
+
+    with patch(
+        "contract_archive.archive.ingest.MinerUPipeline",
+        lambda *a, **kw: FailingPipeline(),
+    ):
+        r1 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
+    assert r1.status == "failed"
+
+    # 不加 reingest 再跑——pipeline 这次正常，应自动重试成功，而不是 skip
+    stub = StubMineruPipeline(markdown_text=sample_markdown)
+    with _patch_pipeline(stub):
+        r2 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
+    assert r2.status == "ok", f"failed 文档应自动重试，却得到 {r2.status}"
+    assert r2.doc_id == r1.doc_id  # 复用同一条记录
+
+
 def test_list_and_search(archive_root, conn, sample_pdf, tmp_path):
     """
     两条不同合同入库后 list / search 的管道行为。
