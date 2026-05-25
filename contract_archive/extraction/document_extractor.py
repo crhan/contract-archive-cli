@@ -342,10 +342,11 @@ def extract_document(
     res = call_llm_document(document_text, model=model)
     raw = res.parsed
     if not raw:
-        # 抽取为空：带上结构化 error（缺 key→CONFIG_MISSING / API 异常→分类；
-        # 调用成功却返回空 JSON→兜底 EXTRACT_EMPTY），供 ingest 判可否重试。
+        # 抽取为空：**不设 llm_model（保持 None）**——schema 定义"调用失败 llm_model 为 None"，
+        # 且 evals 的 parse_ok 一票否决依赖它（llm_model 非 None = 调用/解析成功）；这里若设非 None，
+        # 会让产不出 JSON 的劣质模型在换模型评测里蒙混过 parse_ok gate（见 MEMORY「评测报告撒谎坑」）。
+        # 只带结构化 error（缺 key→CONFIG_MISSING / API 异常分类 / 空 JSON→EXTRACT_EMPTY），供 ingest 判重试。
         return DocumentExtraction(
-            llm_model=res.model,
             extraction_error=res.error or extract_empty("LLM 返回空或无法解析为 JSON"),
         )
 

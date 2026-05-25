@@ -114,10 +114,12 @@ def _command_params(cmd: click.Command) -> list[dict[str, Any]]:
 def _command_entry(name: str, cmd: click.Command, *, with_params: bool) -> dict[str, Any]:
     """组装单命令的能力描述。META 缺失时按只读安全值兜底。"""
     meta = COMMAND_META.get(name, {})
-    summary = meta.get("summary") or (cmd.help or "").strip().splitlines()[0] if cmd.help else ""
+    # 命令摘要：优先用 META 登记的，回退命令 docstring 首行（纯空白 help 时为空，不取 [0] 防 IndexError）。
+    help_lines = (cmd.help or "").strip().splitlines()
+    summary = meta.get("summary") or (help_lines[0] if help_lines else "")
     entry = {
         "name": name,
-        "summary": meta.get("summary") or summary,
+        "summary": summary,
         "side_effects": meta.get("side_effects", ["read"]),
         "destructive": meta.get("destructive", False),
         "idempotent": meta.get("idempotent", True),

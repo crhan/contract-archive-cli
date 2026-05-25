@@ -482,6 +482,22 @@ def re_extract(
         extraction, confidence, envelope = _run_extraction(
             document_text, llm_enabled=llm_enabled
         )
+        # 空抽取护栏（与 ingest_pdf 对齐）：开了 LLM 却啥都没抽到（最常见缺 key），
+        # 别静默标 ok 误导用户/agent——据 envelope.extraction_error 给结构化信号。
+        if (
+            llm_enabled
+            and not extraction.contract_name
+            and not envelope.title
+            and not envelope.fields
+            and not envelope.amounts
+            and not envelope.seals
+        ):
+            status = "partial"
+            error_info = envelope.extraction_error or extract_empty("LLM 抽取为空")
+            error_message = (
+                "LLM 抽取为空——通常是缺 DASHSCOPE_API_KEY 或 LLM 调用失败；"
+                "补好后重跑 `extract <id>`"
+            )
     except Exception as e:
         status = "partial"
         error_message = f"extract: {e}"

@@ -83,7 +83,6 @@ def test_constructors():
     assert E.extract_empty("empty").code == "EXTRACT_EMPTY"
     assert E.mineru_failed("crash").code == "MINERU_FAILED"
     assert E.mineru_failed("crash").category == "infra"
-    assert E.not_found("404").code == "NOT_FOUND"
 
 
 def test_ingest_result_to_dict_carries_structured_error():

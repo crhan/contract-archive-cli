@@ -152,22 +152,31 @@ def build_show_table(row) -> Table:
     """
     show 命令的单文档详情表（纯函数：输入 DocumentRow，输出 rich Table，不打印）。
 
-    从 cli.py 下沉至此，让 cli.py 专注命令定义与参数解析。逻辑与原 show 完全一致，
-    仅末尾 return 而非 console.print。
+    从 cli.py 下沉至此让 cli.py 专注命令定义；按展示段拆成多个 _show_*_rows helper
+    （守项目 50 行/函数铁律）。逻辑与原 show 命令的表格构建逐行等价。
     """
     table = Table(title=f"Document #{row.id} · {row.doc_type or '?'} ({status_color(row.status)})")
     table.add_column("field", style="cyan", no_wrap=True)
     table.add_column("value", overflow="fold")
+    det = row.details()
+    _show_header_rows(table, row, det)
+    _show_amount_rows(table, row, det)
+    _show_seal_rows(table, row)
+    _show_completeness_rows(table, row)
+    _show_footer_rows(table, row)
+    return table
+
+
+def _show_header_rows(table: Table, row, det: dict) -> None:
+    """元信息 + 通用信封 + 合同专属列（party/到期/续约）或非合同的主体/日期。"""
     table.add_row("sha256", row.sha256)
     table.add_row("source_path", row.source_path)
     table.add_row("output_dir", row.output_dir)
     table.add_row("ingested_at", local_time(row.ingested_at))
     # mineru_s/llm_s（执行耗时）是运维遥测，不属于档案内容——不在 show 展示。
-    # DB 列仍保留并由 ingest 写入，需要时可查 jsonl 日志。
     if row.error_message:
         table.add_row("[red]error[/red]", row.error_message)
 
-    # ---- 通用信封（任何文档类型）----
     table.add_row("", "")
     table.add_row("[bold]doc_type[/bold]", row.doc_type or "-")
     table.add_row("[bold]title[/bold]", row.title or row.contract_name or "-")
@@ -175,7 +184,6 @@ def build_show_table(row) -> Table:
         table.add_row("summary", row.summary)
 
     # 合同有专属列（party/到期/续约），日期走表列；其余类型走 details 的主体/日期。
-    det = row.details()
     is_contract = bool(row.contract_name or row.party_a or row.party_b)
     if is_contract:
         table.add_row("", "")
@@ -198,8 +206,9 @@ def build_show_table(row) -> Table:
                 "\n".join(f"• {d.get('label', '')}: {d.get('date') or '-'}" for d in key_dates),
             )
 
-    # ---- 金额 / 合计 / 字段：所有类型通用 ----
-    # 合同此前只显示单个主金额，付款明细（首期/余款）和付款方式（fields）被吞；提到这里通用展示。
+
+def _show_amount_rows(table: Table, row, det: dict) -> None:
+    """金额明细 / 计算合计 / 类型专属字段（所有文档类型通用）。"""
     amounts = det.get("amounts") or []
     if amounts:
         lines = []
@@ -234,8 +243,9 @@ def build_show_table(row) -> Table:
             "\n".join(f"• {f.get('label', '')}: {f.get('value', '')}" for f in fields),
         )
 
-    # 印章：跨文档类型通用，放分支外（合同恰恰最常盖章）。det 只在非合同分支定义，
-    # 这里用 row.details() 现取，避免合同分支 NameError。
+
+def _show_seal_rows(table: Table, row) -> None:
+    """印章 + 附属协议（补充协议，各有独立签章落款）。det 用 row.details() 现取避免分支差异。"""
     seals = row.details().get("seals") or []
     if seals:
         lines = []
@@ -247,7 +257,6 @@ def build_show_table(row) -> Table:
             lines.append(f"• {head}  [dim]{raw}[/dim]" if raw else f"• {head}")
         table.add_row("[bold]印章[/bold]", "\n".join(lines))
 
-    # 附属协议（补充协议等）：一份 PDF 可能含主协议 + N 份补充协议，各有独立签章。
     subs = row.details().get("sub_agreements") or []
     if subs:
         lines = []
@@ -268,28 +277,34 @@ def build_show_table(row) -> Table:
                 lines.append("  [dim]印章: 无[/dim]")
         table.add_row("[bold]补充协议[/bold]", "\n".join(lines))
 
-    # 完整性核查：仅合同有此块（非合同 details 里 completeness 为 None）。
-    comp = row.details().get("completeness")
-    if comp:
-        status = comp.get("status")
-        issues = comp.get("issues") or []
-        if status == "complete":
-            table.add_row("[bold]完整性[/bold]", "[green]✓ 要素与签章齐全[/green]")
-        elif status == "incomplete":
-            lines = ["[red]⚠ 疑似不完整[/red] [dim](签章经落款页核查；要素/金额据原文，可翻回核对)[/dim]"]
-            cat_label = {"signature": "签章", "amount": "金额", "field": "要素"}
-            for it in issues:
-                cat = cat_label.get(it.get("category"), "要素")
-                detail = it.get("detail") or ""
-                tail = f" — [dim]{detail}[/dim]" if detail else ""
-                lines.append(f"• [{cat}] {it.get('item', '')}{tail}")
-                evidence = it.get("evidence") or ""
-                if evidence:
-                    lines.append(f"    [dim]↳ 出处：{evidence}[/dim]")
-            table.add_row("[bold]完整性[/bold]", "\n".join(lines))
-        else:  # unknown
-            table.add_row("[bold]完整性[/bold]", "[yellow]? 信息不足，未能判定[/yellow]")
 
+def _show_completeness_rows(table: Table, row) -> None:
+    """合同完整性核查块（仅合同有；签章经落款页 VL 核查，要素/金额据原文）。"""
+    comp = row.details().get("completeness")
+    if not comp:
+        return
+    status = comp.get("status")
+    issues = comp.get("issues") or []
+    if status == "complete":
+        table.add_row("[bold]完整性[/bold]", "[green]✓ 要素与签章齐全[/green]")
+    elif status == "incomplete":
+        lines = ["[red]⚠ 疑似不完整[/red] [dim](签章经落款页核查；要素/金额据原文，可翻回核对)[/dim]"]
+        cat_label = {"signature": "签章", "amount": "金额", "field": "要素"}
+        for it in issues:
+            cat = cat_label.get(it.get("category"), "要素")
+            detail = it.get("detail") or ""
+            tail = f" — [dim]{detail}[/dim]" if detail else ""
+            lines.append(f"• [{cat}] {it.get('item', '')}{tail}")
+            evidence = it.get("evidence") or ""
+            if evidence:
+                lines.append(f"    [dim]↳ 出处：{evidence}[/dim]")
+        table.add_row("[bold]完整性[/bold]", "\n".join(lines))
+    else:  # unknown
+        table.add_row("[bold]完整性[/bold]", "[yellow]? 信息不足，未能判定[/yellow]")
+
+
+def _show_footer_rows(table: Table, row) -> None:
+    """抽取元数据（llm_model/置信度）+ 双方义务动作 + 风险条款。"""
     table.add_row(
         "llm_model",
         row.details().get("llm_model") or "[dim]- (旧抽取未记录，重抽后显示)[/dim]",
@@ -317,5 +332,61 @@ def build_show_table(row) -> Table:
         table.add_row(
             "[bold]risk_clauses[/bold]",
             "\n".join(f"• {c}" for c in row.risk_clauses),
+        )
+
+
+def build_list_table(rows, root) -> Table:
+    """list 命令的档案列表（纯函数：rows + 档案根目录 → rich Table，不打印）。"""
+    table = Table(
+        title=f"Archive · {root} ({len(rows)} of total)",
+        caption="amount 带 * 为计算合计（如收入证明=年税前+股权），无 * 为抽取的主金额",
+        caption_justify="left",
+    )
+    table.add_column("id", style="cyan", justify="right")
+    table.add_column("status")
+    table.add_column("type", style="magenta")
+    table.add_column("完整")  # 合同完整性：⚠ 疑似缺 / ✓ / -（非合同）
+    table.add_column("title", overflow="fold")
+    table.add_column("主体", overflow="fold")  # 区分同类文档（谁的/和谁签的）
+    table.add_column("date")
+    table.add_column("amount", justify="right")
+    table.add_column("ingested", style="dim")
+    for r in rows:
+        table.add_row(
+            str(r.id),
+            status_color(r.status),
+            r.doc_type or "-",
+            completeness_mark(r),
+            r.title or r.contract_name or "-",
+            subject_of(r),
+            r.primary_date or "-",
+            display_amount(r),
+            local_time(r.ingested_at)[:10],  # 本地日期，与 show 一致
+        )
+    return table
+
+
+def build_search_table(rows) -> Table:
+    """search 命令的命中列表（纯函数：rows → rich Table，不打印）。"""
+    table = Table(title=f"Search · {len(rows)} hit(s)")
+    table.add_column("id", style="cyan", justify="right")
+    table.add_column("name", overflow="fold")
+    table.add_column("party_a", overflow="fold")
+    table.add_column("party_b", overflow="fold")
+    table.add_column("amount", justify="right")
+    table.add_column("sign_date")
+    table.add_column("expire_date")
+    table.add_column("risks", justify="right")
+    for r in rows:
+        amount = f"¥{r.amount_value:,.0f}" if r.amount_value is not None else "-"
+        table.add_row(
+            str(r.id),
+            r.contract_name or "-",
+            r.party_a or "-",
+            r.party_b or "-",
+            amount,
+            r.sign_date or "-",
+            r.expire_date or "-",
+            str(len(r.risk_clauses)),
         )
     return table

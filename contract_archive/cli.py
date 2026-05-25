@@ -59,15 +59,12 @@ from .config import load_settings
 from .cli_config import config_app
 from .cli_introspect import register as register_introspect
 from .cli_render import (
+    build_list_table,
+    build_search_table,
     build_show_table,
-    completeness_mark,
-    display_amount,
     ingest_result_to_dict,
-    local_time,
     row_to_dict,
     seal_rows_to_dict,
-    status_color,
-    subject_of,
 )
 
 # ---------- 参数枚举（parse-time 校验：坏值由 typer 报 exit 2，不再漏到数据层 ValueError）----------
@@ -303,9 +300,15 @@ def ingest(
 
     summary = {"ok": 0, "partial": 0, "failed": 0, "skipped": 0}
     if not pdfs:
-        # 进度/提示走 stderr；json 模式仍向 stdout 吐合法 JSON，便于管道消费。
+        # 进度/提示走 stderr；json/ndjson 模式仍向 stdout 吐合法 JSON，便于管道消费。
         err_console.print("[yellow]no PDFs found[/yellow]")
-        if fmt is OutputFormat.json:
+        if progress is ProgressFormat.ndjson:
+            # 流式消费方即便空输入也应收到终止 summary 事件（与非空路径一致）。
+            print(_json.dumps(
+                {"event": "summary", "archive": str(paths.root), **summary},
+                ensure_ascii=False,
+            ))
+        elif fmt is OutputFormat.json:
             print(_json.dumps(
                 {"archive": str(paths.root), "summary": summary, "results": []},
                 ensure_ascii=False, indent=2,
@@ -485,33 +488,7 @@ def list_cmd(
         print(_json.dumps([row_to_dict(r) for r in rows], ensure_ascii=False, indent=2))
         return
 
-    table = Table(
-        title=f"Archive · {paths.root} ({len(rows)} of total)",
-        caption="amount 带 * 为计算合计（如收入证明=年税前+股权），无 * 为抽取的主金额",
-        caption_justify="left",
-    )
-    table.add_column("id", style="cyan", justify="right")
-    table.add_column("status")
-    table.add_column("type", style="magenta")
-    table.add_column("完整")  # 合同完整性：⚠ 疑似缺 / ✓ / -（非合同）
-    table.add_column("title", overflow="fold")
-    table.add_column("主体", overflow="fold")  # 区分同类文档（谁的/和谁签的）
-    table.add_column("date")
-    table.add_column("amount", justify="right")
-    table.add_column("ingested", style="dim")
-    for r in rows:
-        table.add_row(
-            str(r.id),
-            status_color(r.status),
-            r.doc_type or "-",
-            completeness_mark(r),
-            r.title or r.contract_name or "-",
-            subject_of(r),
-            r.primary_date or "-",
-            display_amount(r),
-            local_time(r.ingested_at)[:10],  # 本地日期，与 show 一致
-        )
-    console.print(table)
+    console.print(build_list_table(rows, paths.root))
 
 
 # ---------- search ----------
@@ -604,28 +581,7 @@ def search(
         print(_json.dumps([row_to_dict(r) for r in rows], ensure_ascii=False, indent=2))
         return
 
-    table = Table(title=f"Search · {len(rows)} hit(s)")
-    table.add_column("id", style="cyan", justify="right")
-    table.add_column("name", overflow="fold")
-    table.add_column("party_a", overflow="fold")
-    table.add_column("party_b", overflow="fold")
-    table.add_column("amount", justify="right")
-    table.add_column("sign_date")
-    table.add_column("expire_date")
-    table.add_column("risks", justify="right")
-    for r in rows:
-        amount = f"¥{r.amount_value:,.0f}" if r.amount_value is not None else "-"
-        table.add_row(
-            str(r.id),
-            r.contract_name or "-",
-            r.party_a or "-",
-            r.party_b or "-",
-            amount,
-            r.sign_date or "-",
-            r.expire_date or "-",
-            str(len(r.risk_clauses)),
-        )
-    console.print(table)
+    console.print(build_search_table(rows))
 
 
 # ---------- show ----------
@@ -701,6 +657,9 @@ def extract(
     ident: str = typer.Argument(..., help="档案 id 或 sha 前缀"),
     archive: Optional[Path] = _archive_opt,
     no_llm: bool = typer.Option(False, "--no-llm", help="只跑 rule，跳过 LLM"),
+    fmt: OutputFormat = typer.Option(
+        OutputFormat.table, "--format", help="table | json（json 把结构化结果+error 打到 stdout）"
+    ),
 ) -> None:
     """
     只重跑合同字段抽取（不重跑 MinerU）。用于：
@@ -719,7 +678,11 @@ def extract(
     result = re_extract(row.id, paths, conn, llm_enabled=not no_llm)
     checkpoint(conn)
     conn.close()
-    _print_ingest_result(result)
+    if fmt is OutputFormat.json:
+        # 结构化结果（含 re_extract 的 error/retryable）供 agent 消费，与 ingest --format json 一致。
+        print(_json.dumps(ingest_result_to_dict(result), ensure_ascii=False, indent=2))
+    else:
+        _print_ingest_result(result)
 
 
 # ---------- stats ----------

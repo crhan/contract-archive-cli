@@ -99,14 +99,19 @@ def classify_exception(exc: BaseException) -> ErrorInfo:
             code="BAD_REQUEST", category=ErrorCategory.validation.value,
             message=msg, retryable=False,
         )
-    # 超时：APITimeoutError / 文本含 timeout。瞬时，可重试。
-    if name == "APITimeoutError" or "timed out" in msg.lower() or "timeout" in msg.lower():
+    # 超时：408 / openai 或 httpx 的超时异常 / 文本含 timeout。瞬时，可重试。
+    if (
+        name in ("APITimeoutError", "ReadTimeout", "ConnectTimeout")
+        or status == 408
+        or "timed out" in msg.lower()
+        or "timeout" in msg.lower()
+    ):
         return ErrorInfo(
             code="TIMEOUT", category=ErrorCategory.transient.value,
             message=msg, retryable=True,
         )
-    # 连接错误 / 上游 5xx：瞬时，可重试。
-    if name in ("APIConnectionError", "InternalServerError") or (status is not None and status >= 500):
+    # 连接错误 / 上游 5xx：瞬时，可重试（含 httpx 裸 ConnectError）。
+    if name in ("APIConnectionError", "ConnectError", "InternalServerError") or (status is not None and status >= 500):
         return ErrorInfo(
             code="UPSTREAM_ERROR", category=ErrorCategory.transient.value,
             message=msg, retryable=True,
@@ -156,16 +161,3 @@ def mineru_failed(detail: str) -> ErrorInfo:
         code="MINERU_FAILED", category=ErrorCategory.infra.value,
         message=_short(detail), retryable=False,
     )
-
-
-def not_found(detail: str) -> ErrorInfo:
-    """目标不存在（show/delete 的 id/sha 查不到）。属用户错。"""
-    return ErrorInfo(
-        code="NOT_FOUND", category=ErrorCategory.user.value,
-        message=_short(detail), retryable=False,
-    )
-
-
-def unexpected(exc: BaseException) -> ErrorInfo:
-    """兜底：未预期异常先尝试 classify，落不进已知分类则为 UNKNOWN。"""
-    return classify_exception(exc)
