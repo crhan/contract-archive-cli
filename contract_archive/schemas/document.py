@@ -324,6 +324,9 @@ class DocumentExtraction(BaseModel):
     # 随 extraction_result.json 留存，并镜像到 documents.llm_model，供 show 追溯抽取来源。
     # 仅成功调用 LLM 时填；--no-llm / 无 key / 调用失败为 None。
     llm_model: Optional[str] = None
+    # 抽取元数据（非文档内容）：本次 LLM 调用的 token 用量（input/output/total_tokens）。
+    # 来源 DashScope resp["usage"]；供评测算成本、生产侧成本追踪。读不到 / 未调用为 None。
+    llm_usage: Optional[dict] = None
 
 
 class FieldConfidence(BaseModel):

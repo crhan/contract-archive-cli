@@ -13,11 +13,28 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from ..config import load_settings
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class LlmResult:
+    """
+    一次 LLM 调用的产物 + 元数据。
+
+    把 parsed / model / usage 一起作为返回值传出，让"实际用了哪个模型""花了多少
+    token"成为可信的返回值，而非靠外部 monkeypatch 拦截偷取（SDK 一升级猴补就静默失效）。
+    评测据 usage 算成本；model 是单一真相源，杜绝"记录的模型≠实际跑的模型"。
+    失败路径返回 parsed={}，与历史"返回空 dict"语义一致（调用方判 `if not res.parsed`）。
+    """
+
+    parsed: dict[str, Any]                # 解析后的 JSON；失败为空 dict
+    model: str                            # 本次实际请求的 model id
+    usage: dict[str, Any] | None = None   # token 用量（DashScope resp["usage"]）；读不到为 None
 
 
 LLM_SYSTEM_PROMPT = """你是一名严谨的法律助理。请从给定的合同文本中抽取结构化字段。
@@ -69,13 +86,14 @@ def call_llm_extract(
     api_key: str | None = None,
     base_url: str | None = None,
     max_chars: int = 24000,
-) -> dict[str, Any]:
+) -> LlmResult:
     """
-    调用 DashScope qwen3.7-max 进行合同字段抽取。
+    调用 DashScope LLM 进行合同字段抽取。
 
     :param document_text: 已 OCR 得到的合同全文（推荐用 markdown 版本）
     :param model: 默认从 DASHSCOPE_LLM_MODEL env 读，最终默认 qwen3.7-max
     :param max_chars: 截断阈值，避免超过模型上下文
+    :return: LlmResult（parsed/model/usage）；失败时 parsed={}，调用方判 `if not res.parsed`
     """
     import dashscope  # lazy import
 
@@ -86,7 +104,7 @@ def call_llm_extract(
     base_url = base_url or settings.dashscope_base_url
     if not api_key:
         logger.warning("DASHSCOPE_API_KEY missing; skip LLM extraction")
-        return {}
+        return LlmResult(parsed={}, model=model)
 
     dashscope.base_http_api_url = base_url
 
@@ -126,17 +144,38 @@ def call_llm_extract(
         )
     except Exception as e:
         logger.exception("DashScope LLM call failed: %s", e)
-        return {}
+        return LlmResult(parsed={}, model=model)
 
+    usage = _extract_usage(resp)
     text = _extract_text(resp)
     if not text:
         logger.warning("LLM empty response")
-        return {}
+        return LlmResult(parsed={}, model=model, usage=usage)
 
     parsed = _parse_json_loose(text)
     if not parsed:
         logger.warning("LLM response not parseable as JSON: %s", text[:200])
-    return parsed
+    return LlmResult(parsed=parsed, model=model, usage=usage)
+
+
+def _extract_usage(resp: Any) -> dict[str, Any] | None:
+    """
+    从 DashScope 响应读 token 用量。返回普通 dict（含 input_tokens/output_tokens/total_tokens
+    等键），读不到返回 None。
+
+    SDK 的 resp["usage"] 可能是 addict.Dict（dict 子类）或普通 dict，统一 dict() 拷一份；
+    任何异常都吞掉返回 None——usage 是评测的成本旁证，缺它不该影响抽取本身。
+    """
+    try:
+        usage = resp["usage"]
+    except (KeyError, IndexError, TypeError):
+        return None
+    if not usage:
+        return None
+    try:
+        return dict(usage)
+    except (TypeError, ValueError):
+        return None
 
 
 def _extract_text(resp: Any) -> str:

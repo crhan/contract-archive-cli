@@ -66,17 +66,20 @@ def _build_confidence(ext: ContractExtraction) -> ExtractionConfidence:
 def extract_contract(
     document_text: str,
     llm_enabled: bool = True,
+    model: str | None = None,
 ) -> tuple[ContractExtraction, ExtractionConfidence]:
     """
     合同字段抽取主入口（LLM-only）。
 
     :param llm_enabled: False（或无 API key / LLM 失败）时返回空结果——
                         纯 LLM 路径无 rule 兜底，抽不到比硬塞更诚实。
+    :param model: 覆盖抽取所用 model（默认 None=走 settings.dashscope_model）；
+                  合同线是双 LLM 调用之一，评测换模型时与 extract_document 同步穿透才保真。
     """
     if not llm_enabled:
         return ContractExtraction(), ExtractionConfidence()
 
-    raw = call_llm_extract(document_text)
+    raw = call_llm_extract(document_text, model=model).parsed
     if not raw:
         return ContractExtraction(), ExtractionConfidence()
 

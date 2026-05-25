@@ -27,7 +27,7 @@ from ..schemas import (
     SubAgreement,
 )
 from ..config import load_settings
-from .llm_extractor import _extract_text, _parse_json_loose
+from .llm_extractor import LlmResult, _extract_text, _extract_usage, _parse_json_loose
 from .normalize import coerce_obligations, normalize_date, parse_money_value
 from .amount_check import check_amount_consistency
 
@@ -135,12 +135,13 @@ def call_llm_document(
     api_key: str | None = None,
     base_url: str | None = None,
     max_chars: int = 24000,
-) -> dict[str, Any]:
+) -> LlmResult:
     """
-    调 DashScope LLM 做通用文档抽取，返回解析后的 dict（失败返回 {}）。
+    调 DashScope LLM 做通用文档抽取，返回 LlmResult（parsed/model/usage）。
 
     与 llm_extractor.call_llm_extract 同样的调用骨架，但用通用文档 prompt。
     刻意不复用其函数体——合同那条路保持不动，避免改动牵连。
+    失败时 parsed={}（调用方判 `if not res.parsed`），与历史"返回空 dict"语义一致。
     """
     import dashscope  # lazy import
 
@@ -151,7 +152,7 @@ def call_llm_document(
     base_url = base_url or settings.dashscope_base_url
     if not api_key:
         logger.warning("DASHSCOPE_API_KEY missing; skip LLM document extraction")
-        return {}
+        return LlmResult(parsed={}, model=model)
 
     dashscope.base_http_api_url = base_url
 
@@ -185,16 +186,17 @@ def call_llm_document(
         )
     except Exception as e:
         logger.exception("DashScope document LLM call failed: %s", e)
-        return {}
+        return LlmResult(parsed={}, model=model)
 
+    usage = _extract_usage(resp)
     text = _extract_text(resp)
     if not text:
         logger.warning("LLM empty response (document extract)")
-        return {}
+        return LlmResult(parsed={}, model=model, usage=usage)
     parsed = _parse_json_loose(text)
     if not parsed:
         logger.warning("LLM document response not parseable: %s", text[:200])
-    return parsed
+    return LlmResult(parsed=parsed, model=model, usage=usage)
 
 
 def _norm_period(raw: Any) -> Optional[str]:
@@ -345,17 +347,22 @@ def _coerce_sub_agreements(raw: Any) -> list[SubAgreement]:
 def extract_document(
     document_text: str,
     llm_enabled: bool = True,
+    model: str | None = None,
 ) -> DocumentExtraction:
     """
     通用文档抽取主入口：LLM 判类型 + 抽字段 → DocumentExtraction 信封。
 
     :param llm_enabled: False（或无 API key）时返回空信封（doc_type 留默认）。
                         通用路径不依赖 rule，关掉 LLM 就没有可抽的东西——诚实返回空。
+    :param model: 覆盖抽取所用 model（默认 None=走 settings.dashscope_model）。
+                  评测换模型的唯一入口——实际跑的 model 即 res.model，回填 llm_model
+                  保证"记录的模型=实际跑的模型"（单一真相源，不再二次读 settings）。
     """
     if not llm_enabled:
         return DocumentExtraction()
 
-    raw = call_llm_document(document_text)
+    res = call_llm_document(document_text, model=model)
+    raw = res.parsed
     if not raw:
         return DocumentExtraction()
 
@@ -403,6 +410,9 @@ def extract_document(
         sub_agreements=_coerce_sub_agreements(raw.get("sub_agreements")),
         completeness=completeness,
         raw_evidence={},
-        # raw 非空=本次确实跑通了 LLM，记下实际模型（与 call_llm_document 内同一 settings）。
-        llm_model=load_settings().dashscope_model,
+        # 单一真相源：记下本次调用实际请求的 model（res.model），而非二次读 settings——
+        # 后者在评测换模型时会张冠李戴（记 qwen3.7-max 实跑 qwen-plus）。
+        llm_model=res.model,
+        # token 用量（评测算成本的旁证）；生产侧也可用于成本追踪。读不到为 None。
+        llm_usage=res.usage,
     )

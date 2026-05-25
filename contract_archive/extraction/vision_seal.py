@@ -162,6 +162,41 @@ def _signature_evidence(images: list[Path]) -> str:
     return f"据落款页图：第 {'、'.join(_page_no(p) for p in images)} 页"
 
 
+def check_seals_on_images(
+    images: list[Path],
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> Optional[list[CompletenessIssue]]:
+    """
+    对落款页图像调 VL 模型核查签章，返回签章缺陷 issues（只列缺的）。
+
+    这是 VL 签章核查的纯粹核心：喂图 + 指定 model → 缺陷列表，不依赖 MinerU 目录。
+    评测据此横向对比不同 VL 模型；augment_completeness_with_vision 也复用它。
+
+    :param model: 覆盖 VL model（默认 None=走 settings.dashscope_vl_model）。
+    :return: 缺陷列表（[] 表示看图后未发现缺签章）；无 key / VL 调用失败 /
+             响应无法解析返回 None——让调用方据此降级（保留原文本签章判断）。
+    """
+    if not images:
+        return []
+    settings = load_settings()
+    model = model or settings.dashscope_vl_model
+    api_key = api_key or settings.dashscope_api_key
+    base_url = base_url or settings.dashscope_base_url
+    if not api_key:
+        logger.warning("DASHSCOPE_API_KEY missing; skip VL seal check")
+        return None
+    text = _call_vl(images, model, api_key, base_url)
+    if not text:
+        return None
+    parsed = _parse_json_loose(text)
+    if not parsed:
+        logger.warning("VL 签章响应无法解析为 JSON: %s", text[:200])
+        return None
+    return _issues_from_vision(parsed, _signature_evidence(images))
+
+
 def augment_completeness_with_vision(env: DocumentExtraction, mineru_dir: Path) -> bool:
     """
     用 VL 看落款页重判签章，替换 env.completeness 的 signature 类 issues（保留 field 类）。
@@ -175,20 +210,9 @@ def augment_completeness_with_vision(env: DocumentExtraction, mineru_dir: Path) 
     if not images:
         logger.info("未定位到落款页图，跳过 VL 签章核查")
         return False
-    settings = load_settings()
-    if not settings.dashscope_api_key:
+    sig_issues = check_seals_on_images(images)
+    if sig_issues is None:
         return False
-    text = _call_vl(
-        images, settings.dashscope_vl_model, settings.dashscope_api_key, settings.dashscope_base_url
-    )
-    if not text:
-        return False
-    parsed = _parse_json_loose(text)
-    if not parsed:
-        logger.warning("VL 签章响应无法解析为 JSON: %s", text[:200])
-        return False
-
-    sig_issues = _issues_from_vision(parsed, _signature_evidence(images))
     # 保留文本判出的要素(field)缺陷，签章(signature)缺陷整体换成 VL 看图的结果。
     field_issues = [i for i in env.completeness.issues if i.category != "signature"] if env.completeness else []
     all_issues = field_issues + sig_issues
