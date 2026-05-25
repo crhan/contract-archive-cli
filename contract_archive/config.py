@@ -124,17 +124,15 @@ def _read_value(values: dict[str, str], key: ConfigKey) -> str | None:
     """
     优先级 os.getenv(含 .env 注入) > 配置文件 > 默认值。只读，不回写 os.environ，不报错。
 
-    空串与未设一视同仁（`if not value` 而非 `is None`）：`CONTRACT_ARCHIVE_DIR=` 这种
-    显式空串应回落下一层，而不是截断优先级链变 None——与历史 _resolve_archive 的
-    truthy 语义一致，也消除"空串 vs 未设"这个特殊情况。
+    strip 后判 truthy，把"未设 / 空串 / 纯空白"三者一视同仁地回落下一层——一把消除
+    特殊情况（空串与空白串行为一致），与历史 _resolve_archive 的 truthy 语义一致。
+    默认值在此兜底（base_url/model 有 default），故 load_settings 无需再 `or DEFAULT`，
+    默认保持单一真相源（只在 CONFIG_KEYS 里定义一次）。
     """
-    value = os.getenv(key.env_name)
-    if not value:
-        value = values.get(key.name)
-    if not value:
-        value = key.default
-    value = value.strip() if value is not None else None
-    return value or None
+    for candidate in (os.getenv(key.env_name), values.get(key.name), key.default):
+        if candidate and candidate.strip():
+            return candidate.strip()
+    return None
 
 
 def load_settings(path: Path | None = None) -> Settings:
@@ -147,6 +145,9 @@ def load_settings(path: Path | None = None) -> Settings:
     def read(name: str) -> str | None:
         return _read_value(values, _KEYS_BY_NAME[name])
 
+    # 默认值的单一真相源是 CONFIG_KEYS 里的 default（_read_value 已兜底）。
+    # 这里的 `or DEFAULT_*` 不是第二默认源（引用同一常量），只是把 read() 的 str|None
+    # 类型收敛成 Settings 字段要求的 str。api_key 无 default，`or ""` 同理收敛。
     return Settings(
         dashscope_api_key=read("dashscope.api_key") or "",
         dashscope_base_url=read("dashscope.base_url") or DEFAULT_DASHSCOPE_BASE_URL,

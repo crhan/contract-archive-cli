@@ -168,7 +168,9 @@ def main(
       --no-color 覆盖 NO_COLOR/TTY 自动探测；--verbose/--quiet 覆盖 LOG_LEVEL。
     """
     # dotenv 放到这里加载——保证 flag 解析后再读 env，且 CONTRACT_ARCHIVE_DIR 等及时可用。
-    load_dotenv()
+    # override=False 显式声明：shell 已 export 的变量压过 .env（即 env > 项目 .env），
+    # 与 config 层 env>file>default 的优先级语义一致。
+    load_dotenv(override=False)
 
     if no_color:
         console.no_color = True

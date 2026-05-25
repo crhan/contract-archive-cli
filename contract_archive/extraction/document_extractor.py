@@ -120,10 +120,10 @@ def call_llm_document(
     import dashscope  # lazy import
 
     # 统一从 config 层取（env > 配置文件 > 默认）；显式传参仍优先（param or settings）。
-    s = load_settings()
-    model = model or s.dashscope_model
-    api_key = api_key or s.dashscope_api_key
-    base_url = base_url or s.dashscope_base_url
+    settings = load_settings()
+    model = model or settings.dashscope_model
+    api_key = api_key or settings.dashscope_api_key
+    base_url = base_url or settings.dashscope_base_url
     if not api_key:
         logger.warning("DASHSCOPE_API_KEY missing; skip LLM document extraction")
         return {}

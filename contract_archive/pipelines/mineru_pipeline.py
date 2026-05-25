@@ -155,10 +155,8 @@ class MinerUPipeline:
         # 2) 调用 mineru CLI
         mineru_out = work_dir / "_mineru_raw"
         mineru_out.mkdir(exist_ok=True)
-        env = os.environ.copy()
-        # MinerU 子进程不需要 DashScope 凭证；剔除避免把 secret 无谓透传给子进程。
-        for key in [k for k in env if k.startswith("DASHSCOPE_")]:
-            del env[key]
+        # MinerU 子进程不需要 DashScope 凭证；过滤掉避免把 secret 无谓透传给子进程。
+        env = {k: v for k, v in os.environ.items() if not k.startswith("DASHSCOPE_")}
         env.setdefault("MINERU_MODEL_SOURCE", "modelscope")  # 国内更快
 
         cmd = [

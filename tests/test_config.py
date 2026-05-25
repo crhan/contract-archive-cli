@@ -13,7 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from contract_archive import config as cfg
+from contract_archive import cli, config as cfg
+from contract_archive.archive.paths import default_archive_root
 
 ENV_NAMES = [
     "DASHSCOPE_API_KEY",
@@ -107,6 +108,7 @@ def test_display_value_masks_secret():
     assert cfg.display_value(api, "sk-secret", reveal=False) == "********"
     assert cfg.display_value(api, "sk-secret", reveal=True) == "sk-secret"
     assert cfg.display_value(api, None, reveal=False) == "<unset>"
+    assert cfg.display_value(api, "", reveal=False) == "<unset>"  # 空串 secret 也显示 <unset>
     model = cfg.find_key("dashscope.model")
     assert cfg.display_value(model, "qwen", reveal=False) == "qwen"  # 非 secret 不掩码
 
@@ -123,3 +125,48 @@ def test_archive_dir_empty_env_treated_unset(tmp_path, monkeypatch):
     cfg.save_config_values({"archive.dir": "/from/file"}, p)
     monkeypatch.setenv("CONTRACT_ARCHIVE_DIR", "")  # 空串当未设，回落 config
     assert cfg.load_settings(p).archive_dir == "/from/file"
+
+
+def test_whitespace_env_treated_unset(tmp_path, monkeypatch):
+    p = tmp_path / "c.json"
+    cfg.save_config_values({"archive.dir": "/from/file"}, p)
+    monkeypatch.setenv("CONTRACT_ARCHIVE_DIR", "   ")  # 纯空白也当未设，与空串一致
+    assert cfg.load_settings(p).archive_dir == "/from/file"
+
+
+def test_non_dict_payload_ignored(tmp_path):
+    """合法 JSON 但不是对象（数组/数字）也不崩，返回 {}。"""
+    p = tmp_path / "c.json"
+    p.write_text("[1, 2, 3]", encoding="utf-8")
+    assert cfg.load_config_values(p) == {}
+
+
+# ---------- _resolve_archive（CLI 层优先级链 + ~ 展开 bug fix 的回归锁）----------
+# autouse fixture 已 delenv CONTRACT_ARCHIVE_DIR + 把 XDG_CONFIG_HOME 指向 tmp，
+# 故 config 文件落在隔离的 tmp 下，不污染真实 ~/.config。
+
+
+def test_resolve_archive_flag_wins(monkeypatch):
+    monkeypatch.setenv("CONTRACT_ARCHIVE_DIR", "/from/env")
+    cfg.save_config_values({"archive.dir": "/from/config"})
+    assert cli._resolve_archive(Path("/from/flag")).root == Path("/from/flag").resolve()
+
+
+def test_resolve_archive_env_over_config(monkeypatch):
+    cfg.save_config_values({"archive.dir": "/from/config"})
+    monkeypatch.setenv("CONTRACT_ARCHIVE_DIR", "/from/env")
+    assert cli._resolve_archive(None).root == Path("/from/env").resolve()
+
+
+def test_resolve_archive_config_when_no_env():
+    cfg.save_config_values({"archive.dir": "/from/config"})
+    assert cli._resolve_archive(None).root == Path("/from/config").resolve()
+
+
+def test_resolve_archive_default_when_unset():
+    assert cli._resolve_archive(None).root == default_archive_root().resolve()
+
+
+def test_resolve_archive_expands_tilde(monkeypatch):
+    monkeypatch.setenv("CONTRACT_ARCHIVE_DIR", "~/myarchive")  # 锁住 ~ 展开 bug fix
+    assert cli._resolve_archive(None).root == (Path.home() / "myarchive").resolve()
