@@ -27,7 +27,12 @@ from ..schemas import (
     SubAgreement,
 )
 from ..config import load_settings
-from .llm_extractor import LlmResult, _extract_text, _extract_usage, _parse_json_loose
+from .llm_extractor import (
+    LlmResult,
+    _call_openai_compat,
+    _parse_json_loose,
+    _truncate_middle,
+)
 from .normalize import coerce_obligations, normalize_date, parse_money_value
 from .amount_check import check_amount_consistency
 
@@ -137,14 +142,12 @@ def call_llm_document(
     max_chars: int = 24000,
 ) -> LlmResult:
     """
-    调 DashScope LLM 做通用文档抽取，返回 LlmResult（parsed/model/usage）。
+    调 DashScope LLM（OpenAI 兼容口）做通用文档抽取，返回 LlmResult（parsed/model/usage）。
 
-    与 llm_extractor.call_llm_extract 同样的调用骨架，但用通用文档 prompt。
-    刻意不复用其函数体——合同那条路保持不动，避免改动牵连。
+    见 CLAUDE.md：DashScope 一律走兼容口（原生 Generation 不认部分模型 id）。
+    用通用文档 prompt，传输/解析复用 llm_extractor 的兼容口 helper。
     失败时 parsed={}（调用方判 `if not res.parsed`），与历史"返回空 dict"语义一致。
     """
-    import dashscope  # lazy import
-
     # 统一从 config 层取（env > 配置文件 > 默认）；显式传参仍优先（param or settings）。
     settings = load_settings()
     model = model or settings.dashscope_model
@@ -154,48 +157,19 @@ def call_llm_document(
         logger.warning("DASHSCOPE_API_KEY missing; skip LLM document extraction")
         return LlmResult(parsed={}, model=model)
 
-    dashscope.base_http_api_url = base_url
-
-    if len(document_text) > max_chars:
-        # 头 1/3 尾 2/3：落款/金额/日期等关键信息多在尾部，权重更高
-        head_size = max_chars // 3
-        document_text = (
-            document_text[:head_size]
-            + "\n\n[...省略中段...]\n\n"
-            + document_text[-(max_chars - head_size):]
-        )
-
-    messages = [
-        {"role": "system", "content": DOC_EXTRACT_SYSTEM_PROMPT},
-        {"role": "user", "content": f"以下是文档正文，请判类型并抽取字段：\n\n{document_text}"},
-    ]
+    user_msg = f"以下是文档正文，请判类型并抽取字段：\n\n{_truncate_middle(document_text, max_chars)}"
     try:
-        resp = dashscope.Generation.call(
-            api_key=api_key,
-            model=model,
-            messages=messages,
-            result_format="message",
-            temperature=0.1,
-            top_p=0.5,
-            response_format={"type": "json_object"},
-        )
-    except TypeError:
-        # 老版本 SDK 不接受 response_format/temperature
-        resp = dashscope.Generation.call(
-            api_key=api_key, model=model, messages=messages, result_format="message"
-        )
-    except Exception as e:
+        content, usage = _call_openai_compat(DOC_EXTRACT_SYSTEM_PROMPT, user_msg, model, api_key, base_url)
+    except Exception as e:  # noqa: BLE001 — 外部调用，任何异常都降级返回空，由调用方处理
         logger.exception("DashScope document LLM call failed: %s", e)
         return LlmResult(parsed={}, model=model)
 
-    usage = _extract_usage(resp)
-    text = _extract_text(resp)
-    if not text:
+    if not content:
         logger.warning("LLM empty response (document extract)")
-        return LlmResult(parsed={}, model=model, usage=usage)
-    parsed = _parse_json_loose(text)
+        return LlmResult(parsed={}, model=model, usage=None)
+    parsed = _parse_json_loose(content)
     if not parsed:
-        logger.warning("LLM document response not parseable: %s", text[:200])
+        logger.warning("LLM document response not parseable: %s", content[:200])
     return LlmResult(parsed=parsed, model=model, usage=usage)
 
 

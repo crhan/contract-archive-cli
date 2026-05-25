@@ -88,15 +88,14 @@ def call_llm_extract(
     max_chars: int = 24000,
 ) -> LlmResult:
     """
-    调用 DashScope LLM 进行合同字段抽取。
+    调用 DashScope LLM（OpenAI 兼容口）进行合同字段抽取。
 
+    见 CLAUDE.md：DashScope 一律走 OpenAI 兼容接口（原生 Generation 不认部分模型 id）。
     :param document_text: 已 OCR 得到的合同全文（推荐用 markdown 版本）
     :param model: 默认从 DASHSCOPE_LLM_MODEL env 读，最终默认 qwen3.7-max
     :param max_chars: 截断阈值，避免超过模型上下文
     :return: LlmResult（parsed/model/usage）；失败时 parsed={}，调用方判 `if not res.parsed`
     """
-    import dashscope  # lazy import
-
     # 统一从 config 层取（env > 配置文件 > 默认）；显式传参仍优先（param or settings）。
     settings = load_settings()
     model = model or settings.dashscope_model
@@ -106,94 +105,67 @@ def call_llm_extract(
         logger.warning("DASHSCOPE_API_KEY missing; skip LLM extraction")
         return LlmResult(parsed={}, model=model)
 
-    dashscope.base_http_api_url = base_url
-
-    if len(document_text) > max_chars:
-        # 头 1/3 尾 2/3：合同尾部承载签字/金额/到期日期等关键信息，权重更高
-        head_size = max_chars // 3
-        tail_size = max_chars - head_size
-        head = document_text[:head_size]
-        tail = document_text[-tail_size:]
-        document_text = head + "\n\n[...省略中段...]\n\n" + tail
-
-    user_msg = f"以下是合同正文，请抽取字段：\n\n{document_text}"
-
+    user_msg = f"以下是合同正文，请抽取字段：\n\n{_truncate_middle(document_text, max_chars)}"
     try:
-        resp = dashscope.Generation.call(
-            api_key=api_key,
-            model=model,
-            messages=[
-                {"role": "system", "content": LLM_SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            result_format="message",
-            temperature=0.1,  # 抽取任务降随机性
-            top_p=0.5,
-            response_format={"type": "json_object"},  # qwen3.x 支持 JSON 模式
-        )
-    except TypeError:
-        # 老版本 SDK 不接受 response_format/temperature，回退最小参数
-        resp = dashscope.Generation.call(
-            api_key=api_key,
-            model=model,
-            messages=[
-                {"role": "system", "content": LLM_SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
-            ],
-            result_format="message",
-        )
-    except Exception as e:
+        content, usage = _call_openai_compat(LLM_SYSTEM_PROMPT, user_msg, model, api_key, base_url)
+    except Exception as e:  # noqa: BLE001 — 外部调用，任何异常都降级返回空，由调用方处理
         logger.exception("DashScope LLM call failed: %s", e)
         return LlmResult(parsed={}, model=model)
 
-    usage = _extract_usage(resp)
-    text = _extract_text(resp)
-    if not text:
+    if not content:
         logger.warning("LLM empty response")
         return LlmResult(parsed={}, model=model, usage=usage)
-
-    parsed = _parse_json_loose(text)
+    parsed = _parse_json_loose(content)
     if not parsed:
-        logger.warning("LLM response not parseable as JSON: %s", text[:200])
+        logger.warning("LLM response not parseable as JSON: %s", content[:200])
     return LlmResult(parsed=parsed, model=model, usage=usage)
 
 
-def _extract_usage(resp: Any) -> dict[str, Any] | None:
+def _truncate_middle(text: str, max_chars: int) -> str:
+    """超长则头 1/3 尾 2/3 截断——尾部承载签字/金额/到期日等关键信息，权重更高。"""
+    if len(text) <= max_chars:
+        return text
+    head = max_chars // 3
+    return text[:head] + "\n\n[...省略中段...]\n\n" + text[-(max_chars - head):]
+
+
+def _usage_from_openai(resp: Any) -> dict[str, Any] | None:
+    """OpenAI 兼容响应的 token 用量 → 归一化 input/output/total_tokens。读不到返回 None。"""
+    u = getattr(resp, "usage", None)
+    if u is None:
+        return None
+    out = {
+        "input_tokens": getattr(u, "prompt_tokens", None),
+        "output_tokens": getattr(u, "completion_tokens", None),
+        "total_tokens": getattr(u, "total_tokens", None),
+    }
+    return out if any(v is not None for v in out.values()) else None
+
+
+def _call_openai_compat(
+    system_prompt: str, user_content: str, model: str, api_key: str, base_url: str
+) -> tuple[str, dict[str, Any] | None]:
     """
-    从 DashScope 响应读 token 用量。返回普通 dict（含 input_tokens/output_tokens/total_tokens
-    等键），读不到返回 None。
+    经 DashScope 的 OpenAI 兼容接口调文本模型，返回 (content, usage)。失败抛异常由调用方降级。
 
-    SDK 的 resp["usage"] 可能是 addict.Dict（dict 子类）或普通 dict，统一 dict() 拷一份；
-    任何异常都吞掉返回 None——usage 是评测的成本旁证，缺它不该影响抽取本身。
+    见 CLAUDE.md：DashScope 一律走兼容口（原生 Generation 不认部分模型 id，如 qwen3.6-flash）。
+    开 json_object；**不设 max_tokens**（避免 JSON 被截断成非法串）；各 prompt 已含 "JSON" 字样。
     """
-    try:
-        usage = resp["usage"]
-    except (KeyError, IndexError, TypeError):
-        return None
-    if not usage:
-        return None
-    try:
-        return dict(usage)
-    except (TypeError, ValueError):
-        return None
+    from openai import OpenAI
 
-
-def _extract_text(resp: Any) -> str:
-    try:
-        choices = resp["output"]["choices"]
-        content = choices[0]["message"]["content"]
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            for item in content:
-                if isinstance(item, dict) and "text" in item:
-                    return item["text"]
-        return ""
-    except (KeyError, IndexError, TypeError):
-        try:
-            return resp["output"]["text"]
-        except Exception:
-            return ""
+    compat_url = base_url.replace("/api/v1", "/compatible-mode/v1")
+    client = OpenAI(api_key=api_key, base_url=compat_url)
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        temperature=0.1,
+        top_p=0.5,
+        response_format={"type": "json_object"},
+    )
+    return (resp.choices[0].message.content or ""), _usage_from_openai(resp)
 
 
 def _parse_json_loose(text: str) -> dict[str, Any]:
