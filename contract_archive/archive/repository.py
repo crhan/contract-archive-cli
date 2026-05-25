@@ -16,7 +16,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from ..schemas import ContractExtraction, ExtractionConfidence, ObligationItem
+from ..schemas import (
+    ContractExtraction,
+    DocumentExtraction,
+    ExtractionConfidence,
+    LabeledAmount,
+    LabeledDate,
+    ObligationItem,
+)
 from .db import transaction, utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -38,6 +45,14 @@ class DocumentRow:
     llm_duration_s: Optional[float]
     status: str
     error_message: Optional[str]
+    # 通用信封列（任何文档类型都填）
+    doc_type: str
+    title: Optional[str]
+    summary: Optional[str]
+    primary_date: Optional[str]
+    primary_amount_cents: Optional[int]
+    details_json: Optional[str]
+    # 合同专属列（doc_type=合同协议 时填，其余 NULL）
     contract_name: Optional[str]
     party_a: Optional[str]
     party_b: Optional[str]
@@ -49,6 +64,20 @@ class DocumentRow:
     overall_confidence: Optional[float]
     risk_clauses: list[str] = field(default_factory=list)
     obligations: list[ObligationItem] = field(default_factory=list)
+
+    @property
+    def primary_amount_value(self) -> Optional[float]:
+        return None if self.primary_amount_cents is None else self.primary_amount_cents / 100.0
+
+    def details(self) -> dict:
+        """details_json 解析为 dict（柔性字段：parties/amounts/fields/key_dates）。"""
+        import json
+        if not self.details_json:
+            return {}
+        try:
+            return json.loads(self.details_json)
+        except (json.JSONDecodeError, TypeError):
+            return {}
 
     @property
     def amount_value(self) -> Optional[float]:
@@ -70,6 +99,34 @@ def _amount_to_cents(value: Optional[float]) -> Optional[int]:
     return int(round(value * 100))
 
 
+def contract_to_envelope(ext: ContractExtraction) -> DocumentExtraction:
+    """
+    合同抽取 → 通用信封。
+    用于未显式提供 envelope 的调用（如旧测试、纯合同路径回退），
+    保证合同行也有统一的 doc_type/title/primary_* 可供 list/show 展示。
+    """
+    amounts: list[LabeledAmount] = []
+    if ext.amount:
+        amounts.append(LabeledAmount(label="合同金额", text=ext.amount, value=ext.amount_value))
+    key_dates: list[LabeledDate] = []
+    if ext.sign_date:
+        key_dates.append(LabeledDate(label="签订日", date=ext.sign_date))
+    if ext.expire_date:
+        key_dates.append(LabeledDate(label="到期日", date=ext.expire_date))
+    return DocumentExtraction(
+        doc_type="合同协议",
+        title=ext.contract_name,
+        summary=ext.contract_name,
+        parties=[p for p in (ext.party_a, ext.party_b) if p],
+        primary_date=ext.sign_date,
+        primary_amount_text=ext.amount,
+        primary_amount_value=ext.amount_value,
+        key_dates=key_dates,
+        amounts=amounts,
+        obligations=ext.obligations,
+    )
+
+
 def _row_to_document(
     row: sqlite3.Row,
     risks: list[str],
@@ -85,6 +142,12 @@ def _row_to_document(
         llm_duration_s=row["llm_duration_s"],
         status=row["status"],
         error_message=row["error_message"],
+        doc_type=row["doc_type"],
+        title=row["title"],
+        summary=row["summary"],
+        primary_date=row["primary_date"],
+        primary_amount_cents=row["primary_amount_cents"],
+        details_json=row["details_json"],
         contract_name=row["contract_name"],
         party_a=row["party_a"],
         party_b=row["party_b"],
@@ -382,13 +445,18 @@ def insert_document(
     error_message: Optional[str],
     extraction: Optional[ContractExtraction],
     confidence: Optional[ExtractionConfidence],
+    envelope: Optional[DocumentExtraction] = None,
 ) -> Optional[int]:
     """
     新增一条档案。sha256 冲突时返回 None（已存在），不消耗 autoincrement seq。
-    单事务：documents + risk_clauses 全部原子写入。
+    单事务：documents + risk_clauses + obligations 全部原子写入。
+
+    envelope 缺省时由合同抽取派生（兼容只传 extraction 的调用）。
+    obligations 取信封的（合同路径会把 hybrid 的 obligations 灌进信封）。
     """
     ext = extraction or ContractExtraction()
     conf = confidence or ExtractionConfidence()
+    env = envelope or contract_to_envelope(ext)
 
     with transaction(conn):
         cursor = conn.execute(
@@ -396,11 +464,13 @@ def insert_document(
             INSERT INTO documents (
               sha256, source_path, output_dir, ingested_at,
               mineru_duration_s, llm_duration_s, status, error_message,
+              doc_type, title, summary, details_json,
+              primary_date, primary_amount_cents,
               contract_name, party_a, party_b,
               amount_text, amount_cents,
               sign_date, expire_date, auto_renewal,
               overall_confidence
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(sha256) DO NOTHING
             """,
             (
@@ -412,6 +482,12 @@ def insert_document(
                 llm_duration_s,
                 status,
                 error_message,
+                env.doc_type,
+                env.title,
+                env.summary,
+                env.model_dump_json(),
+                env.primary_date,
+                _amount_to_cents(env.primary_amount_value),
                 ext.contract_name,
                 ext.party_a,
                 ext.party_b,
@@ -427,7 +503,7 @@ def insert_document(
             return None  # 冲突，sha256 已存在
         doc_id = cursor.lastrowid
         _insert_risks(conn, doc_id, ext.risk_clauses)
-        _insert_obligations(conn, doc_id, ext.obligations)
+        _insert_obligations(conn, doc_id, env.obligations)
         return doc_id
 
 
@@ -440,11 +516,14 @@ def update_extraction(
     error_message: Optional[str],
     extraction: ContractExtraction,
     confidence: ExtractionConfidence,
+    envelope: Optional[DocumentExtraction] = None,
 ) -> None:
     """
     复跑抽取（mineru 产物已存在）后更新字段。同一事务：
-    risk_clauses 显式 DELETE 再 INSERT，避免重复堆积。
+    risk_clauses / obligations 显式 DELETE 再 INSERT，避免重复堆积。
     """
+    ext = extraction
+    env = envelope or contract_to_envelope(ext)
     with transaction(conn):
         conn.execute(
             """
@@ -452,6 +531,8 @@ def update_extraction(
               status = ?,
               llm_duration_s = ?,
               error_message = ?,
+              doc_type = ?, title = ?, summary = ?, details_json = ?,
+              primary_date = ?, primary_amount_cents = ?,
               contract_name = ?, party_a = ?, party_b = ?,
               amount_text = ?, amount_cents = ?,
               sign_date = ?, expire_date = ?, auto_renewal = ?,
@@ -462,22 +543,28 @@ def update_extraction(
                 status,
                 llm_duration_s,
                 error_message,
-                extraction.contract_name,
-                extraction.party_a,
-                extraction.party_b,
-                extraction.amount,
-                _amount_to_cents(extraction.amount_value),
-                extraction.sign_date,
-                extraction.expire_date,
-                None if extraction.auto_renewal is None else int(extraction.auto_renewal),
+                env.doc_type,
+                env.title,
+                env.summary,
+                env.model_dump_json(),
+                env.primary_date,
+                _amount_to_cents(env.primary_amount_value),
+                ext.contract_name,
+                ext.party_a,
+                ext.party_b,
+                ext.amount,
+                _amount_to_cents(ext.amount_value),
+                ext.sign_date,
+                ext.expire_date,
+                None if ext.auto_renewal is None else int(ext.auto_renewal),
                 confidence.overall,
                 doc_id,
             ),
         )
         conn.execute("DELETE FROM risk_clauses WHERE doc_id = ?", (doc_id,))
         conn.execute("DELETE FROM obligations WHERE doc_id = ?", (doc_id,))
-        _insert_risks(conn, doc_id, extraction.risk_clauses)
-        _insert_obligations(conn, doc_id, extraction.obligations)
+        _insert_risks(conn, doc_id, ext.risk_clauses)
+        _insert_obligations(conn, doc_id, env.obligations)
 
 
 def replace_document(
@@ -492,11 +579,14 @@ def replace_document(
     error_message: Optional[str],
     extraction: ContractExtraction,
     confidence: ExtractionConfidence,
+    envelope: Optional[DocumentExtraction] = None,
 ) -> None:
     """
     reingest：mineru + 抽取都重跑。比 update_extraction 多更新 source_path/output_dir/mineru_duration。
     sha256 / id / ingested_at 不变。
     """
+    ext = extraction
+    env = envelope or contract_to_envelope(ext)
     with transaction(conn):
         conn.execute(
             """
@@ -504,6 +594,8 @@ def replace_document(
               source_path = ?, output_dir = ?,
               mineru_duration_s = ?, llm_duration_s = ?,
               status = ?, error_message = ?,
+              doc_type = ?, title = ?, summary = ?, details_json = ?,
+              primary_date = ?, primary_amount_cents = ?,
               contract_name = ?, party_a = ?, party_b = ?,
               amount_text = ?, amount_cents = ?,
               sign_date = ?, expire_date = ?, auto_renewal = ?,
@@ -517,22 +609,28 @@ def replace_document(
                 llm_duration_s,
                 status,
                 error_message,
-                extraction.contract_name,
-                extraction.party_a,
-                extraction.party_b,
-                extraction.amount,
-                _amount_to_cents(extraction.amount_value),
-                extraction.sign_date,
-                extraction.expire_date,
-                None if extraction.auto_renewal is None else int(extraction.auto_renewal),
+                env.doc_type,
+                env.title,
+                env.summary,
+                env.model_dump_json(),
+                env.primary_date,
+                _amount_to_cents(env.primary_amount_value),
+                ext.contract_name,
+                ext.party_a,
+                ext.party_b,
+                ext.amount,
+                _amount_to_cents(ext.amount_value),
+                ext.sign_date,
+                ext.expire_date,
+                None if ext.auto_renewal is None else int(ext.auto_renewal),
                 confidence.overall,
                 doc_id,
             ),
         )
         conn.execute("DELETE FROM risk_clauses WHERE doc_id = ?", (doc_id,))
         conn.execute("DELETE FROM obligations WHERE doc_id = ?", (doc_id,))
-        _insert_risks(conn, doc_id, extraction.risk_clauses)
-        _insert_obligations(conn, doc_id, extraction.obligations)
+        _insert_risks(conn, doc_id, ext.risk_clauses)
+        _insert_obligations(conn, doc_id, env.obligations)
 
 
 def _insert_risks(

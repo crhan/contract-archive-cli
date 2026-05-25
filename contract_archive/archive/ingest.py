@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from ..extraction import extract_contract
+from ..extraction import extract_contract, extract_document
 from ..pipelines import MinerUPipeline
 from ..schemas import (
     FILE_EXTRACTION,
@@ -35,10 +35,12 @@ from ..schemas import (
     FILE_MARKDOWN,
     FILE_RAW_TEXT,
     ContractExtraction,
+    DocumentExtraction,
     ExtractionConfidence,
 )
 from .paths import ArchivePaths, SHA_SHORT_LEN, link_or_copy, safe_rmtree, sha256_of_file
 from .repository import (
+    contract_to_envelope,
     find_by_sha,
     get_document,
     insert_document,
@@ -64,6 +66,48 @@ class IngestResult:
     llm_duration_s: Optional[float] = None
     error_message: Optional[str] = None
     skipped_reason: Optional[str] = None
+
+
+# ---------- 抽取调度（LLM-first） ----------
+
+
+def _envelope_confidence(env: DocumentExtraction) -> float:
+    """
+    非合同文档的总体置信度启发式（LLM-first，无 rule 交叉验证）。
+    有标题/摘要算基础 0.5，每多一类柔性信息（主体/金额/字段/日期）+0.1，封顶 0.9。
+    """
+    if not env.title and not env.summary:
+        return 0.0
+    rich = sum(bool(x) for x in (env.parties, env.amounts, env.fields, env.key_dates))
+    return min(0.9, 0.5 + 0.1 * rich)
+
+
+def _run_extraction(
+    document_text: str, llm_enabled: bool
+) -> tuple[ContractExtraction, ExtractionConfidence, DocumentExtraction]:
+    """
+    LLM-first 抽取：先判类型抽通用信封；若是合同，再跑 hybrid 补合同专属列。
+    返回 (合同抽取, 置信度, 通用信封)——三者一并交给 repository 落库。
+    """
+    if not llm_enabled:
+        # 无 LLM：通用路径纯靠 LLM、无从抽取；保留合同 rule 抽取作为无 key 兜底
+        # （--no-llm 调试能力，见 README），并由其派生信封。
+        ext, conf = extract_contract(document_text, llm_enabled=False)
+        return ext, conf, contract_to_envelope(ext)
+
+    envelope = extract_document(document_text, llm_enabled=llm_enabled)
+    if envelope.doc_type == "合同协议" and llm_enabled:
+        ext, conf = extract_contract(document_text, llm_enabled=llm_enabled)
+        # 合同义务用 hybrid 的（rule+LLM 交叉验证，比通用信封更准）
+        envelope.obligations = ext.obligations
+        # 标题/摘要若 hybrid 没给，回退用信封的
+        if not ext.contract_name and envelope.title:
+            ext.contract_name = envelope.title
+        return ext, conf, envelope
+    # 非合同：无合同专属列，overall 走信封启发式
+    conf = ExtractionConfidence()
+    conf.overall = _envelope_confidence(envelope)
+    return ContractExtraction(), conf, envelope
 
 
 # ---------- 入口 ----------
@@ -124,6 +168,7 @@ def ingest_pdf(
     llm_duration: Optional[float] = None
     extraction: Optional[ContractExtraction] = None
     confidence: Optional[ExtractionConfidence] = None
+    envelope: Optional[DocumentExtraction] = None
     error_message: Optional[str] = None
     status = "ok"
 
@@ -159,23 +204,26 @@ def ingest_pdf(
             log_handle.write("\n[extract] WARNING: no text found in mineru output\n")
         t1 = time.perf_counter()
         try:
-            extraction, confidence = extract_contract(
+            extraction, confidence, envelope = _run_extraction(
                 document_text, llm_enabled=llm_enabled
             )
             llm_duration = time.perf_counter() - t1
-            log_handle.write(f"[extract] OK in {llm_duration:.2f}s\n")
+            log_handle.write(
+                f"[extract] OK in {llm_duration:.2f}s (doc_type={envelope.doc_type})\n"
+            )
         except Exception as e:
             llm_duration = time.perf_counter() - t1
             status = "partial"
             error_message = f"extract: {e}"
             extraction = ContractExtraction()
             confidence = ExtractionConfidence()
+            envelope = DocumentExtraction()
             log_handle.write(f"\n[extract] FAILED (status=partial): {error_message}\n")
             log_handle.write(traceback.format_exc())
 
-        # ---- 3. extracted.json 落盘（即使 partial 也写空对象，便于后续 extract 复跑） ----
+        # ---- 3. extracted.json 落盘（写通用信封；即使 partial 也写空对象，便于后续 extract 复跑） ----
         (tmp_doc_dir / FILE_EXTRACTION).write_text(
-            extraction.model_dump_json(indent=2), encoding="utf-8"
+            envelope.model_dump_json(indent=2), encoding="utf-8"
         )
         (tmp_doc_dir / FILE_EXTRACTION_CONF).write_text(
             confidence.model_dump_json(indent=2), encoding="utf-8"
@@ -208,6 +256,7 @@ def ingest_pdf(
                 error_message=error_message,
                 extraction=extraction,
                 confidence=confidence,
+                envelope=envelope,
             )
             doc_id = existing_id
             log_handle.write(f"\n[db] replaced id={doc_id} status={status}\n")
@@ -223,6 +272,7 @@ def ingest_pdf(
                 error_message=error_message,
                 extraction=extraction,
                 confidence=confidence,
+                envelope=envelope,
             )
             # 极端竞态：sha 在我们 hash 完到 insert 之间被别的 worker 写入
             if doc_id is None:
@@ -369,8 +419,9 @@ def re_extract(
     t0 = time.perf_counter()
     error_message: Optional[str] = None
     status = "ok"
+    envelope = DocumentExtraction()
     try:
-        extraction, confidence = extract_contract(
+        extraction, confidence, envelope = _run_extraction(
             document_text, llm_enabled=llm_enabled
         )
     except Exception as e:
@@ -378,11 +429,12 @@ def re_extract(
         error_message = f"extract: {e}"
         extraction = ContractExtraction()
         confidence = ExtractionConfidence()
+        envelope = DocumentExtraction()
     llm_duration = time.perf_counter() - t0
 
-    # 落盘新 extracted.json
+    # 落盘新 extracted.json（通用信封）
     (Path(doc.output_dir) / FILE_EXTRACTION).write_text(
-        extraction.model_dump_json(indent=2), encoding="utf-8"
+        envelope.model_dump_json(indent=2), encoding="utf-8"
     )
     (Path(doc.output_dir) / FILE_EXTRACTION_CONF).write_text(
         confidence.model_dump_json(indent=2), encoding="utf-8"
@@ -396,6 +448,7 @@ def re_extract(
         error_message=error_message,
         extraction=extraction,
         confidence=confidence,
+        envelope=envelope,
     )
 
     _append_jsonl(
