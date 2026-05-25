@@ -24,6 +24,7 @@ from ..schemas import (
     LabeledDate,
     LabeledValue,
     Seal,
+    SubAgreement,
 )
 from ..config import load_settings
 from .llm_extractor import _extract_text, _parse_json_loose
@@ -60,9 +61,12 @@ JSON 字段定义：
   "obligations": [
     {{"actor": "party_a|party_b|both", "action": "动宾短语", "deadline": "YYYY-MM-DD 或 null", "evidence": "原文片段"}}
   ],
+  "sub_agreements": [
+    {{"title": "补充协议", "summary": "改了/补充了什么", "sign_date": "YYYY-MM-DD 或 null", "seals": [{{"owner": "或 null", "seal_type": "或 null", "raw_text": "印章原文"}}], "evidence": "原文片段"}}
+  ],
   "completeness": {{
     "status": "complete|incomplete|unknown",
-    "issues": [{{"item": "缺失要素名", "category": "signature|field", "detail": "缺在哪/证据"}}]
+    "issues": [{{"item": "缺失要素名（缺签章请标明所属协议，如 主协议·甲方签章）", "category": "signature|field", "detail": "缺在哪/证据"}}]
   }}
 }}
 
@@ -88,6 +92,15 @@ JSON 字段定义：
   · 文档若没有任何印章痕迹，seals 填空数组 []。
 - obligations 仅当文档含明确"谁该在何时做什么"的待办/义务（合同尤甚）；
   证明、发票等通常为空数组。actor 只能是 party_a|party_b|both。
+- sub_agreements 是这份文档里主协议之外的**附属协议**（最常见是《补充协议》，可能多份）。
+  很多合同 PDF 在主协议落款后还附了补充协议，它修改/补充原协议（如改期限、改费用承担），
+  且通常有自己独立的签章落款区与生效条件。识别与抽取：
+  · 触发信号："《XX》补充协议""补充协议""附件协议"等标题，或"鉴于…达成如下补充协议"。
+  · 每份填：title（如"补充协议"）；summary（这份改了/补充了什么，一句话）；
+    sign_date（该补充协议落款日期，空白填 null）；seals（这份补充协议落款上的章，规则同上层
+    seals，没有填 []）；evidence（原文关键片段）。
+  · 主协议本身的字段仍填在顶层（parties/amounts/obligations 等），不要塞进 sub_agreements。
+  · 没有附属协议就填空数组 []。
 - completeness 是合同完整性核查，**仅当 doc_type 为"合同协议"时填**，其他类型一律 null
   （证明/发票没有"甲乙双方签章齐不齐"的概念）。两步判断：
   (1) 先据**这份合同的类型**判断它应具备哪些要素——双方主体、标的物、价款/金额、
@@ -97,10 +110,12 @@ JSON 字段定义：
   (2) 逐项核查实际是否齐全，缺的或留空白占位的（如"___年__月__日""甲方（盖章）："后空白）
       列进 issues。每条：item=要素名；category=signature(签章/签字类) 或 field(其他要素)；
       detail=缺在哪+证据片段。
-  签章核查要点：看落款区"X方（盖章/签字）："处后面是否有实际印章文字或签名；空着=疑似缺。
+  签章核查要点：本文档每个协议单元——主协议 + 每一份 sub_agreements——都有自己的落款区，
+  必须**逐个**核查各自"X方（盖章/签字）："处后面是否有实际印章文字或签名；空着=疑似缺。
+  缺章的 issue.item 必须标明所属协议，如"主协议·甲方签章""补充协议·甲方签章"。
   **红章 OCR 经常读不出（淡红/模糊）**，所以凡判定缺章，detail 里务必注明"疑似，可能 OCR
   漏识，需人工复核"——不要把"没读到章"当成"确认没盖章"。
-  status：要素与签章全齐=complete；存在任一缺项=incomplete；信息不足无法判断=unknown。
+  status：所有协议单元的要素与签章全齐=complete；存在任一缺项=incomplete；信息不足=unknown。
 """
 
 
@@ -291,6 +306,29 @@ def _coerce_completeness(raw: Any, doc_type: str) -> Optional[Completeness]:
     return Completeness(status=status, issues=issues)
 
 
+def _coerce_sub_agreements(raw: Any) -> list[SubAgreement]:
+    """LLM sub_agreements 数组 → SubAgreement。跳过无 title 的垃圾项；seals 复用 _coerce_seals。"""
+    if not isinstance(raw, list):
+        return []
+    out: list[SubAgreement] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        sign_date = item.get("sign_date")
+        sign_date = normalize_date(sign_date) if isinstance(sign_date, str) and sign_date else None
+        out.append(SubAgreement(
+            title=title,
+            summary=str(item.get("summary") or "").strip(),
+            sign_date=sign_date,
+            seals=_coerce_seals(item.get("seals")),
+            evidence=str(item.get("evidence") or "").strip(),
+        ))
+    return out
+
+
 def extract_document(
     document_text: str,
     llm_enabled: bool = True,
@@ -339,6 +377,7 @@ def extract_document(
         seals=_coerce_seals(raw.get("seals")),
         fields=_coerce_labeled_values(raw.get("fields")),
         obligations=coerce_obligations(raw.get("obligations")),
+        sub_agreements=_coerce_sub_agreements(raw.get("sub_agreements")),
         completeness=_coerce_completeness(raw.get("completeness"), doc_type),
         raw_evidence={},
     )

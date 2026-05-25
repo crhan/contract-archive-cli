@@ -118,6 +118,7 @@ def row_to_dict(r) -> dict:
         "primary_amount_value": r.primary_amount_value,
         "computed_total_value": details.get("computed_total_value"),
         "seals": details.get("seals"),
+        "sub_agreements": details.get("sub_agreements"),
         "completeness": details.get("completeness"),
         "completeness_status": r.completeness_status,
         "details": details,

@@ -630,6 +630,27 @@ def show(
             lines.append(f"• {head}  [dim]{raw}[/dim]" if raw else f"• {head}")
         table.add_row("[bold]印章[/bold]", "\n".join(lines))
 
+    # 附属协议（补充协议等）：一份 PDF 可能含主协议 + N 份补充协议，各有独立签章。
+    subs = row.details().get("sub_agreements") or []
+    if subs:
+        lines = []
+        for sub in subs:
+            head = f"[bold]{sub.get('title') or '附属协议'}[/bold]"
+            if sub.get("sign_date"):
+                head += f"  [dim]{sub['sign_date']}[/dim]"
+            lines.append(head)
+            if sub.get("summary"):
+                lines.append(f"  {sub['summary']}")
+            sseals = sub.get("seals") or []
+            if sseals:
+                for s in sseals:
+                    owner = s.get("owner") or "?"
+                    stype = s.get("seal_type")
+                    lines.append(f"  印章: {owner}" + (f" · {stype}" if stype else ""))
+            else:
+                lines.append("  [dim]印章: 无[/dim]")
+        table.add_row("[bold]补充协议[/bold]", "\n".join(lines))
+
     # 完整性核查：仅合同有此块（非合同 details 里 completeness 为 None）。
     comp = row.details().get("completeness")
     if comp:

@@ -255,6 +255,23 @@ class Completeness(BaseModel):
     issues: list[CompletenessIssue] = Field(default_factory=list)
 
 
+class SubAgreement(BaseModel):
+    """
+    文档内的附属协议——主协议之后所附的《补充协议》等。
+
+    依附主协议（修改/补充原协议条款），但常有自己独立的签章落款区与生效条件
+    （如"自甲方加盖公章、乙方签字之日生效"），故单列：既体现"这份 PDF 其实含 N 份
+    协议"，又让 completeness 能逐个协议单元分别核查签章（主协议缺章 ≠ 补充协议缺章）。
+    依附主协议故不单列 amounts/obligations——关键变更写进 summary，可追溯片段进 evidence。
+    """
+
+    title: str                       # 协议标题，如 "补充协议" / "补充协议（二）"
+    summary: str = ""                # 这份补充协议改了/补充了什么（关键变更，便于检索回忆）
+    sign_date: Optional[str] = None  # 该补充协议自己的签订/生效日 ISO（可能空白→None）
+    seals: list[Seal] = Field(default_factory=list)  # 补充协议落款上的印章（供完整性核查）
+    evidence: str = ""               # 原文关键片段，可追溯
+
+
 # 粗粒度规范类型（用于 --type 过滤）。LLM 从中择一，更细的归类放进 title/fields。
 DOC_TYPES = ("合同协议", "证明", "发票票据", "报告", "证件", "其他")
 DocType = str  # 存库用 str（保持柔性，不上 Literal 以免 LLM 新类型被卡死）
@@ -284,6 +301,9 @@ class DocumentExtraction(BaseModel):
     seals: list[Seal] = Field(default_factory=list)   # 文档上的印章（有则可验真/索引）
     fields: list[LabeledValue] = Field(default_factory=list)
     obligations: list[ObligationItem] = Field(default_factory=list)
+    # 附属协议（主协议之外的《补充协议》等）。一份 PDF 可能含主协议 + N 份补充协议，
+    # 每份有独立签章落款；completeness 会逐个协议单元核查。无则空列表。
+    sub_agreements: list[SubAgreement] = Field(default_factory=list)
     # 完整性核查：仅合同协议填，其他类型 None
     # （"该不该有甲乙签章/要素齐不齐"对证明/发票无意义，强判只会制造噪声）。
     completeness: Optional[Completeness] = None

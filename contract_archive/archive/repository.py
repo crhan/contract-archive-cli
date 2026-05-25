@@ -619,7 +619,7 @@ def insert_document(
         doc_id = cursor.lastrowid
         _insert_risks(conn, doc_id, ext.risk_clauses)
         _insert_obligations(conn, doc_id, env.obligations)
-        _insert_seals(conn, doc_id, env.seals)
+        _insert_seals(conn, doc_id, _collect_seals(env))
         _insert_subjects(conn, doc_id, _subjects_for(env, ext))
         return doc_id
 
@@ -685,7 +685,7 @@ def update_extraction(
         conn.execute("DELETE FROM document_subjects WHERE doc_id = ?", (doc_id,))
         _insert_risks(conn, doc_id, ext.risk_clauses)
         _insert_obligations(conn, doc_id, env.obligations)
-        _insert_seals(conn, doc_id, env.seals)
+        _insert_seals(conn, doc_id, _collect_seals(env))
         _insert_subjects(conn, doc_id, _subjects_for(env, ext))
 
 
@@ -756,7 +756,7 @@ def replace_document(
         conn.execute("DELETE FROM document_subjects WHERE doc_id = ?", (doc_id,))
         _insert_risks(conn, doc_id, ext.risk_clauses)
         _insert_obligations(conn, doc_id, env.obligations)
-        _insert_seals(conn, doc_id, env.seals)
+        _insert_seals(conn, doc_id, _collect_seals(env))
         _insert_subjects(conn, doc_id, _subjects_for(env, ext))
 
 
@@ -791,6 +791,17 @@ def _insert_obligations(
              VALUES (?, ?, ?, ?, ?, ?)""",
         rows,
     )
+
+
+def _collect_seals(env: DocumentExtraction) -> list[Seal]:
+    """
+    文档级全部印章 = 主文档 seals + 各补充协议 seals，统一进 document_seals 子表。
+    保证 seals 命令不漏补充协议落款上的章——章就是这份文档的章，不分主协议/补充协议。
+    """
+    seals = list(env.seals)
+    for sub in env.sub_agreements:
+        seals.extend(sub.seals)
+    return seals
 
 
 def _insert_seals(
