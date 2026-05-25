@@ -1,2 +1,2 @@
-"""Document Intelligence Playground - OCR & Semantic Extraction comparison."""
+"""本地合同档案库 CLI：MinerU 解析 + qwen3.7-max 字段抽取 + SQLite 索引。"""
 __version__ = "0.1.0"

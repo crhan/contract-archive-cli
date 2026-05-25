@@ -19,6 +19,8 @@ import json as _json
 import logging
 import os
 import sys
+from dataclasses import asdict
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
@@ -27,6 +29,7 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.table import Table
 
+from . import __version__
 from .archive import (
     ArchivePaths,
     SearchFilter,
@@ -46,14 +49,124 @@ from .archive import (
 )
 from .pipelines import MinerUPipeline
 
-app = typer.Typer(help="本地合同档案库 CLI (MinerU + qwen3.7-max)")
-console = Console()
-load_dotenv()
+# ---------- 参数枚举（parse-time 校验：坏值由 typer 报 exit 2，不再漏到数据层 ValueError）----------
 
-logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+
+class OutputFormat(str, Enum):
+    """--format：人类表格 or 机器 JSON。"""
+
+    table = "table"
+    json = "json"
+
+
+class OrderBy(str, Enum):
+    """list --order-by。成员必须与 repository.list_documents 的 allowed_order 白名单一致。"""
+
+    ingested_at = "ingested_at"
+    primary_date = "primary_date"
+    primary_amount_cents = "primary_amount_cents"
+    sign_date = "sign_date"
+    expire_date = "expire_date"
+    amount_cents = "amount_cents"
+
+
+class DocStatus(str, Enum):
+    """--status：入库状态。"""
+
+    ok = "ok"
+    partial = "partial"
+    failed = "failed"
+
+
+class DocType(str, Enum):
+    """list --type：文档类型。值即 CLI choice，与抽取信封的类型枚举一致。"""
+
+    contract = "合同协议"
+    proof = "证明"
+    invoice = "发票票据"
+    report = "报告"
+    certificate = "证件"
+    other = "其他"
+
+
+class Actor(str, Enum):
+    """--actor：义务主体。成员必须与 repository 的 party_a/party_b/both 校验一致。"""
+
+    party_a = "party_a"
+    party_b = "party_b"
+    both = "both"
+
+
+# ---------- 双 console：数据走 stdout（可管道），诊断/进度/错误走 stderr ----------
+
+console = Console()                    # 主数据：表格 + JSON
+err_console = Console(stderr=True)      # 人类消息：状态/进度/错误/确认
+
+
+def _version_cb(value: bool) -> None:
+    """--version 的 eager 回调：版本号打到 stdout（机器可消费），随即退出。"""
+    if value:
+        print(f"contract-archive {__version__}")
+        raise typer.Exit()
+
+
+app = typer.Typer(
+    help="本地合同档案库 CLI (MinerU + qwen3.7-max)",
+    context_settings={"help_option_names": ["-h", "--help"]},
+    # 默认 typer 会在 traceback 里 dump 局部变量，可能带出敏感内容，关掉。
+    pretty_exceptions_show_locals=False,
+    epilog=(
+        "示例：\n"
+        "  contract-archive ingest ./input            # 扫描目录入库\n"
+        "  contract-archive list --format json | jq   # 机器可读，管道友好\n"
+        "  contract-archive todo --within-days 30      # 近 30 天待办义务\n"
+        "\n文档：https://github.com/crhan/contract-archive-cli"
+    ),
 )
+
+
+@app.callback()
+def main(
+    version: bool = typer.Option(
+        False,
+        "--version",
+        "-V",
+        is_eager=True,
+        callback=_version_cb,
+        help="打印版本并退出",
+    ),
+    no_color: bool = typer.Option(
+        False, "--no-color", help="禁用彩色输出（管道/日志归档时用）"
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="DEBUG 级日志（更啰嗦，排查用）"
+    ),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q", help="仅 WARNING 及以上（更安静）"
+    ),
+) -> None:
+    """
+    全局选项在所有子命令前生效。flag 优先级高于环境变量：
+      --no-color 覆盖 NO_COLOR/TTY 自动探测；--verbose/--quiet 覆盖 LOG_LEVEL。
+    """
+    # dotenv 放到这里加载——保证 flag 解析后再读 env，且 CONTRACT_ARCHIVE_DIR 等及时可用。
+    load_dotenv()
+
+    if no_color:
+        console.no_color = True
+        err_console.no_color = True
+
+    # 日志默认 stderr；--verbose/--quiet 胜过 LOG_LEVEL env。
+    if verbose:
+        level = "DEBUG"
+    elif quiet:
+        level = "WARNING"
+    else:
+        level = os.getenv("LOG_LEVEL", "INFO")
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
 
 
 # ---------- 全局 archive 路径解析 ----------
@@ -78,6 +191,21 @@ _archive_opt = typer.Option(
 )
 
 
+def _archive_empty(paths: ArchivePaths, fmt: OutputFormat) -> bool:
+    """
+    读命令统一空库守卫。返回 True 表示库不存在、调用方应直接 return。
+      - json 模式：往 stdout 打 `[]`，保证管道消费者（jq）拿到合法 JSON
+      - table 模式：往 stderr 打人类提示，不污染 stdout
+    """
+    if paths.db_path.exists():
+        return False
+    if fmt is OutputFormat.json:
+        print("[]")
+    else:
+        err_console.print(f"[yellow]archive empty: {paths.db_path} not found[/yellow]")
+    return True
+
+
 # ---------- ingest ----------
 
 
@@ -96,6 +224,9 @@ def ingest(
     limit: int = typer.Option(
         0, "--limit", help="最多处理 N 个文件（0 = 无限制；试跑用）"
     ),
+    fmt: OutputFormat = typer.Option(
+        OutputFormat.table, "--format", help="table | json（json 把汇总+逐条结果打到 stdout）"
+    ),
 ) -> None:
     """跑 MinerU + 抽取，把合同入库。"""
     paths = _resolve_archive(archive)
@@ -105,17 +236,24 @@ def ingest(
     pdfs = discover_pdfs(path)
     if limit > 0:
         pdfs = pdfs[:limit]
+    summary = {"ok": 0, "partial": 0, "failed": 0, "skipped": 0}
     if not pdfs:
-        console.print("[yellow]no PDFs found[/yellow]")
+        # 进度/提示走 stderr；json 模式仍向 stdout 吐合法 JSON，便于管道消费。
+        err_console.print("[yellow]no PDFs found[/yellow]")
+        if fmt is OutputFormat.json:
+            print(_json.dumps(
+                {"archive": str(paths.root), "summary": summary, "results": []},
+                ensure_ascii=False, indent=2,
+            ))
         raise typer.Exit(0)
 
-    console.print(f"[cyan]found {len(pdfs)} PDF(s); archive={paths.root}[/cyan]")
+    err_console.print(f"[cyan]found {len(pdfs)} PDF(s); archive={paths.root}[/cyan]")
     # 复用一个 MinerUPipeline 实例（避免每次重新加载模型）
     pipeline = MinerUPipeline()
 
-    summary = {"ok": 0, "partial": 0, "failed": 0, "skipped": 0}
+    results: list[dict] = []
     for i, pdf in enumerate(pdfs, 1):
-        console.rule(f"[bold cyan][{i}/{len(pdfs)}] {pdf.name}[/bold cyan]")
+        err_console.rule(f"[bold cyan][{i}/{len(pdfs)}] {pdf.name}[/bold cyan]")
         try:
             result = ingest_pdf(
                 pdf,
@@ -126,22 +264,47 @@ def ingest(
                 pipeline=pipeline,
             )
         except Exception as e:
-            console.print(f"[red]✗ unexpected error: {e}[/red]")
+            err_console.print(f"[red]✗ unexpected error: {e}[/red]")
             logging.getLogger(__name__).exception("ingest crashed")
             summary["failed"] += 1
+            results.append({
+                "pdf_path": str(pdf), "sha256": None, "status": "failed",
+                "doc_id": None, "mineru_duration_s": None, "llm_duration_s": None,
+                "error_message": str(e), "skipped_reason": None,
+            })
             continue
         summary[result.status] = summary.get(result.status, 0) + 1
+        results.append(_ingest_result_to_dict(result))
         _print_ingest_result(result)
 
     checkpoint(conn)
     conn.close()
-    console.rule("[bold]summary[/bold]")
-    console.print(
+    err_console.rule("[bold]summary[/bold]")
+    err_console.print(
         f"ok={summary['ok']} partial={summary['partial']} "
         f"failed={summary['failed']} skipped={summary['skipped']}"
     )
+    if fmt is OutputFormat.json:
+        print(_json.dumps(
+            {"archive": str(paths.root), "summary": summary, "results": results},
+            ensure_ascii=False, indent=2,
+        ))
     if summary["failed"]:
         raise typer.Exit(1)
+
+
+def _ingest_result_to_dict(r) -> dict:
+    """IngestResult → JSON 友好 dict（pdf_path 转字符串）。"""
+    return {
+        "pdf_path": str(r.pdf_path),
+        "sha256": r.sha256,
+        "status": r.status,
+        "doc_id": r.doc_id,
+        "mineru_duration_s": r.mineru_duration_s,
+        "llm_duration_s": r.llm_duration_s,
+        "error_message": r.error_message,
+        "skipped_reason": r.skipped_reason,
+    }
 
 
 def _print_ingest_result(r) -> None:
@@ -158,7 +321,7 @@ def _print_ingest_result(r) -> None:
         msg += f"  [red]err={r.error_message[:80]}[/red]"
     if r.skipped_reason:
         msg += f"  [blue]{r.skipped_reason}[/blue]"
-    console.print(msg)
+    err_console.print(msg)
 
 
 # ---------- list ----------
@@ -168,35 +331,32 @@ def _print_ingest_result(r) -> None:
 def list_cmd(
     archive: Optional[Path] = _archive_opt,
     limit: int = typer.Option(50, "--limit", "-n"),
-    order_by: str = typer.Option(
-        "ingested_at",
-        "--order-by",
-        help="ingested_at | primary_date | primary_amount_cents | sign_date | expire_date | amount_cents",
+    order_by: OrderBy = typer.Option(
+        OrderBy.ingested_at, "--order-by", help="排序字段"
     ),
-    status: Optional[str] = typer.Option(
-        None,
-        "--status",
-        help="过滤状态：ok | partial | failed；默认 None=全部",
+    status: Optional[DocStatus] = typer.Option(
+        None, "--status", help="过滤状态；默认全部"
     ),
-    doc_type: Optional[str] = typer.Option(
-        None,
-        "--type",
-        help="按文档类型过滤：合同协议 | 证明 | 发票票据 | 报告 | 证件 | 其他",
+    doc_type: Optional[DocType] = typer.Option(
+        None, "--type", help="按文档类型过滤"
     ),
-    fmt: str = typer.Option("table", "--format", help="table | json"),
+    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
 ) -> None:
     """列出档案库内已索引文档。"""
     paths = _resolve_archive(archive)
-    if not paths.db_path.exists():
-        console.print(f"[yellow]archive empty: {paths.db_path} not found[/yellow]")
-        raise typer.Exit(0)
+    if _archive_empty(paths, fmt):
+        return
     conn = open_archive_db(paths.db_path)
     rows = list_documents(
-        conn, limit=limit, order_by=order_by, status=status, doc_type=doc_type
+        conn,
+        limit=limit,
+        order_by=order_by.value,
+        status=status.value if status else None,
+        doc_type=doc_type.value if doc_type else None,
     )
     conn.close()
 
-    if fmt == "json":
+    if fmt is OutputFormat.json:
         print(_json.dumps([_row_to_dict(r) for r in rows], ensure_ascii=False, indent=2))
         return
 
@@ -311,19 +471,17 @@ def search(
     deadline_after: Optional[str] = typer.Option(
         None, "--deadline-after", help="存在 deadline ≥ YYYY-MM-DD 的义务"
     ),
-    actor: Optional[str] = typer.Option(
-        None, "--actor",
-        help="义务 actor: party_a | party_b | both",
+    actor: Optional[Actor] = typer.Option(
+        None, "--actor", help="义务 actor"
     ),
-    status: Optional[str] = typer.Option(None, "--status"),
+    status: Optional[DocStatus] = typer.Option(None, "--status", help="过滤状态"),
     limit: int = typer.Option(50, "--limit", "-n"),
-    fmt: str = typer.Option("table", "--format", help="table | json"),
+    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
 ) -> None:
     """多字段 AND 过滤查询。"""
     paths = _resolve_archive(archive)
-    if not paths.db_path.exists():
-        console.print(f"[yellow]archive empty: {paths.db_path}[/yellow]")
-        raise typer.Exit(0)
+    if _archive_empty(paths, fmt):
+        return
     conn = open_archive_db(paths.db_path)
     flt = SearchFilter(
         name=name,
@@ -337,14 +495,14 @@ def search(
         has_risk=has_risk,
         deadline_before=deadline_before,
         deadline_after=deadline_after,
-        actor=actor,
-        status=status,
+        actor=actor.value if actor else None,
+        status=status.value if status else None,
         limit=limit,
     )
     rows = search_documents(conn, flt)
     conn.close()
 
-    if fmt == "json":
+    if fmt is OutputFormat.json:
         print(_json.dumps([_row_to_dict(r) for r in rows], ensure_ascii=False, indent=2))
         return
 
@@ -379,22 +537,23 @@ def search(
 def show(
     ident: str = typer.Argument(..., help="档案 id (整数) 或 sha 前缀 (>=4 字符)"),
     archive: Optional[Path] = _archive_opt,
-    fmt: str = typer.Option("table", "--format", help="table | json"),
+    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
 ) -> None:
     """显示单条档案详情。"""
     paths = _resolve_archive(archive)
+    # show 请求的是具体一条；库不存在/查不到都是错误（exit 1），提示走 stderr。
     if not paths.db_path.exists():
-        console.print(f"[yellow]archive empty: {paths.db_path}[/yellow]")
+        err_console.print(f"[yellow]archive empty: {paths.db_path}[/yellow]")
         raise typer.Exit(1)
     conn = open_archive_db(paths.db_path)
     row = _resolve_ident(conn, ident)
     conn.close()
 
     if not row:
-        console.print(f"[red]not found: {ident}[/red]")
+        err_console.print(f"[red]not found: {ident}[/red]")
         raise typer.Exit(1)
 
-    if fmt == "json":
+    if fmt is OutputFormat.json:
         print(_json.dumps(_row_to_dict(row), ensure_ascii=False, indent=2))
         return
 
@@ -508,7 +667,7 @@ def _resolve_ident(conn, ident: str):
             pass
         # 数字也可能是 sha 前缀（罕见但合法），fallthrough
     if len(ident) < 4:
-        console.print(
+        err_console.print(
             f"[red]ident {ident!r} 不是有效 id；如要按 sha 前缀查询请提供 ≥4 字符[/red]"
         )
         return None
@@ -516,9 +675,9 @@ def _resolve_ident(conn, ident: str):
     if not matches:
         return None
     if len(matches) > 1:
-        console.print(f"[red]sha prefix {ident!r} 命中 {len(matches)} 条，请提供更长前缀：[/red]")
+        err_console.print(f"[red]sha prefix {ident!r} 命中 {len(matches)} 条，请提供更长前缀：[/red]")
         for m in matches[:10]:
-            console.print(
+            err_console.print(
                 f"  id={m.id} sha={m.short_sha} name={m.contract_name or '-'}"
             )
         return None
@@ -543,11 +702,11 @@ def extract(
     conn = open_archive_db(paths.db_path)
     row = _resolve_ident(conn, ident)
     if not row:
-        console.print(f"[red]not found: {ident}[/red]")
+        err_console.print(f"[red]not found: {ident}[/red]")
         conn.close()
         raise typer.Exit(1)
 
-    console.print(f"[cyan]re-extracting id={row.id} sha={row.short_sha}[/cyan]")
+    err_console.print(f"[cyan]re-extracting id={row.id} sha={row.short_sha}[/cyan]")
     result = re_extract(row.id, paths, conn, llm_enabled=not no_llm)
     checkpoint(conn)
     conn.close()
@@ -558,15 +717,21 @@ def extract(
 
 
 @app.command()
-def stats(archive: Optional[Path] = _archive_opt) -> None:
+def stats(
+    archive: Optional[Path] = _archive_opt,
+    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
+) -> None:
     """档案库统计：总数 / status 分布 / 按月签订分布 / 近 30 天到期数。"""
     paths = _resolve_archive(archive)
-    if not paths.db_path.exists():
-        console.print(f"[yellow]archive empty: {paths.db_path}[/yellow]")
-        raise typer.Exit(0)
+    if _archive_empty(paths, fmt):
+        return
     conn = open_archive_db(paths.db_path)
     s = collect_stats(conn)
     conn.close()
+
+    if fmt is OutputFormat.json:
+        print(_json.dumps(asdict(s), ensure_ascii=False, indent=2))
+        return
 
     table = Table(title=f"Archive Stats · {paths.root}")
     table.add_column("metric", style="cyan")
@@ -607,15 +772,24 @@ def delete(
     conn = open_archive_db(paths.db_path)
     row = _resolve_ident(conn, ident)
     if not row:
-        console.print(f"[red]not found: {ident}[/red]")
+        err_console.print(f"[red]not found: {ident}[/red]")
         conn.close()
         raise typer.Exit(1)
 
-    console.print(
+    # 非交互环境（管道/CI）下不能交互确认，typer.confirm 会读到 EOF 崩。
+    # clig.dev：危险动作在非 TTY 下应明确要求显式 --yes，而不是糊涂地中止。
+    if not yes and not sys.stdin.isatty():
+        err_console.print(
+            "[red]拒绝在非交互环境删除：请加 --yes 确认[/red]"
+        )
+        conn.close()
+        raise typer.Exit(1)
+
+    err_console.print(
         f"about to delete: id={row.id} sha={row.short_sha} name={row.contract_name or '-'}"
     )
-    console.print(f"  source PDF: {row.source_path} [dim](不会被删除)[/dim]")
-    console.print(
+    err_console.print(f"  source PDF: {row.source_path} [dim](不会被删除)[/dim]")
+    err_console.print(
         f"  archive dir: {row.output_dir} "
         + ("[red](会被删除)[/red]" if purge_files else "[dim](保留)[/dim]")
     )
@@ -623,7 +797,7 @@ def delete(
     if not yes:
         confirm = typer.confirm("继续？", default=False)
         if not confirm:
-            console.print("[yellow]aborted[/yellow]")
+            err_console.print("[yellow]aborted[/yellow]")
             conn.close()
             raise typer.Exit(0)
 
@@ -637,8 +811,8 @@ def delete(
         out = Path(output_dir)
         if out.exists():
             rmtree(out)
-            console.print(f"[green]✓ removed {out}[/green]")
-    console.print(f"[green]✓ deleted DB row id={row.id}[/green]")
+            err_console.print(f"[green]✓ removed {out}[/green]")
+    err_console.print(f"[green]✓ deleted DB row id={row.id}[/green]")
 
 
 # ---------- todo ----------
@@ -647,8 +821,8 @@ def delete(
 @app.command()
 def todo(
     archive: Optional[Path] = _archive_opt,
-    actor: Optional[str] = typer.Option(
-        None, "--actor", help="party_a | party_b | both"
+    actor: Optional[Actor] = typer.Option(
+        None, "--actor", help="义务 actor"
     ),
     before: Optional[str] = typer.Option(
         None, "--before", help="deadline ≤ YYYY-MM-DD"
@@ -665,7 +839,7 @@ def todo(
         help="便捷选项：deadline 在今天到 N 天内（等价于 --after today --before today+N）",
     ),
     limit: int = typer.Option(50, "--limit", "-n"),
-    fmt: str = typer.Option("table", "--format", help="table | json"),
+    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
 ) -> None:
     """
     跨合同列出待办义务（"催办看板"）。按 deadline 升序。
@@ -684,13 +858,12 @@ def todo(
         after = after or today
 
     paths = _resolve_archive(archive)
-    if not paths.db_path.exists():
-        console.print(f"[yellow]archive empty: {paths.db_path}[/yellow]")
-        raise typer.Exit(0)
+    if _archive_empty(paths, fmt):
+        return
     conn = open_archive_db(paths.db_path)
     items = list_obligations(
         conn,
-        actor=actor,
+        actor=actor.value if actor else None,
         before=before,
         after=after,
         include_undated=include_undated,
@@ -698,7 +871,7 @@ def todo(
     )
     conn.close()
 
-    if fmt == "json":
+    if fmt is OutputFormat.json:
         print(
             _json.dumps(
                 [
@@ -745,15 +918,15 @@ def vacuum(archive: Optional[Path] = _archive_opt) -> None:
     """VACUUM 数据库（碎片整理，建议大批量 ingest 后跑一次）。"""
     paths = _resolve_archive(archive)
     if not paths.db_path.exists():
-        console.print(f"[yellow]archive empty: {paths.db_path}[/yellow]")
+        err_console.print(f"[yellow]archive empty: {paths.db_path}[/yellow]")
         raise typer.Exit(0)
     conn = open_archive_db(paths.db_path)
-    console.print("[cyan]running VACUUM ANALYZE...[/cyan]")
+    err_console.print("[cyan]running VACUUM ANALYZE...[/cyan]")
     conn.execute("VACUUM")
     conn.execute("ANALYZE")
     checkpoint(conn)
     conn.close()
-    console.print("[green]✓ done[/green]")
+    err_console.print("[green]✓ done[/green]")
 
 
 if __name__ == "__main__":
