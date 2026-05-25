@@ -19,6 +19,7 @@ dependencies = [
     "typer>=0.12",
     "rich>=13.7",
     "dashscope>=1.22.2",
+    "openai>=1.40",            # 多模态签章核查走 DashScope 的 OpenAI 兼容接口
     "fastapi>=0.111",
     "uvicorn[standard]>=0.30",
     "python-multipart>=0.0.9",

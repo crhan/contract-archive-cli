@@ -28,6 +28,7 @@ APP_CONFIG_DIR = "contract-archive"
 CONFIG_FILENAME = "config.json"
 DEFAULT_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
 DEFAULT_DASHSCOPE_MODEL = "qwen3.7-max"
+DEFAULT_DASHSCOPE_VL_MODEL = "qwen3.6-flash"  # 多模态签章核查（OpenAI 兼容接口）；更准用 qwen3.6-plus
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +46,7 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("dashscope.api_key", "DASHSCOPE_API_KEY", secret=True),
     ConfigKey("dashscope.base_url", "DASHSCOPE_BASE_URL", default=DEFAULT_DASHSCOPE_BASE_URL),
     ConfigKey("dashscope.model", "DASHSCOPE_LLM_MODEL", default=DEFAULT_DASHSCOPE_MODEL),
+    ConfigKey("dashscope.vl_model", "DASHSCOPE_VL_MODEL", default=DEFAULT_DASHSCOPE_VL_MODEL),
     ConfigKey("archive.dir", "CONTRACT_ARCHIVE_DIR"),
 )
 _KEYS_BY_NAME = {k.name: k for k in CONFIG_KEYS}
@@ -57,6 +59,7 @@ class Settings:
     dashscope_api_key: str
     dashscope_base_url: str
     dashscope_model: str
+    dashscope_vl_model: str
     archive_dir: str | None
     config_path: Path
 
@@ -152,6 +155,7 @@ def load_settings(path: Path | None = None) -> Settings:
         dashscope_api_key=read("dashscope.api_key") or "",
         dashscope_base_url=read("dashscope.base_url") or DEFAULT_DASHSCOPE_BASE_URL,
         dashscope_model=read("dashscope.model") or DEFAULT_DASHSCOPE_MODEL,
+        dashscope_vl_model=read("dashscope.vl_model") or DEFAULT_DASHSCOPE_VL_MODEL,
         archive_dir=read("archive.dir"),
         config_path=path or config_path(),
     )

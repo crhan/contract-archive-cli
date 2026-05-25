@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..extraction import extract_contract, extract_document
+from ..extraction.vision_seal import augment_completeness_with_vision
 from ..pipelines import MinerUPipeline
 from ..schemas import (
     FILE_EXTRACTION,
@@ -250,6 +251,14 @@ def ingest_pdf(
             log_handle.write(f"\n[extract] FAILED (status=partial): {error_message}\n")
             log_handle.write(traceback.format_exc())
 
+        # ---- 2.5 多模态签章核查：看落款页图覆盖文本对签章的判断（有图 + 有 key 才跑）----
+        if status != "failed" and llm_enabled:
+            try:
+                if augment_completeness_with_vision(envelope, mineru_dir):
+                    log_handle.write("[seal-vision] 签章核查完成（看落款页图）\n")
+            except Exception as e:  # noqa: BLE001 — VL 失败不能中断入库
+                log_handle.write(f"[seal-vision] 跳过（异常）: {e}\n")
+
         # ---- 3. extracted.json 落盘（写通用信封；即使 partial 也写空对象，便于后续 extract 复跑） ----
         (tmp_doc_dir / FILE_EXTRACTION).write_text(
             envelope.model_dump_json(indent=2), encoding="utf-8"
@@ -460,6 +469,13 @@ def re_extract(
         confidence = ExtractionConfidence()
         envelope = DocumentExtraction()
     llm_duration = time.perf_counter() - t0
+
+    # 多模态签章核查：看落款页图重判签章（augment 内部处理 doc_type/无图/无 key 降级）。
+    if llm_enabled and status == "ok":
+        try:
+            augment_completeness_with_vision(envelope, mineru_dir)
+        except Exception as e:  # noqa: BLE001 — VL 失败不能中断重抽
+            logger.warning("seal-vision 跳过（异常）: %s", e)
 
     # 落盘新 extracted.json（通用信封）
     (Path(doc.output_dir) / FILE_EXTRACTION).write_text(
