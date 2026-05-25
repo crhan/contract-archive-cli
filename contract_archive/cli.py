@@ -20,6 +20,7 @@ import logging
 import os
 import sys
 from dataclasses import asdict
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -409,6 +410,20 @@ def _period_str(a: dict) -> str:
     return f" [dim][{start or '?'}~{end or '?'}][/dim]"
 
 
+def _local_time(iso_utc: Optional[str]) -> str:
+    """
+    入库时间 UTC ISO（'2026-05-24T23:05:04Z'）→ 本地时区展示串。
+    存储保持 UTC（可移植、可比较），仅展示时转本地。解析失败则原样返回。
+    """
+    if not iso_utc:
+        return "-"
+    try:
+        dt = datetime.strptime(iso_utc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return dt.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, TypeError):
+        return iso_utc
+
+
 def _subject_of(r) -> str:
     """list 用的『主体』列：优先信封 parties，回退合同甲乙方。截断防撑宽。"""
     parties = r.details().get("parties") or []
@@ -589,11 +604,9 @@ def show(
     table.add_row("sha256", row.sha256)
     table.add_row("source_path", row.source_path)
     table.add_row("output_dir", row.output_dir)
-    table.add_row("ingested_at", row.ingested_at)
-    table.add_row(
-        "mineru_s", f"{row.mineru_duration_s:.2f}" if row.mineru_duration_s else "-"
-    )
-    table.add_row("llm_s", f"{row.llm_duration_s:.2f}" if row.llm_duration_s else "-")
+    table.add_row("ingested_at", _local_time(row.ingested_at))
+    # mineru_s/llm_s（执行耗时）是运维遥测，不属于档案内容——不在 show 展示。
+    # DB 列仍保留并由 ingest 写入，需要时可查 jsonl 日志。
     if row.error_message:
         table.add_row("[red]error[/red]", row.error_message)
 
