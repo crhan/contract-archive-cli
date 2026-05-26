@@ -257,6 +257,49 @@ def _attach_seal_identities(env: DocumentExtraction, parsed: dict) -> None:
                 pid.identifiers.append(LabeledValue(label="印章", value=seal_text))
 
 
+def _signatory_mismatch_issues(env: DocumentExtraction, parsed: dict) -> list[CompletenessIssue]:
+    """
+    落款签字人 vs 当事人名单一致性核查：VL 读出的 signature_name 若不在 env.parties 中，
+    报疑似代签/冒签/笔误。例：补充协议乙方落款"王五"，而乙方(买受人)是张三、李四。
+
+    保守判定：手写签字 OCR 不可靠，一律标"疑似，需人工复核"；无 signature_name 的不判。
+    委托代理人代签等也会触发——作为异常交人工核对是对的（宁可疑，不漏冒签）。
+    名字匹配用双向子串（"张三" ↔ "张三（买受人）"算同一人）。
+    """
+    parties = [p for p in (env.parties or []) if p]
+    if not parties:
+        return []
+
+    def norm(s: str) -> str:
+        return "".join((s or "").split())
+
+    def in_parties(name: str) -> bool:
+        n = norm(name)
+        return bool(n) and any(n in norm(p) or norm(p) in n for p in parties)
+
+    issues: list[CompletenessIssue] = []
+    for unit in parsed.get("units") or []:
+        if not isinstance(unit, dict):
+            continue
+        agreement = str(unit.get("agreement") or "协议").strip()
+        page = str(unit.get("page") or "").strip()
+        for party in unit.get("parties") or []:
+            if not isinstance(party, dict):
+                continue
+            signer = str(party.get("signature_name") or "").strip()
+            if not signer or in_parties(signer):
+                continue
+            role = str(party.get("role") or "").strip()
+            issues.append(CompletenessIssue(
+                item=f"{agreement}·{role}落款人与当事人不符",
+                category="signature",
+                detail=f"落款签字「{signer}」不在当事人名单（{'、'.join(parties)}）中，"
+                       "疑似代签/冒签/笔误，需人工复核",
+                evidence=f"据落款页图：第 {page} 页" if page else "",
+            ))
+    return issues
+
+
 def augment_completeness_with_vision(env: DocumentExtraction, mineru_dir: Path) -> bool:
     """
     用 VL 看落款页重判签章：替换 env.completeness 的 signature 类 issues（保留 field/amount），
@@ -275,6 +318,8 @@ def augment_completeness_with_vision(env: DocumentExtraction, mineru_dir: Path) 
     if parsed is None:
         return False
     sig_issues = _issues_from_vision(parsed, _signature_evidence(images))
+    # 落款人 vs 当事人交叉核对：签字人不在名单 → 疑似代签/冒签（也归 signature 类）。
+    sig_issues += _signatory_mismatch_issues(env, parsed)
     # 保留文本判出的非签章缺陷（field/amount 等），签章(signature)缺陷整体换成 VL 看图的结果。
     field_issues = [i for i in env.completeness.issues if i.category != "signature"] if env.completeness else []
     all_issues = field_issues + sig_issues
