@@ -114,6 +114,20 @@ def test_attach_seal_binds_to_head_party_by_role():
     assert any(i.value == _FAKE_NO for i in pid.identifiers if i.label == "印章")
 
 
+def test_attach_seal_binds_across_role_synonym():
+    """认购协议：头部主体 role='出卖人'，VL 落款 role='甲方' → 阵营归组匹配，
+    章号绑到正确头部主体，不再因'出卖人'不含'甲'字而漏匹配（浙典/浙奥分裂成因之一）。"""
+    env = DocumentExtraction(doc_type="合同协议", person_identities=[
+        PersonIdentity(name="示例置业有限公司", role="出卖人",
+                       identifiers=[LabeledValue(label="电话", value="0571-1")])])
+    _attach_seal_identities(env, _parsed_with_seal(owner="误读置业有限公司",
+                                                   seal_no=_FAKE_NO, role="甲方"))
+    assert len(env.person_identities) == 1                 # 不新建主体
+    pid = env.person_identities[0]
+    assert pid.name == "示例置业有限公司"                   # 绑到头部出卖人，非章面误读
+    assert any(i.label == "印章" and i.value == _FAKE_NO for i in pid.identifiers)
+
+
 def test_attach_seal_fallback_to_owner_when_no_head_match():
     """头部没抽到对应 role 主体 → 退回用章面 owner 兜底建主体。"""
     env = DocumentExtraction(doc_type="合同协议")

@@ -245,18 +245,37 @@ def _seal_number(party: dict) -> str:
     return max(nums, key=len) if nums else ""
 
 
+# 落款 role ↔ 头部 role 同义归组：VL 按 prompt 输出"甲方/乙方"，但头部主体的 role
+# 可能是认购协议的"出卖人/买受人"、租赁的"出租方/承租方"等。按"甲方阵营/乙方阵营"
+# 归组匹配，章号才能绑到正确头部主体——只死认"甲/乙"字会让认购协议(甲方=出卖人)漏匹配，
+# 反被幻觉的"甲方|X"主体截走章号（实测的浙典/浙奥分裂成因之一）。
+_ROLE_GROUP_A = ("甲", "出卖", "卖方", "出租", "转让", "出借", "供方", "发包")
+_ROLE_GROUP_B = ("乙", "买受", "买方", "承租", "受让", "借款", "需方", "承包")
+
+
+def _role_group(role: str) -> str:
+    """把 role 归到甲方阵营('A') / 乙方阵营('B')；两边都不沾返回 ''。"""
+    text = role or ""
+    if any(k in text for k in _ROLE_GROUP_A):
+        return "A"
+    if any(k in text for k in _ROLE_GROUP_B):
+        return "B"
+    return ""
+
+
 def _match_head_party(env: DocumentExtraction, vl_role: str) -> Optional[PersonIdentity]:
     """
-    VL 落款 role(甲方/乙方) → 头部 person_identity（按"甲"/"乙"关键字匹配）。
+    VL 落款 role(甲方/乙方) → 头部 person_identity（按甲/乙阵营同义归组匹配）。
 
     头部主体名来自正文抽取（稳定、有明确指向），是"头部主体 ↔ 落款签章"对应关系的锚点——
-    比 VL 看红章读出的章面主体名可靠得多。匹配不到则返回 None，由调用方兜底。
+    比 VL 看红章读出的章面主体名可靠得多。认购协议头部用"出卖人/买受人"而 VL 用"甲方/乙方"，
+    故按阵营归组而非死认"甲/乙"字。匹配不到则返回 None，由调用方兜底。
     """
-    key = "甲" if "甲" in vl_role else ("乙" if "乙" in vl_role else "")
-    if not key:
+    group = _role_group(vl_role)
+    if not group:
         return None
     for p in env.person_identities:
-        if key in (p.role or ""):
+        if _role_group(p.role or "") == group:
             return p
     return None
 
