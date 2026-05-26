@@ -155,6 +155,28 @@ contract-archive search --deadline-before 2026-06-30 --actor party_b
 `contract-archive show <id>` 会按甲方/乙方/双方分组展示该合同所有义务，
 与原本的 `risk_clauses`（违约罚则）严格区分。
 
+### 身份核对（known_parties 基准库）
+
+抽取时把每个主体（自然人/机构）与其固有标识（身份证号/电话/银行账号/开户行/税号…）
+**精确绑定到人**（`person_identities`），不像扁平字段那样把多人号码混成一条。
+入库时与 `known_parties` 基准库比对，采用「首见入库、再见校对」：
+
+- **首见**：某主体的某标识第一次出现 → 录入为基准（记首见出处）。
+- **再见**：同主体同标识再出现 → 与基准比对，不一致即在 `show` 的「身份核对」块报
+  `identity` 缺陷（疑似 OCR 读错或信息被改），**不覆盖基准**。
+- 比较前归一化剥离分隔符噪声（空格/；/：不误报），但多/少/错位的真实数字差异会被抓出。
+- 不分自然人/机构——身份证、电话、银行账号、开户行一律核对。
+
+```bash
+contract-archive party list                       # 列出所有已知主体及标识
+contract-archive party show 张三                   # 查看某主体的标识基准
+contract-archive party set 张三 身份证号 1101...   # 手动修正基准（纠正被 OCR 读错的首见值）
+contract-archive party rm 张三 电话                # 删除某标识；省略标识则删整个主体
+```
+
+> 基准库 `known_parties.json` 存档案库根目录，**含真实 PII**（身份证/电话/账号），
+> 文件权限 0600、列入 `.gitignore`，绝不入库或分享。
+
 ### 抽取层管理
 
 LLM 跑挂或想升级 prompt 后批量再抽取——不重跑 MinerU：
