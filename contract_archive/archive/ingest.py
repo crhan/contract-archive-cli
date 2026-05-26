@@ -535,6 +535,17 @@ def re_extract(
         except Exception as e:  # noqa: BLE001 — 页码校正失败不能中断重抽
             logger.warning("page-fix 跳过（异常）: %s", e)
 
+        # 身份基本信息核对：首见入库、再见校对。与 ingest 的 2.7 一致——
+        # 否则重抽会把已核对出的 identity_issues 清空，造成 ingest/extract 行为分叉。
+        try:
+            registry = PartyRegistry.load(paths.known_parties_path)
+            id_issues = registry.reconcile(envelope.person_identities, doc.sha256)
+            if registry.dirty:
+                registry.save()
+            envelope.identity_issues = id_issues
+        except Exception as e:  # noqa: BLE001 — 核对失败不能中断重抽
+            logger.warning("identity 跳过（异常）: %s", e)
+
     # 落盘新 extracted.json（通用信封）
     (Path(doc.output_dir) / FILE_EXTRACTION).write_text(
         envelope.model_dump_json(indent=2), encoding="utf-8"
