@@ -13,6 +13,15 @@
 
 归一化：比较时去除空白与常见分隔符（OCR 把"；"读成"："、夹空格等不算差异），
 但保留真实数字差异（多一位/少一位/改一位）——后者正是要抓的 OCR 读错/篡改。
+
+实体对齐（key 不是字面 name，而是"实体"）：同一实体在不同文档/同一文档内常被
+识别成不同名字（LLM 幻觉改字、称谓差异、OCR 误读），若按字面 name 作 key 就会
+分裂、跨文档核对不到一起。故归位规则：
+  - 主体名先规范化（剥离"甲方：/出卖人："等分隔符门控的称谓前缀）。
+  - 强标识（身份证/银行账号/印章/统一社会信用代码/税号）实体唯一，同值必同实体——
+    本次某强标识值若已登记在另一 name 下，即归并到那个已有 key，并把本次 name 记入
+    别名表，今后即使只带弱标识也能归位。
+  - 弱标识（电话、开户行）多人共用（公司总机、银行支行），绝不据此合并，避免误并。
 """
 from __future__ import annotations
 
@@ -27,10 +36,26 @@ from ..schemas import CompletenessIssue, PersonIdentity
 
 logger = logging.getLogger(__name__)
 
-REGISTRY_VERSION = 1
+REGISTRY_VERSION = 2  # v2 起新增 aliases（实体归并别名表）；v1 文件仍可读，缺则按空表
 
 # 比较前剥离的噪声字符：空白 + 常见分隔/标点。不动数字、字母、汉字本身。
 _NOISE_RE = re.compile(r"[\s;；,，、:：.。\-—_／/]")
+
+# 称谓前缀：name 开头的"甲方/乙方/出卖人…"+ 分隔符，规范化时剥离，使
+# "甲方：示例置业"与"示例置业"归到同一 key。仅当前缀后紧跟分隔符才剥离，
+# 避免误伤"甲方物流有限公司"这类前缀恰是名字一部分的合法名。
+_ROLE_PREFIXES = (
+    "甲方", "乙方", "丙方", "出卖人", "买受人", "出租方", "承租方",
+    "转让方", "受让方", "委托方", "受托方", "持证人", "卖方", "买方",
+)
+# 前缀后须接"分隔标点"或"一段空白"才剥离；二者皆无（如"甲方物流"）则前缀属名字本身，不剥。
+_ROLE_PREFIX_RE = re.compile(
+    r"^(?:" + "|".join(_ROLE_PREFIXES) + r")(?:\s*[:：、|/\\\-]+\s*|\s+)"
+)
+
+# 强标识 label 关键字：这些标识实体唯一（同值必同实体），可据此把同实体的不同
+# name 变体归并到一个 key。电话/开户行是弱标识（多人共用），故意不在此列。
+_STRONG_LABEL_KEYS = ("身份证", "银行账", "印章", "信用代码", "税号")
 
 
 def _canon(value: str) -> str:
@@ -42,6 +67,16 @@ def _canon(value: str) -> str:
     return _NOISE_RE.sub("", value.strip())
 
 
+def _canon_name(name: str) -> str:
+    """主体名规范化作 registry key：去首尾空白 + 剥离分隔符门控的称谓前缀。"""
+    return _ROLE_PREFIX_RE.sub("", name.strip())
+
+
+def _is_strong_label(label: str) -> bool:
+    """该标识是否为实体唯一的强标识（可据此把不同 name 归并为同一实体）。"""
+    return any(k in label for k in _STRONG_LABEL_KEYS)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -51,7 +86,9 @@ class PartyRegistry:
 
     def __init__(self, path: Path, data: Optional[dict] = None) -> None:
         self._path = path
-        self._data = data if data is not None else {"version": REGISTRY_VERSION, "parties": {}}
+        self._data = data if data is not None else {
+            "version": REGISTRY_VERSION, "parties": {}, "aliases": {},
+        }
         self._dirty = False
 
     # ---------- 加载 / 保存 ----------
@@ -90,19 +127,25 @@ class PartyRegistry:
 
     def reconcile(self, identities: list[PersonIdentity], doc_sha: str) -> list[CompletenessIssue]:
         """
-        把一份文档抽到的 person_identities 与基准库比对。
+        把一份文档抽到的 person_identities 与基准库比对（按实体对齐，非字面 name）。
 
-        首见（基准无此 主体·标识）→ 录入基准并记首见出处；
-        再见（基准已有）→ 比对，不一致返回 identity 缺陷（不覆盖基准）。
-        就地修改基准库（录入首见），是否落盘由调用方 save 决定（看 dirty）。
+        每个主体先经 _resolve_entity 定位 canonical key（别名/强标识归并）：
+        首见（canonical 无此标识）→ 录入基准并记首见出处；
+        再见（canonical 已有）→ 比对，不一致返回 identity 缺陷（不覆盖基准）。
+        就地修改基准库（录入首见 + 学到的别名），是否落盘由调用方 save 决定（看 dirty）。
         """
         issues: list[CompletenessIssue] = []
         parties = self._data["parties"]
+        aliases = self._data.setdefault("aliases", {})   # name 变体 → canonical（v1 文件无此键）
         for person in identities:
-            name = person.name.strip()
-            if not name:
+            if not person.name.strip():
                 continue
-            slot = parties.setdefault(name, {})
+            name = _canon_name(person.name)
+            canonical = self._resolve_entity(name, person, parties, aliases)
+            if canonical != name and aliases.get(name) != canonical:
+                aliases[name] = canonical            # 记下别名，今后只带弱标识也能归位
+                self._dirty = True
+            slot = parties.setdefault(canonical, {})
             for idv in person.identifiers:
                 label, value = idv.label.strip(), idv.value.strip()
                 if not label or not value:
@@ -120,7 +163,7 @@ class PartyRegistry:
                     base = known.get("value", "")
                     src = str(known.get("first_seen_doc", ""))[:12]
                     issues.append(CompletenessIssue(
-                        item=f"{name}·{label}",
+                        item=f"{canonical}·{label}",
                         category="identity",
                         detail=(
                             f"与基准不一致：基准『{base}』(首见于 {src})，"
@@ -129,6 +172,35 @@ class PartyRegistry:
                         evidence=f"本次文档 {doc_sha[:12]}",
                     ))
         return issues
+
+    def _resolve_entity(
+        self, name: str, person: PersonIdentity, parties: dict, aliases: dict
+    ) -> str:
+        """
+        定位本主体应归入的 canonical key（实体对齐，而非字面 name）：
+          1. 已是已知别名 → 直达其 canonical；
+          2. 已是现有 key → 用自己；
+          3. 本次某强标识值已登记在另一 name 下 → 同实体，归并到那个已有 key；
+          4. 都不是 → 新实体，用规范化后的 name。
+
+        只用强标识（身份证/银行账号/印章/信用代码/税号）归并——它们实体唯一，
+        同值必同实体；弱标识（电话/开户行）多人共用，绝不据此合并。
+        """
+        if name in aliases:
+            return aliases[name]
+        if name in parties:
+            return name
+        for idv in person.identifiers:
+            if not _is_strong_label(idv.label):
+                continue
+            value = _canon(idv.value.strip())
+            if not value:
+                continue
+            for existing_name, slot in parties.items():
+                for label, info in slot.items():
+                    if _is_strong_label(label) and _canon(info.get("value", "")) == value:
+                        return existing_name
+        return name
 
     # ---------- 管理（party 命令组用）----------
 

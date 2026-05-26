@@ -3,7 +3,12 @@ PartyRegistry 首见入库 / 再见校对 行为测试。
 
 PII 一律占位：张三 + 明显虚构的号码（110101199001011234 等），绝不用真实身份证。
 """
-from contract_archive.archive.party_registry import PartyRegistry, _canon
+from contract_archive.archive.party_registry import (
+    PartyRegistry,
+    _canon,
+    _canon_name,
+    _is_strong_label,
+)
 from contract_archive.schemas import LabeledValue, PersonIdentity
 
 
@@ -88,3 +93,66 @@ def test_load_missing_or_corrupt_returns_empty(tmp_path):
 def test_canon_strips_noise_keeps_digits():
     assert _canon(" 110101-1990 ") == "1101011990"
     assert _canon("139；138") == "139138"
+
+
+# ---- 实体对齐：同实体不同名字归并到一个 key（治 known_parties 分裂）----
+#
+# 复现的生产分裂形态：同一公司被识别成"示例置业"与"示例奥业"（一字之差，幻觉/误读），
+# 但共用同一章号；按字面 name 作 key 会分裂成两条，跨合同核对不到一起。
+_FAKE_SEAL = "990011223344"   # 虚构章号占位
+
+
+def test_strong_id_merge_unifies_variant_names(tmp_path):
+    """同章号的两个名字变体 → 归并到首见 key，不新建第二个；本次名字记入别名表。"""
+    reg = PartyRegistry.load(tmp_path / "kp.json")
+    reg.reconcile([_person("示例置业有限公司", "甲方", 印章=_FAKE_SEAL)], "docA")
+    issues = reg.reconcile([_person("示例奥业有限公司", "甲方", 印章=_FAKE_SEAL)], "docB")
+    assert issues == []                                  # 同实体同章号，不报冲突
+    assert reg.get("示例奥业有限公司") is None            # 不分裂出第二个 key
+    assert reg.get("示例置业有限公司")["印章"]["value"] == _FAKE_SEAL
+    assert reg._data["aliases"]["示例奥业有限公司"] == "示例置业有限公司"
+
+
+def test_alias_resolves_later_weak_only_occurrence(tmp_path):
+    """学到别名后，即便后续只带弱标识（电话）也能归到 canonical，不分裂。"""
+    reg = PartyRegistry.load(tmp_path / "kp.json")
+    reg.reconcile([_person("示例置业有限公司", "甲方", 印章=_FAKE_SEAL)], "docA")
+    reg.reconcile([_person("示例奥业有限公司", "甲方", 印章=_FAKE_SEAL)], "docB")
+    reg.reconcile([_person("示例奥业有限公司", "甲方", 电话="0571-88880000")], "docC")
+    assert reg.get("示例奥业有限公司") is None            # 仍不分裂
+    assert reg.get("示例置业有限公司")["电话"]["value"] == "0571-88880000"
+
+
+def test_weak_identifier_does_not_merge_distinct_entities(tmp_path):
+    """弱标识（开户行/电话）多人共用，绝不据此合并——否则会把不同实体焊死。"""
+    reg = PartyRegistry.load(tmp_path / "kp.json")
+    reg.reconcile([_person("示例置业有限公司", "甲方", 开户行="中国银行某支行")], "docA")
+    reg.reconcile([_person("另一家置业有限公司", "甲方", 开户行="中国银行某支行")], "docB")
+    assert reg.get("示例置业有限公司") is not None
+    assert reg.get("另一家置业有限公司") is not None      # 两个实体各自独立
+    assert reg._data["aliases"] == {}                     # 没有误并
+
+
+def test_role_prefix_normalized_to_same_key(tmp_path):
+    """称谓前缀差异归一：『甲方：示例置业』与『示例置业』归到同一 key。"""
+    reg = PartyRegistry.load(tmp_path / "kp.json")
+    reg.reconcile([_person("甲方：示例置业有限公司", "甲方", 银行账号="6222000011112222")], "docA")
+    issues = reg.reconcile([_person("示例置业有限公司", "甲方", 银行账号="6222000011112222")], "docB")
+    assert issues == []
+    assert reg.get("示例置业有限公司")["银行账号"]["value"] == "6222000011112222"
+    assert reg.get("甲方：示例置业有限公司") is None
+
+
+def test_canon_name_separator_gated():
+    """称谓前缀仅在后接分隔符时剥离；前缀恰为名字一部分（无分隔符）不误伤。"""
+    assert _canon_name("甲方：示例置业有限公司") == "示例置业有限公司"
+    assert _canon_name(" 出卖人  示例置业 ") == "示例置业"   # 空白也算分隔
+    assert _canon_name("甲方物流有限公司") == "甲方物流有限公司"  # 无分隔符，不剥
+    assert _canon_name("买方") == "买方"                      # 纯称谓无名字，原样保留
+
+
+def test_is_strong_label():
+    for lab in ("身份证号", "银行账号", "印章", "统一社会信用代码", "税号"):
+        assert _is_strong_label(lab)
+    for lab in ("电话", "开户行", "地址", "职位"):
+        assert not _is_strong_label(lab)
