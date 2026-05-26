@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 from ..schemas import (
@@ -89,6 +90,11 @@ JSON 字段定义：
   fields 里"乙方身份证号: A；B"分不清谁是谁，这里必须按人拆开，供跨文档逐人核对。
   · 每个主体一个对象：name（与 parties 对应的姓名/全称）、role（其在本文档的角色）、
     identifiers（该主体的身份证号/电话/银行账号/开户行/税号等键值，label+value）。
+  · name 必须**逐字摘自正文/parties 中的主体全称**，禁止改字、补字、规范化或自行翻译
+    （如把『浙典』写成『浙奥』即为幻觉）；正文里找不到的名字一律不得编造。
+  · 同一实体只出一个对象：哪怕它在正文有多个称谓（如"出卖人（以下简称甲方）"），
+    也只用一个 name（取正文全称）、role 写其主要称谓，**禁止拆成"出卖人|X"和
+    "甲方|Y"两条指向同一实体的记录**——拆开会让跨文档核对把一家公司当成两家。
   · 同一文档里多个自然人的身份证、电话**必须分别绑到各自名下，禁止混填或合并**。
     例：买受人张三→身份证A、电话X；李四→身份证B、电话Y，务必拆成两个对象。
   · 只放"主体固有"的稳定标识（身份证/电话/账号/税号），不放金额、日期、地址这类
@@ -277,6 +283,29 @@ def _coerce_person_identities(raw: Any) -> list[PersonIdentity]:
     return out
 
 
+def _filter_identities_by_text(
+    identities: list[PersonIdentity], document_text: str
+) -> list[PersonIdentity]:
+    """
+    丢弃 name 在正文中根本不出现的 person_identity——确定性的幻觉护栏。
+
+    prompt 已要求 name 逐字摘自正文，但 LLM 偶尔仍改字/编造（实测把『浙典』幻觉成
+    正文不存在的『浙奥』），使同一实体在 known_parties 分裂。凡正文（去空白后）不含
+    该 name 的，判为幻觉丢弃。比较去空白以容忍 OCR 在名字中夹空格。
+    注：VL 落款章绑定的主体在抽取之后才追加（owner 未必在正文），不经此过滤。
+    """
+    if not document_text:
+        return identities
+    haystack = re.sub(r"\s+", "", document_text)
+    kept: list[PersonIdentity] = []
+    for person in identities:
+        if re.sub(r"\s+", "", person.name) in haystack:
+            kept.append(person)
+        else:
+            logger.info("丢弃疑似幻觉主体（正文未出现该名）: %s", person.name)
+    return kept
+
+
 def _coerce_parties(raw: Any) -> list[str]:
     if not isinstance(raw, list):
         return []
@@ -395,6 +424,11 @@ def extract_document(
     primary_date = raw.get("primary_date")
     primary_date = normalize_date(primary_date) if isinstance(primary_date, str) and primary_date else None
 
+    # person_identities 过幻觉护栏：name 须在正文出现，编造名（正文不存在）丢弃。
+    person_identities = _filter_identities_by_text(
+        _coerce_person_identities(raw.get("person_identities")), document_text
+    )
+
     amounts = _coerce_labeled_amounts(raw.get("amounts"))
     # 计算值（非抽取）：把 LLM 标记为 is_total_component 的金额求和。
     # 由代码做算术（LLM 只负责语义分类），避免 LLM 加法出错。
@@ -424,7 +458,7 @@ def extract_document(
         amounts=amounts,
         seals=_coerce_seals(raw.get("seals")),
         fields=_coerce_labeled_values(raw.get("fields")),
-        person_identities=_coerce_person_identities(raw.get("person_identities")),
+        person_identities=person_identities,
         obligations=coerce_obligations(raw.get("obligations")),
         sub_agreements=_coerce_sub_agreements(raw.get("sub_agreements")),
         completeness=completeness,
