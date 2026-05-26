@@ -130,6 +130,10 @@ uv run contract-archive search --name 车位 --auto-renewal
 # 看单条详情（id 或 sha 前缀 ≥4 字符）
 uv run contract-archive show 5
 uv run contract-archive show a3f9c2b1
+
+# 看原文：show 看 LLM 抽出的字段，raw 看抽取依据的 OCR 原始文本（同一份喂给 LLM 的内容）
+uv run contract-archive raw 5
+uv run contract-archive raw a3f9c2b1 | grep 违约         # 纯文本，可管道
 ```
 
 ### 待办看板（义务清单）

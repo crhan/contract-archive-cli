@@ -8,7 +8,7 @@
 - paths.py      档案库路径约定 + 硬链接/拷贝工具
 """
 from .db import checkpoint, open_archive_db, transaction, utc_now_iso
-from .ingest import IngestResult, discover_pdfs, ingest_pdf, re_extract
+from .ingest import IngestResult, discover_pdfs, ingest_pdf, load_document_text, re_extract
 from .paths import ArchivePaths, default_archive_root, link_or_copy, sha256_of_file
 from .repository import (
     DocumentRow,
@@ -60,4 +60,5 @@ __all__ = [
     "ingest_pdf",
     "re_extract",
     "discover_pdfs",
+    "load_document_text",
 ]

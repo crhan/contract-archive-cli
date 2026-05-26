@@ -390,6 +390,36 @@ def test_show_ident_sha_prefix(archive_root, conn, sample_pdf, sample_markdown):
         find_by_sha_prefix(conn, "abc")
 
 
+def test_raw_prints_ocr_text(archive_root, conn, sample_pdf, sample_markdown):
+    """raw 命令把 MinerU OCR 原文（raw_text.txt）打到 stdout，与 show 互补。"""
+    from typer.testing import CliRunner
+
+    from contract_archive.archive import checkpoint
+    from contract_archive.cli import app
+
+    marker = "原始OCR文本·违约金不超过合同总金额的20%"
+    with _patch_pipeline(StubMineruPipeline(markdown_text=sample_markdown, raw_text=marker)):
+        r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
+    checkpoint(conn)  # 刷 WAL，让 raw 命令的独立连接能读到刚写入的行
+
+    runner = CliRunner()
+    root = str(archive_root.root)
+
+    # 按 id 命中，原文进 stdout（可供管道）
+    ok = runner.invoke(app, ["raw", str(r.doc_id), "--archive", root])
+    assert ok.exit_code == 0, ok.output
+    assert marker in ok.stdout
+
+    # 按 sha 前缀同样命中（与 show 共用 _resolve_ident）
+    ok2 = runner.invoke(app, ["raw", r.sha256[:8], "--archive", root])
+    assert ok2.exit_code == 0, ok2.output
+    assert marker in ok2.stdout
+
+    # 不存在的 id → exit 1（错误走 stderr，不污染 stdout 原文）
+    bad = runner.invoke(app, ["raw", "9999", "--archive", root])
+    assert bad.exit_code == 1
+
+
 def test_obligations_storage_and_filter(archive_root, conn, sample_pdf):
     """obligations 写入 + reingest 不堆积 + search/todo 过滤。"""
     from contract_archive.archive import (

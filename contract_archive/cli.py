@@ -6,6 +6,7 @@
   list                  列出档案；status 颜色标注，支持排序；--incomplete 只列疑似不完整合同
   search                按字段过滤（合同名/甲乙方/金额/日期/自动续约/风险）
   show <ident>          查看单条详情（id 或 sha 前缀 >=4 字符）
+  raw <ident>           打印文档原文（MinerU OCR 文本），与 show 互补，可管道给 grep/less
   extract <id>          只重跑抽取（不重跑 MinerU），适合 partial 修复 / 改 prompt 后重抽
   stats                 总数 / status 分布 / 按月签订分布 / 近 30 天到期数
   seals                 跨文档列印章（某主体有哪些章、各在哪些文档）
@@ -47,6 +48,7 @@ from .archive import (
     list_documents,
     list_obligations,
     list_seals,
+    load_document_text,
     open_archive_db,
     re_extract,
     search_documents,
@@ -649,6 +651,46 @@ def _resolve_ident(conn, ident: str):
             )
         return None
     return matches[0]
+
+
+# ---------- raw ----------
+
+
+@app.command()
+def raw(
+    ident: str = typer.Argument(..., help="档案 id (整数) 或 sha 前缀 (>=4 字符)"),
+    archive: Optional[Path] = _archive_opt,
+) -> None:
+    """
+    打印文档原文（MinerU OCR 输出的纯文本）到 stdout。
+
+    与 show 互补：show 看 LLM 抽出的结构化字段，raw 看抽取所依据的原始文本——
+    这正是抽取时喂给 LLM 的同一份内容（raw_text.txt，缺失则退回 markdown.md），
+    用于核对抽取结果是否忠于原文。纯文本打 stdout，可直接管道给 grep / less。
+    """
+    paths = _resolve_archive(archive)
+    # 同 show：请求的是具体一条，库不存在/查不到都按错误处理（exit 1），提示走 stderr。
+    if not paths.db_path.exists():
+        err_console.print(f"[yellow]archive empty: {paths.db_path}[/yellow]")
+        raise typer.Exit(1)
+    conn = open_archive_db(paths.db_path)
+    row = _resolve_ident(conn, ident)
+    conn.close()
+
+    if not row:
+        err_console.print(f"[red]not found: {ident}[/red]")
+        raise typer.Exit(1)
+
+    # output_dir 可能为空串（失败入库的记录），Path("")/"mineru" 会落到不存在目录，
+    # load_document_text 返回 ""，统一走下面的"无原文"分支，无需单独判空。
+    mineru_dir = Path(row.output_dir) / "mineru"
+    text = load_document_text(mineru_dir)
+    if not text:
+        err_console.print(
+            f"[red]no OCR text for id={row.id} sha={row.short_sha}: {mineru_dir}[/red]"
+        )
+        raise typer.Exit(1)
+    print(text)
 
 
 # ---------- extract ----------

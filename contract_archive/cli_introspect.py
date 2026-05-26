@@ -44,6 +44,7 @@ COMMAND_META: dict[str, dict[str, Any]] = {
     "list": {"summary": "列出档案", "side_effects": ["read"], "destructive": False, "idempotent": True},
     "search": {"summary": "多字段过滤查询", "side_effects": ["read"], "destructive": False, "idempotent": True},
     "show": {"summary": "查看单条详情", "side_effects": ["read"], "destructive": False, "idempotent": True},
+    "raw": {"summary": "打印文档原文（MinerU OCR 文本）", "side_effects": ["read"], "destructive": False, "idempotent": True},
     "stats": {"summary": "档案库统计", "side_effects": ["read"], "destructive": False, "idempotent": True},
     "todo": {"summary": "跨合同列待办义务", "side_effects": ["read"], "destructive": False, "idempotent": True},
     "seals": {"summary": "跨文档列印章", "side_effects": ["read"], "destructive": False, "idempotent": True},

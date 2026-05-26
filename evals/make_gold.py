@@ -1,7 +1,7 @@
 """
 从已入库的真实合同生成**脱敏 draft gold** 评测 case（模型辅助标注，省人工）。
 
-数据流：archive 的 mineru 产物（raw_text/markdown，复用生产 _load_document_text 保证与
+数据流：archive 的 mineru 产物（raw_text/markdown，复用生产 load_document_text 保证与
 生产喂给 extract_document 的文本一致）+ extraction_result.json（champion 抽取，当 draft gold）
 → 脱敏（PII 占位）→ 落 gitignored 的 evals/cases_private/extraction/<id>/。
 
@@ -27,7 +27,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
-from contract_archive.archive.ingest import _load_document_text
+from contract_archive.archive import load_document_text
 from contract_archive.config import load_settings
 from contract_archive.extraction.llm_extractor import _call_openai_compat, _parse_json_loose
 from contract_archive.schemas import DocumentExtraction
@@ -301,7 +301,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"archive: {archive_dir}　待处理 {len(docs)} 个文档　→ 输出到 {CASES_PRIVATE}（gitignore）\n")
     for doc_id, mineru_dir, result_path in docs:
-        raw_text = _load_document_text(mineru_dir)
+        raw_text = load_document_text(mineru_dir)
         if not raw_text.strip():
             print(f"  跳过 {doc_id}：mineru 文本为空")
             continue

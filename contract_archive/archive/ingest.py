@@ -219,7 +219,7 @@ def ingest_pdf(
             )
 
         # ---- 2. 抽取（基于 mineru 产物的 raw_text.txt 优先） ----
-        document_text = _load_document_text(mineru_dir)
+        document_text = load_document_text(mineru_dir)
         if not document_text:
             log_handle.write("\n[extract] WARNING: no text found in mineru output\n")
         t1 = time.perf_counter()
@@ -489,7 +489,7 @@ def re_extract(
             f"mineru output missing for id={doc_id}: {mineru_dir}"
         )
 
-    document_text = _load_document_text(mineru_dir)
+    document_text = load_document_text(mineru_dir)
     t0 = time.perf_counter()
     error_message: Optional[str] = None
     error_info: Optional[ErrorInfo] = None
@@ -592,7 +592,7 @@ def re_extract(
 # ---------- 工具 ----------
 
 
-def _load_document_text(mineru_dir: Path) -> str:
+def load_document_text(mineru_dir: Path) -> str:
     """优先 raw_text.txt（已清洗），fallback markdown.md。"""
     raw = mineru_dir / FILE_RAW_TEXT
     md = mineru_dir / FILE_MARKDOWN
