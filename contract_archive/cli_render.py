@@ -7,6 +7,7 @@ CLI 渲染层：把 DocumentRow / IngestResult 等数据对象格式化成展示
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -392,6 +393,99 @@ def build_list_table(rows, root) -> Table:
             local_time(r.ingested_at)[:10],  # 本地日期，与 show 一致
         )
     return table
+
+
+# ---------- raw 命令：原文高亮（TTY 上色，标出 LLM 抽到的关键字）----------
+#
+# 终端着色用 ANSI 转义码。是否上色由 cli.py 按 --color + isatty 决定；这里只做
+# "数据 → 带色字符串" 的纯转换，便于单测。按抽取来源分类着色，让"哪些被识别到、
+# 识别成什么类别"一眼可见。
+
+_HL_RESET = "\033[0m"
+_HL_STYLES: dict[str, str] = {
+    "party": "\033[1;36m",   # 加粗青：当事人 / 主体 / 印章 owner
+    "amount": "\033[1;33m",  # 加粗黄：金额（原文串）
+    "date": "\033[1;34m",    # 加粗蓝：日期（原文串；ISO 规范化值通常命不中）
+    "risk": "\033[1;31m",    # 加粗红：风险条款
+    "field": "\033[1;35m",   # 加粗紫：其他字段值 / 义务出处 / 印章原文
+}
+_HL_LABELS = [("party", "当事人"), ("amount", "金额"), ("date", "日期"),
+              ("risk", "风险"), ("field", "字段")]
+
+
+def extracted_terms(row) -> dict[str, str]:
+    """
+    收集 LLM 抽取的、可能在原文里**原样出现**的串 → 高亮类别 key。
+
+    只收原文原样承载的值（主体名 / 原始金额串 / 字段值 / 出处片段）；日期 ISO、
+    金额数值、摘要等是规范化或改写的，在原文里 substring 命不中 → 自然不高亮，
+    诚实反映"原文里真出现且被抽到"的项。短串（<2 字）丢弃，避免单字满屏误命中。
+    """
+    terms: dict[str, str] = {}
+
+    def add(value, style: str) -> None:
+        if isinstance(value, str):
+            v = value.strip()
+            if len(v) >= 2:
+                terms[v] = style
+
+    # 合同专属顶层列
+    add(row.contract_name, "field")
+    add(row.party_a, "party")
+    add(row.party_b, "party")
+    add(row.amount_text, "amount")
+    add(row.sign_date, "date")
+    add(row.expire_date, "date")
+    for rc in row.risk_clauses:
+        add(rc, "risk")
+    for o in row.obligations:
+        add(o.evidence, "field")        # evidence 是原文片段
+    # 通用信封柔性字段（details_json = DocumentExtraction）
+    det = row.details()
+    for p in det.get("parties") or []:
+        add(p, "party")
+    for a in det.get("amounts") or []:
+        add(a.get("text"), "amount")    # 原文金额串（含大写 / 币种）
+        add(a.get("evidence"), "amount")
+    for d in det.get("key_dates") or []:
+        add(d.get("date"), "date")
+    for f in det.get("fields") or []:
+        add(f.get("value"), "field")    # 字段原文值
+    for s in det.get("seals") or []:
+        add(s.get("owner"), "party")
+        add(s.get("raw_text"), "field")
+    return terms
+
+
+def render_highlighted(text: str, terms: dict[str, str]) -> str:
+    """
+    给原文里命中的抽取串套 ANSI 着色，返回新串（纯函数，不碰 stdout）。
+
+    长串优先排进正则 alternation：finditer 同位置优先吃长串、且天然从左到右
+    不重叠——无需手动合并重叠区间（把特殊情况消成正常情况）。命不中的 term 自然忽略。
+    """
+    if not terms:
+        return text
+    ordered = sorted(terms, key=len, reverse=True)
+    pattern = re.compile("|".join(re.escape(t) for t in ordered))
+    out: list[str] = []
+    last = 0
+    for m in pattern.finditer(text):
+        hit = m.group()
+        style = _HL_STYLES.get(terms.get(hit, "field"), _HL_STYLES["field"])
+        out.append(text[last:m.start()])
+        out.append(f"{style}{hit}{_HL_RESET}")
+        last = m.end()
+    out.append(text[last:])
+    return "".join(out)
+
+
+def color_legend(terms: dict[str, str]) -> str:
+    """已命中的类别 → 一行 ANSI 图例，解释每种颜色代表的抽取类别。无命中返回空串。"""
+    used = set(terms.values())
+    parts = [f"{_HL_STYLES[k]}■{name}{_HL_RESET}"
+             for k, name in _HL_LABELS if k in used]
+    return "图例 " + "  ".join(parts) if parts else ""
 
 
 def build_search_table(rows) -> Table:

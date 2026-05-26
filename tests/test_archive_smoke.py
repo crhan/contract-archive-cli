@@ -420,6 +420,47 @@ def test_raw_prints_ocr_text(archive_root, conn, sample_pdf, sample_markdown):
     assert bad.exit_code == 1
 
 
+def test_raw_color_modes(archive_root, conn, sample_pdf):
+    """raw 上色：auto 在非 TTY（CliRunner）下纯文本；always 强制按抽取来源着色；never 禁用。"""
+    from typer.testing import CliRunner
+
+    from contract_archive.archive import checkpoint, update_extraction
+    from contract_archive.cli import app
+    from contract_archive.schemas import ContractExtraction, ExtractionConfidence
+
+    party = "示例置业有限公司"
+    raw_text = f"甲方：{party}\n乙方：张三\n签订日期：2025年3月15日"
+    with _patch_pipeline(StubMineruPipeline(markdown_text="# x", raw_text=raw_text)):
+        r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
+    # 灌可控字段：party_a 原样在原文出现 → 应青色高亮；sign_date 是 ISO 规范化，
+    # 原文写法 '2025年3月15日' 不同 → substring 命不中 → 不该被误标日期色。
+    update_extraction(
+        conn, r.doc_id, status="ok", llm_duration_s=0.1, error_message=None,
+        extraction=ContractExtraction(party_a=party, party_b="张三", sign_date="2025-03-15"),
+        confidence=ExtractionConfidence())
+    checkpoint(conn)
+
+    runner = CliRunner()
+    root = str(archive_root.root)
+    esc = "\033["  # ANSI 前缀
+
+    # auto + 非 TTY（CliRunner）→ 纯文本，零 ANSI（保护 raw|grep / raw|less）
+    auto = runner.invoke(app, ["raw", str(r.doc_id), "--archive", root])
+    assert auto.exit_code == 0, auto.output
+    assert party in auto.stdout and esc not in auto.stdout
+
+    # always → party_a 被青色（1;36）包裹；ISO 日期命不中，不出现日期色（1;34）
+    colored = runner.invoke(app, ["raw", str(r.doc_id), "--color", "always", "--archive", root])
+    assert colored.exit_code == 0, colored.output
+    assert f"\033[1;36m{party}\033[0m" in colored.stdout
+    assert "\033[1;34m" not in colored.stdout
+
+    # never → 纯文本，零 ANSI
+    never = runner.invoke(app, ["raw", str(r.doc_id), "--color", "never", "--archive", root])
+    assert never.exit_code == 0, never.output
+    assert esc not in never.stdout
+
+
 def test_obligations_storage_and_filter(archive_root, conn, sample_pdf):
     """obligations 写入 + reingest 不堆积 + search/todo 过滤。"""
     from contract_archive.archive import (

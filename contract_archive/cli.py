@@ -65,7 +65,10 @@ from .cli_render import (
     build_list_table,
     build_search_table,
     build_show_table,
+    color_legend,
+    extracted_terms,
     ingest_result_to_dict,
+    render_highlighted,
     row_to_dict,
     seal_rows_to_dict,
 )
@@ -78,6 +81,14 @@ class OutputFormat(str, Enum):
 
     table = "table"
     json = "json"
+
+
+class ColorWhen(str, Enum):
+    """--color：auto=仅 TTY 上色（管道纯文本）；always=强制（配 less -R）；never=禁用。"""
+
+    auto = "auto"
+    always = "always"
+    never = "never"
 
 
 class ProgressFormat(str, Enum):
@@ -660,13 +671,20 @@ def _resolve_ident(conn, ident: str):
 def raw(
     ident: str = typer.Argument(..., help="档案 id (整数) 或 sha 前缀 (>=4 字符)"),
     archive: Optional[Path] = _archive_opt,
+    color: ColorWhen = typer.Option(
+        ColorWhen.auto, "--color",
+        help="auto=仅 TTY 上色（管道纯文本）| always（配 less -R）| never",
+    ),
 ) -> None:
     """
     打印文档原文（MinerU OCR 输出的纯文本）到 stdout。
 
     与 show 互补：show 看 LLM 抽出的结构化字段，raw 看抽取所依据的原始文本——
     这正是抽取时喂给 LLM 的同一份内容（raw_text.txt，缺失则退回 markdown.md），
-    用于核对抽取结果是否忠于原文。纯文本打 stdout，可直接管道给 grep / less。
+    用于核对抽取结果是否忠于原文。
+
+    交互终端下默认按抽取来源给命中关键字着色（当事人/金额/日期/风险/字段），
+    一眼看出哪些被 LLM 识别到；管道（非 TTY）时输出纯文本，不破坏 raw|grep / raw|less。
     """
     paths = _resolve_archive(archive)
     # 同 show：请求的是具体一条，库不存在/查不到都按错误处理（exit 1），提示走 stderr。
@@ -690,7 +708,24 @@ def raw(
             f"[red]no OCR text for id={row.id} sha={row.short_sha}: {mineru_dir}[/red]"
         )
         raise typer.Exit(1)
-    print(text)
+
+    # 上色判定：always 强制；auto 仅当 stdout 是 TTY；never 禁用。
+    # 管道默认纯文本——保住 raw|grep / raw|less 的既有行为（不破坏 userspace）。
+    use_color = color is ColorWhen.always or (
+        color is ColorWhen.auto and sys.stdout.isatty()
+    )
+    if not use_color:
+        print(text)
+        return
+
+    terms = extracted_terms(row)
+    # 图例走 stderr：解释颜色含义，又不污染 stdout 的原文（even with | less -R）。
+    legend = color_legend(terms)
+    if legend and sys.stderr.isatty():
+        print(legend, file=sys.stderr)
+    sys.stdout.write(render_highlighted(text, terms))
+    if not text.endswith("\n"):
+        sys.stdout.write("\n")
 
 
 # ---------- extract ----------

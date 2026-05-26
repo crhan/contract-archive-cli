@@ -132,8 +132,10 @@ uv run contract-archive show 5
 uv run contract-archive show a3f9c2b1
 
 # 看原文：show 看 LLM 抽出的字段，raw 看抽取依据的 OCR 原始文本（同一份喂给 LLM 的内容）
+# 交互终端下按抽取来源给命中关键字着色（当事人/金额/日期/风险/字段），一眼看出哪些被识别到
 uv run contract-archive raw 5
-uv run contract-archive raw a3f9c2b1 | grep 违约         # 纯文本，可管道
+uv run contract-archive raw a3f9c2b1 | grep 违约           # 管道时自动纯文本，不破坏 grep
+uv run contract-archive raw 5 --color always | less -R     # 强制上色配 less -R
 ```
 
 ### 待办看板（义务清单）
