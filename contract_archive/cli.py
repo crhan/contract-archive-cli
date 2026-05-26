@@ -54,6 +54,7 @@ from .archive import (
 from .pipelines import MinerUPipeline
 from .config import load_settings
 from .cli_config import config_app
+from .cli_party import party_app
 from .cli_render import (
     completeness_mark,
     display_amount,
@@ -141,6 +142,7 @@ app = typer.Typer(
     ),
 )
 app.add_typer(config_app, name="config")
+app.add_typer(party_app, name="party")
 
 
 @app.callback()
@@ -624,6 +626,18 @@ def show(
             "\n".join(f"• {f.get('label', '')}: {f.get('value', '')}" for f in fields),
         )
 
+    # 身份标识（精确到人）：person_identities，known_parties 基准库逐人核对的依据。
+    pids = det.get("person_identities") or []
+    if pids:
+        lines = []
+        for p in pids:
+            role = p.get("role")
+            head = f"[bold]{p.get('name', '?')}[/bold]" + (f" [dim]({role})[/dim]" if role else "")
+            lines.append(head)
+            for idv in p.get("identifiers") or []:
+                lines.append(f"  • {idv.get('label', '')}: {idv.get('value', '')}")
+        table.add_row("身份标识", "\n".join(lines))
+
     # 印章：跨文档类型通用，放分支外（合同恰恰最常盖章）。det 只在非合同分支定义，
     # 这里用 row.details() 现取，避免合同分支 NameError。
     seals = row.details().get("seals") or []
@@ -679,6 +693,19 @@ def show(
             table.add_row("[bold]完整性[/bold]", "\n".join(lines))
         else:  # unknown
             table.add_row("[bold]完整性[/bold]", "[yellow]? 信息不足，未能判定[/yellow]")
+
+    # 身份核对：person_identities 与 known_parties 基准库比对的不一致项（跨文档类型）。
+    id_issues = det.get("identity_issues") or []
+    if id_issues:
+        lines = ["[red]⚠ 与基准库不一致[/red] [dim](known_parties 跨文档核对，请人工确认)[/dim]"]
+        for it in id_issues:
+            detail = it.get("detail") or ""
+            tail = f" — [dim]{detail}[/dim]" if detail else ""
+            lines.append(f"• {it.get('item', '')}{tail}")
+            ev = it.get("evidence") or ""
+            if ev:
+                lines.append(f"    [dim]↳ {ev}[/dim]")
+        table.add_row("[bold]身份核对[/bold]", "\n".join(lines))
 
     table.add_row(
         "llm_model",
