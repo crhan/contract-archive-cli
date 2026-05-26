@@ -37,3 +37,9 @@ logs/
 # 评测产物（每次跑 evals.run 生成）+ 本地脱敏真实样例（绝不入库，见 evals/README PII 红线）
 evals/results/
 evals/cases/**/private/
+# make_gold 从真实合同生成的脱敏 draft case（未经人工核对脱敏完整性前一律不入库）
+evals/cases_private/
+
+# 主体身份基准库（含真实 PII：身份证/电话/银行账号）。默认在 XDG 数据目录，
+# 此条仅防档案库被设到 repo 内时误提交——known_parties.json 绝不入库。
+known_parties.json

@@ -58,6 +58,7 @@ from .pipelines import MinerUPipeline
 from .config import load_settings
 from .cli_config import config_app
 from .cli_introspect import register as register_introspect
+from .cli_party import party_app
 from .cli_render import (
     build_list_table,
     build_search_table,
@@ -149,6 +150,7 @@ app = typer.Typer(
     ),
 )
 app.add_typer(config_app, name="config")
+app.add_typer(party_app, name="party")
 # introspection 命令（capabilities/describe/schema）：给机器发现能力用，见 cli_introspect。
 register_introspect(app)
 

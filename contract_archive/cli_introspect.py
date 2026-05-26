@@ -57,6 +57,14 @@ COMMAND_META: dict[str, dict[str, Any]] = {
         "side_effects": ["db_write"], "destructive": False, "idempotent": True,
     },
     "config": {"summary": "查看/设置全局配置", "side_effects": ["read", "fs_write"], "destructive": False, "idempotent": True},
+    "party": {
+        "summary": "管理 known_parties 身份基准库（list/show 读，set/rm 改）",
+        "side_effects": ["read", "fs_write"],
+        # group 入口本身非破坏；破坏在子命令 party rm。capabilities 暂只列顶层、不递归
+        # 展开 group 子命令——精确表达 party rm 的破坏性记入 backlog。
+        "destructive": False,
+        "idempotent": True,
+    },
     "capabilities": {"summary": "列命令能力与副作用元数据", "side_effects": ["read"], "destructive": False, "idempotent": True},
     "describe": {"summary": "打印单命令参数 schema", "side_effects": ["read"], "destructive": False, "idempotent": True},
     "schema": {"summary": "打印核心数据结构 JSON Schema", "side_effects": ["read"], "destructive": False, "idempotent": True},

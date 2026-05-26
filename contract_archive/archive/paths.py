@@ -63,6 +63,11 @@ class ArchivePaths:
     def ingest_log(self) -> Path:
         return self.root / "ingest.jsonl"
 
+    @property
+    def known_parties_path(self) -> Path:
+        """主体身份基准库（known_parties.json）。含真实 PII，存档案库根、权限 0600。"""
+        return self.root / "known_parties.json"
+
     def doc_dir(self, sha256: str) -> Path:
         return self.documents_dir / sha256[:SHA_SHORT_LEN]
 

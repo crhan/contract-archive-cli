@@ -161,6 +161,7 @@ def build_show_table(row) -> Table:
     det = row.details()
     _show_header_rows(table, row, det)
     _show_amount_rows(table, row, det)
+    _show_identity_rows(table, det)
     _show_seal_rows(table, row)
     _show_completeness_rows(table, row)
     _show_footer_rows(table, row)
@@ -244,6 +245,21 @@ def _show_amount_rows(table: Table, row, det: dict) -> None:
         )
 
 
+def _show_identity_rows(table: Table, det: dict) -> None:
+    """身份标识（精确到人）：person_identities，known_parties 基准库逐人核对的依据。"""
+    pids = det.get("person_identities") or []
+    if not pids:
+        return
+    lines = []
+    for p in pids:
+        role = p.get("role")
+        head = f"[bold]{p.get('name', '?')}[/bold]" + (f" [dim]({role})[/dim]" if role else "")
+        lines.append(head)
+        for idv in p.get("identifiers") or []:
+            lines.append(f"  • {idv.get('label', '')}: {idv.get('value', '')}")
+    table.add_row("身份标识", "\n".join(lines))
+
+
 def _show_seal_rows(table: Table, row) -> None:
     """印章 + 附属协议（补充协议，各有独立签章落款）。det 用 row.details() 现取避免分支差异。"""
     seals = row.details().get("seals") or []
@@ -304,7 +320,19 @@ def _show_completeness_rows(table: Table, row) -> None:
 
 
 def _show_footer_rows(table: Table, row) -> None:
-    """抽取元数据（llm_model/置信度）+ 双方义务动作 + 风险条款。"""
+    """身份核对不一致 + 抽取元数据（llm_model/置信度）+ 双方义务动作 + 风险条款。"""
+    # 身份核对：person_identities 与 known_parties 基准库比对的不一致项（跨文档类型）。
+    id_issues = row.details().get("identity_issues") or []
+    if id_issues:
+        lines = ["[red]⚠ 与基准库不一致[/red] [dim](known_parties 跨文档核对，请人工确认)[/dim]"]
+        for it in id_issues:
+            detail = it.get("detail") or ""
+            tail = f" — [dim]{detail}[/dim]" if detail else ""
+            lines.append(f"• {it.get('item', '')}{tail}")
+            ev = it.get("evidence") or ""
+            if ev:
+                lines.append(f"    [dim]↳ {ev}[/dim]")
+        table.add_row("[bold]身份核对[/bold]", "\n".join(lines))
     table.add_row(
         "llm_model",
         row.details().get("llm_model") or "[dim]- (旧抽取未记录，重抽后显示)[/dim]",

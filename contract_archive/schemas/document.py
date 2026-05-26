@@ -197,6 +197,23 @@ class LabeledValue(BaseModel):
     value: str   # 原文值（统一用字符串承载；数值/日期另见 amounts/key_dates）
 
 
+class PersonIdentity(BaseModel):
+    """
+    单个主体（自然人/机构）精确绑定的固有标识。
+
+    与扁平 fields 的区别：fields 是文档级零散键值，常把多人混在一条里
+    （如"乙方身份证号: 330106…；420302…"分不清哪个号属于谁）；这里把每个标识
+    精确绑定到具体的人/机构，是跨文档身份核对（known_parties 基准库）的基础——
+    同一主体的身份证号/电话/银行账号本应稳定，OCR 读错或被改动即可比对告警。
+    """
+
+    name: str                                    # 主体名（须与 parties 中某项对应）
+    role: Optional[str] = None                   # 本文档中的角色：甲方/乙方/买受人/持证人 等
+    # 该主体的固有标识键值：身份证号/电话/银行账号/开户行/统一社会信用代码 等。
+    # 复用 LabeledValue（label=标识名，value=标识值）。
+    identifiers: list[LabeledValue] = Field(default_factory=list)
+
+
 class LabeledAmount(BaseModel):
     """带标签的金额。"""
 
@@ -240,8 +257,9 @@ class CompletenessIssue(BaseModel):
     """单条完整性缺陷（缺签章 / 缺要素）。"""
 
     item: str                                          # 缺失/异常要素，如"甲方签章""签订日期""转让价款"
-    # signature=签章类，field=要素缺失类，amount=金额自洽异常类（如分期之和≠总价，代码确定性判出）
-    category: Literal["signature", "field", "amount"] = "field"
+    # signature=签章类，field=要素缺失类，amount=金额自洽异常类（如分期之和≠总价，代码确定性判出），
+    # identity=主体固有标识与基准不符（known_parties 跨文档核对，如身份证号被 OCR 读错/被改）
+    category: Literal["signature", "field", "amount", "identity"] = "field"
     detail: str = ""                                   # 缺什么/异常什么（简述），如"落款处空白无章"
     # 出处定位：页码 + 原文片段（签章类带落款页码），让人能翻回原文核对。
     # 审计性结论的底线——不可追溯的缺陷不合格，宁可不报。
@@ -312,6 +330,9 @@ class DocumentExtraction(BaseModel):
     amounts: list[LabeledAmount] = Field(default_factory=list)
     seals: list[Seal] = Field(default_factory=list)   # 文档上的印章（有则可验真/索引）
     fields: list[LabeledValue] = Field(default_factory=list)
+    # 精确绑定到人的固有标识（身份证/电话/银行账号…）。与扁平 fields 互补：
+    # fields 易把多人号码混在一条，这里按人拆开，供 known_parties 基准库逐人核对。
+    person_identities: list[PersonIdentity] = Field(default_factory=list)
     obligations: list[ObligationItem] = Field(default_factory=list)
     # 附属协议（主协议之外的《补充协议》等）。一份 PDF 可能含主协议 + N 份补充协议，
     # 每份有独立签章落款；completeness 会逐个协议单元核查。无则空列表。
@@ -319,6 +340,10 @@ class DocumentExtraction(BaseModel):
     # 完整性核查：仅合同协议填，其他类型 None
     # （"该不该有甲乙签章/要素齐不齐"对证明/发票无意义，强判只会制造噪声）。
     completeness: Optional[Completeness] = None
+    # 身份基本信息核对结果（跨文档类型，不限合同）：person_identities 与 known_parties
+    # 基准库比对的不一致项（category="identity"）。首见入库不产生 issue，再见冲突才报。
+    # 独立于 completeness（后者专司合同签章/要素），避免污染其"仅合同适用"的语义。
+    identity_issues: list[CompletenessIssue] = Field(default_factory=list)
     raw_evidence: dict[str, str] = Field(
         default_factory=dict, description="字段→原文证据片段，用于人工抽检"
     )

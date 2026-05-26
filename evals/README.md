@@ -96,6 +96,25 @@ contract-archive show <doc_id>                                          # 肉眼
 4. **样本量**：bootstrap CI 非劣检验，每分层单元约需 80-150 例，6 类×难度档总量 oom 在 1000-2000 例。
    当前种子仅几例，**只够验证 harness 跑通**，不够下替换结论。
 
+## 用 make_gold 从真实合同批量起草（省人工）
+
+`evals.make_gold` 把**已入库**的真实合同（archive 的 mineru 文本 + extraction_result.json）
+转成**脱敏 draft gold**，落到 gitignored 的 `evals/cases_private/extraction/<id>/`：
+
+```bash
+uv run --no-sync python -m evals.make_gold                          # 全部已入库文档
+uv run --no-sync python -m evals.make_gold --doc-id <id>            # 单个
+uv run --no-sync python -m evals.make_gold --crosscheck deepseek-v4-pro  # 加异家族交叉抽取
+```
+
+- **数据源**：复用 `_load_document_text`（= 生产喂 extract_document 的同一文本），免重新 OCR/LLM。
+- **脱敏**：LLM 为主（识别上下文人名/中英文机构名/各类号码）+ 正则兜底（身份证/手机/座机/邮编）。
+  每份再跑残留启发式扫描，把可疑 token 写进 `SCAN.txt`。
+- **脱敏不保证完整**（实测仍可能漏 14 位号码片段、罕见写法）。所以产物是 **DRAFT、只进 gitignored
+  `cases_private/`**，每份带 `REVIEW.md`：人工①通读确认无残留真实 PII、②对照原文**盲标** parties/
+  amounts/issues（破 champion 盲区），确认后才手动复制到可提交的 `cases/extraction/`。
+- `--crosscheck <异家族模型>` 在脱敏文本上再抽一遍产 `crosscheck.json`，供人工对比补 champion 漏抽。
+
 ## 增强路线（Phase 3，按需建）
 
 - 窄 LLM-judge：仅 title/summary，异家族+blind+rubric+多采样。
