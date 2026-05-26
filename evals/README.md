@@ -89,7 +89,9 @@ contract-archive show <doc_id>                                          # 肉眼
    真实合同**绝不能**做 committed gold。真实脱敏样例放 `cases/<suite>/<id>/private/`（已 gitignore）。
 2. **gold 不要用 champion 单源生成**——会继承 champion 盲区（它漏抽的，人工跟着漏，候选抽到反被判 FP）。
    - 高风险字段（parties / amounts / issues）**从原文盲标**，不看任何模型输出。
-   - 要 draft 就用**两个异家族**模型各跑一遍取**并集**喂人工修正。
+     用 **`python -m evals.review <case_id>`**：只显示 input.txt + 空白模板，填完
+     `--diff` 自动列出"你标了 gold 没有 / gold 有你没标"，想偷看 gold 都看不到。
+   - 要 draft 就用**两个异家族**模型各跑一遍取**并集**喂人工修正（make_gold 的 `--crosscheck`）。
    - judge 评分时候选与 champion 输出**匿名+随机左右顺序**（盲测）。
 3. **分层 + 过采样**：`meta.json` 标 `stratum`/`difficulty`。稀有但致命的层（含补充协议/多落款/
    留白多选一）天然少，要**主动过采样**（每层 ≥ ~100），单独报指标，别被主分布淹没。
