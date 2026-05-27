@@ -1,5 +1,5 @@
 """
-本地合同档案库 CLI。
+本地合同档案库 CLI —— 入口与组装模块。
 
 子命令：
   ingest <path>         扫描 PDF 文件/目录，跑 MinerU + 抽取，结果入库
@@ -15,246 +15,52 @@
   config                查看/设置全局配置（XDG ~/.config/contract-archive/config.json）
 
 档案库路径优先级：--archive flag > CONTRACT_ARCHIVE_DIR env > config archive.dir > XDG 默认 (~/.local/share/contract-archive)
+
+代码组织（命令空间扁平，全挂在同一个 app 上）：
+  cli_common.py   app 实例 + 全局 callback + 参数 Enum + 双 console + 路径/ident 解析（叶子）
+  cli_query.py    只读命令：list/search/show/raw/stats/todo/seals
+  cli.py（本文件）写命令：ingest/extract/delete/vacuum + 组装 sub-app 与 introspection
+
+ingest 留在本模块（而非 cli_query）有硬约束：测试用 monkeypatch.setattr(cli, "MinerUPipeline"/
+"ingest_pdf") 打桩，命令体必须引用本模块全局名才能让桩生效——别图整齐把它挪走。
 """
 from __future__ import annotations
 
 import json as _json
 import logging
-import os
 import sys
-from dataclasses import asdict
-from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 import typer
-from dotenv import load_dotenv
-from rich.console import Console
-from rich.table import Table
 
-from . import __version__
 from .errors import classify_exception
 from .archive import (
     ArchivePaths,
-    SearchFilter,
     checkpoint,
-    default_archive_root,
-    collect_stats,
     delete_document,
     discover_pdfs,
-    find_by_sha_prefix,
-    get_document,
     ingest_pdf,
-    list_documents,
-    list_obligations,
-    list_seals,
-    load_document_text,
     open_archive_db,
     re_extract,
-    search_documents,
-    Stats,
 )
 from .archive.paths import sha256_of_file
 from .archive.repository import find_by_sha
 from .pipelines import MinerUPipeline
-from .config import load_settings
 from .cli_config import config_app
 from .cli_introspect import register as register_introspect
 from .cli_party import party_app
-from .cli_render import (
-    build_list_table,
-    build_search_table,
-    build_show_table,
-    color_legend,
-    extracted_terms,
-    ingest_result_to_dict,
-    render_highlighted,
-    row_to_dict,
-    seal_rows_to_dict,
+from .cli_render import ingest_result_to_dict
+from .cli_common import (
+    OutputFormat,
+    ProgressFormat,
+    _archive_opt,
+    _resolve_archive,
+    _resolve_ident,
+    app,
+    console,  # noqa: F401  —— re-export：历史上有调用方/测试经 cli.console 访问
+    err_console,
 )
-
-# ---------- 参数枚举（parse-time 校验：坏值由 typer 报 exit 2，不再漏到数据层 ValueError）----------
-
-
-class OutputFormat(str, Enum):
-    """--format：人类表格 or 机器 JSON。"""
-
-    table = "table"
-    json = "json"
-
-
-class ColorWhen(str, Enum):
-    """--color：auto=仅 TTY 上色（管道纯文本）；always=强制（配 less -R）；never=禁用。"""
-
-    auto = "auto"
-    always = "always"
-    never = "never"
-
-
-class ProgressFormat(str, Enum):
-    """--progress：none=现状（汇总在末尾）；ndjson=逐文件向 stdout 吐事件流，供 agent 流式消费。"""
-
-    none = "none"
-    ndjson = "ndjson"
-
-
-class OrderBy(str, Enum):
-    """list --order-by。成员必须与 repository.list_documents 的 allowed_order 白名单一致。"""
-
-    ingested_at = "ingested_at"
-    primary_date = "primary_date"
-    primary_amount_cents = "primary_amount_cents"
-    sign_date = "sign_date"
-    expire_date = "expire_date"
-    amount_cents = "amount_cents"
-
-
-class DocStatus(str, Enum):
-    """--status：入库状态。"""
-
-    ok = "ok"
-    partial = "partial"
-    failed = "failed"
-
-
-class DocType(str, Enum):
-    """list --type：文档类型。值即 CLI choice，与抽取信封的类型枚举一致。"""
-
-    contract = "合同协议"
-    proof = "证明"
-    invoice = "发票票据"
-    report = "报告"
-    certificate = "证件"
-    other = "其他"
-
-
-class Actor(str, Enum):
-    """--actor：义务主体。成员必须与 repository 的 party_a/party_b/both 校验一致。"""
-
-    party_a = "party_a"
-    party_b = "party_b"
-    both = "both"
-
-
-# ---------- 双 console：数据走 stdout（可管道），诊断/进度/错误走 stderr ----------
-
-console = Console()                    # 主数据：表格 + JSON
-err_console = Console(stderr=True)      # 人类消息：状态/进度/错误/确认
-
-
-def _version_cb(value: bool) -> None:
-    """--version 的 eager 回调：版本号打到 stdout（机器可消费），随即退出。"""
-    if value:
-        print(f"contract-archive {__version__}")
-        raise typer.Exit()
-
-
-app = typer.Typer(
-    help="本地合同档案库 CLI (MinerU + qwen3.7-max)",
-    context_settings={"help_option_names": ["-h", "--help"]},
-    # 默认 typer 会在 traceback 里 dump 局部变量，可能带出敏感内容，关掉。
-    pretty_exceptions_show_locals=False,
-    epilog=(
-        "示例：\n"
-        "  contract-archive ingest ./input            # 扫描目录入库\n"
-        "  contract-archive list --format json | jq   # 机器可读，管道友好\n"
-        "  contract-archive todo --within-days 30      # 近 30 天待办义务\n"
-        "\n文档：https://github.com/crhan/contract-archive-cli"
-    ),
-)
-app.add_typer(config_app, name="config")
-app.add_typer(party_app, name="party")
-# introspection 命令（capabilities/describe/schema）：给机器发现能力用，见 cli_introspect。
-register_introspect(app)
-
-
-@app.callback()
-def main(
-    version: bool = typer.Option(
-        False,
-        "--version",
-        "-V",
-        is_eager=True,
-        callback=_version_cb,
-        help="打印版本并退出",
-    ),
-    no_color: bool = typer.Option(
-        False, "--no-color", help="禁用彩色输出（管道/日志归档时用）"
-    ),
-    verbose: bool = typer.Option(
-        False, "--verbose", "-v", help="DEBUG 级日志（更啰嗦，排查用）"
-    ),
-    quiet: bool = typer.Option(
-        False, "--quiet", "-q", help="仅 WARNING 及以上（更安静）"
-    ),
-) -> None:
-    """
-    全局选项在所有子命令前生效。flag 优先级高于环境变量：
-      --no-color 覆盖 NO_COLOR/TTY 自动探测；--verbose/--quiet 覆盖 LOG_LEVEL。
-    """
-    # dotenv 放到这里加载——保证 flag 解析后再读 env，且 CONTRACT_ARCHIVE_DIR 等及时可用。
-    # override=False 显式声明：shell 已 export 的变量压过 .env（即 env > 项目 .env），
-    # 与 config 层 env>file>default 的优先级语义一致。
-    load_dotenv(override=False)
-
-    if no_color:
-        console.no_color = True
-        err_console.no_color = True
-
-    # 日志默认 stderr；--verbose/--quiet 胜过 LOG_LEVEL env。
-    if verbose:
-        level = "DEBUG"
-    elif quiet:
-        level = "WARNING"
-    else:
-        level = os.getenv("LOG_LEVEL", "INFO")
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
-
-
-# ---------- 全局 archive 路径解析 ----------
-
-
-def _resolve_archive(archive_opt: Optional[Path]) -> ArchivePaths:
-    """
-    --archive flag > CONTRACT_ARCHIVE_DIR env > config archive.dir > XDG 默认。
-
-    env 与 config 的合并交给 load_settings()（其 archive_dir 已是 env>config 短路结果，
-    env 严格优先、空串当未设），这里只在 flag 之后接住它，再回退 XDG 默认。
-    统一 expanduser：修掉历史上 CONTRACT_ARCHIVE_DIR=~/x 不展开 ~ 的坑。
-    """
-    if archive_opt:
-        root = archive_opt
-    else:
-        configured = load_settings().archive_dir
-        root = Path(configured) if configured else default_archive_root()
-    return ArchivePaths(root=root.expanduser().resolve())
-
-
-_archive_opt = typer.Option(
-    None,
-    "--archive",
-    "-a",
-    help="档案库根目录；不传则用 CONTRACT_ARCHIVE_DIR 或 XDG 默认 ~/.local/share/contract-archive",
-)
-
-
-def _archive_empty(paths: ArchivePaths, fmt: OutputFormat) -> bool:
-    """
-    读命令统一空库守卫。返回 True 表示库不存在、调用方应直接 return。
-      - json 模式：往 stdout 打 `[]`，保证管道消费者（jq）拿到合法 JSON
-      - table 模式：往 stderr 打人类提示，不污染 stdout
-    """
-    if paths.db_path.exists():
-        return False
-    if fmt is OutputFormat.json:
-        print("[]")
-    else:
-        err_console.print(f"[yellow]archive empty: {paths.db_path} not found[/yellow]")
-    return True
-
 
 # ---------- ingest ----------
 
@@ -463,271 +269,6 @@ def _ingest_dry_run(pdfs: list[Path], paths: ArchivePaths, fmt: OutputFormat) ->
         err_console.print(f"  {mark} {f['sha256'][:12]} {f['pdf_path']}")
 
 
-# ---------- list ----------
-
-
-@app.command("list")
-def list_cmd(
-    archive: Optional[Path] = _archive_opt,
-    limit: int = typer.Option(50, "--limit", "-n"),
-    order_by: OrderBy = typer.Option(
-        OrderBy.ingested_at, "--order-by", help="排序字段"
-    ),
-    status: Optional[DocStatus] = typer.Option(
-        None, "--status", help="过滤状态；默认全部"
-    ),
-    doc_type: Optional[DocType] = typer.Option(
-        None, "--type", help="按文档类型过滤"
-    ),
-    incomplete: bool = typer.Option(
-        False, "--incomplete", help="只列疑似不完整的合同（缺签章/缺要素）"
-    ),
-    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
-) -> None:
-    """列出档案库内已索引文档。"""
-    paths = _resolve_archive(archive)
-    if _archive_empty(paths, fmt):
-        return
-    conn = open_archive_db(paths.db_path)
-    rows = list_documents(
-        conn,
-        limit=limit,
-        order_by=order_by.value,
-        status=status.value if status else None,
-        doc_type=doc_type.value if doc_type else None,
-        incomplete=incomplete,
-    )
-    conn.close()
-
-    if fmt is OutputFormat.json:
-        print(_json.dumps([row_to_dict(r) for r in rows], ensure_ascii=False, indent=2))
-        return
-
-    console.print(build_list_table(rows, paths.root))
-
-
-# ---------- search ----------
-
-
-@app.command()
-def search(
-    archive: Optional[Path] = _archive_opt,
-    name: Optional[str] = typer.Option(None, "--name", help="合同名包含（LIKE）"),
-    party: Optional[str] = typer.Option(
-        None, "--party", help="甲方 OR 乙方包含（LIKE）"
-    ),
-    amount_min: Optional[float] = typer.Option(
-        None, "--amount-min", help="金额下限（元）"
-    ),
-    amount_max: Optional[float] = typer.Option(
-        None, "--amount-max", help="金额上限（元）"
-    ),
-    signed_after: Optional[str] = typer.Option(
-        None, "--signed-after", help="签订日 ≥ YYYY-MM-DD"
-    ),
-    signed_before: Optional[str] = typer.Option(
-        None, "--signed-before", help="签订日 ≤ YYYY-MM-DD"
-    ),
-    expire_before: Optional[str] = typer.Option(
-        None, "--expire-before", help="到期日 ≤ YYYY-MM-DD（找快到期）"
-    ),
-    auto_renewal: Optional[bool] = typer.Option(
-        None,
-        "--auto-renewal/--no-auto-renewal",
-        help="是否自动续约",
-    ),
-    has_risk: bool = typer.Option(False, "--has-risk", help="只显示有风险条款的"),
-    deadline_before: Optional[str] = typer.Option(
-        None,
-        "--deadline-before",
-        help="存在 deadline ≤ YYYY-MM-DD 的义务（找近期待办合同）",
-    ),
-    deadline_after: Optional[str] = typer.Option(
-        None, "--deadline-after", help="存在 deadline ≥ YYYY-MM-DD 的义务"
-    ),
-    actor: Optional[Actor] = typer.Option(
-        None, "--actor", help="义务 actor"
-    ),
-    status: Optional[DocStatus] = typer.Option(None, "--status", help="过滤状态"),
-    has_seal: Optional[bool] = typer.Option(
-        None, "--has-seal/--no-seal", help="有/无印章（默认不过滤）"
-    ),
-    seal_owner: Optional[str] = typer.Option(
-        None, "--seal-owner", help="盖章主体包含（LIKE）"
-    ),
-    seal_type: Optional[str] = typer.Option(
-        None, "--seal-type", help="印章类型包含（LIKE），如 合同专用章/公章"
-    ),
-    subject: Optional[str] = typer.Option(
-        None, "--subject", help="主体包含（LIKE），覆盖所有文档类型（含合同甲乙方）"
-    ),
-    limit: int = typer.Option(50, "--limit", "-n"),
-    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
-) -> None:
-    """多字段 AND 过滤查询。"""
-    paths = _resolve_archive(archive)
-    if _archive_empty(paths, fmt):
-        return
-    conn = open_archive_db(paths.db_path)
-    flt = SearchFilter(
-        name=name,
-        party=party,
-        amount_min_cents=int(round(amount_min * 100)) if amount_min is not None else None,
-        amount_max_cents=int(round(amount_max * 100)) if amount_max is not None else None,
-        signed_after=signed_after,
-        signed_before=signed_before,
-        expire_before=expire_before,
-        auto_renewal=auto_renewal,
-        has_risk=has_risk,
-        deadline_before=deadline_before,
-        deadline_after=deadline_after,
-        actor=actor.value if actor else None,
-        status=status.value if status else None,
-        has_seal=has_seal,
-        seal_owner=seal_owner,
-        seal_type=seal_type,
-        subject=subject,
-        limit=limit,
-    )
-    rows = search_documents(conn, flt)
-    conn.close()
-
-    if fmt is OutputFormat.json:
-        print(_json.dumps([row_to_dict(r) for r in rows], ensure_ascii=False, indent=2))
-        return
-
-    console.print(build_search_table(rows))
-
-
-# ---------- show ----------
-
-
-@app.command()
-def show(
-    ident: str = typer.Argument(..., help="档案 id (整数) 或 sha 前缀 (>=4 字符)"),
-    archive: Optional[Path] = _archive_opt,
-    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
-) -> None:
-    """显示单条档案详情。"""
-    paths = _resolve_archive(archive)
-    # show 请求的是具体一条；库不存在/查不到都是错误（exit 1），提示走 stderr。
-    if not paths.db_path.exists():
-        err_console.print(f"[yellow]archive empty: {paths.db_path}[/yellow]")
-        raise typer.Exit(1)
-    conn = open_archive_db(paths.db_path)
-    row = _resolve_ident(conn, ident)
-    conn.close()
-
-    if not row:
-        err_console.print(f"[red]not found: {ident}[/red]")
-        raise typer.Exit(1)
-
-    if fmt is OutputFormat.json:
-        print(_json.dumps(row_to_dict(row), ensure_ascii=False, indent=2))
-        return
-
-    console.print(build_show_table(row))
-
-
-def _resolve_ident(conn, ident: str):
-    """
-    show/extract/delete 共用：ident 可能是 id 或 sha 前缀。
-    消歧规则：
-      - 全数字且 <= 18 位 → 先按 id 查；查不到再按 sha 前缀
-      - 含非数字字符 → 按 sha 前缀（必须 >=4 字符）
-      - sha 前缀多匹配 → 报错列候选
-    """
-    if ident.isdigit() and len(ident) <= 18:
-        try:
-            doc_id = int(ident)
-            row = get_document(conn, doc_id)
-            if row:
-                return row
-        except ValueError:
-            pass
-        # 数字也可能是 sha 前缀（罕见但合法），fallthrough
-    if len(ident) < 4:
-        err_console.print(
-            f"[red]ident {ident!r} 不是有效 id；如要按 sha 前缀查询请提供 ≥4 字符[/red]"
-        )
-        return None
-    matches = find_by_sha_prefix(conn, ident.lower())
-    if not matches:
-        return None
-    if len(matches) > 1:
-        err_console.print(f"[red]sha prefix {ident!r} 命中 {len(matches)} 条，请提供更长前缀：[/red]")
-        for m in matches[:10]:
-            err_console.print(
-                f"  id={m.id} sha={m.short_sha} name={m.contract_name or '-'}"
-            )
-        return None
-    return matches[0]
-
-
-# ---------- raw ----------
-
-
-@app.command()
-def raw(
-    ident: str = typer.Argument(..., help="档案 id (整数) 或 sha 前缀 (>=4 字符)"),
-    archive: Optional[Path] = _archive_opt,
-    color: ColorWhen = typer.Option(
-        ColorWhen.auto, "--color",
-        help="auto=仅 TTY 上色（管道纯文本）| always（配 less -R）| never",
-    ),
-) -> None:
-    """
-    打印文档原文（MinerU OCR 输出的纯文本）到 stdout。
-
-    与 show 互补：show 看 LLM 抽出的结构化字段，raw 看抽取所依据的原始文本——
-    这正是抽取时喂给 LLM 的同一份内容（raw_text.txt，缺失则退回 markdown.md），
-    用于核对抽取结果是否忠于原文。
-
-    交互终端下默认按抽取来源给命中关键字着色（当事人/金额/日期/风险/字段），
-    一眼看出哪些被 LLM 识别到；管道（非 TTY）时输出纯文本，不破坏 raw|grep / raw|less。
-    """
-    paths = _resolve_archive(archive)
-    # 同 show：请求的是具体一条，库不存在/查不到都按错误处理（exit 1），提示走 stderr。
-    if not paths.db_path.exists():
-        err_console.print(f"[yellow]archive empty: {paths.db_path}[/yellow]")
-        raise typer.Exit(1)
-    conn = open_archive_db(paths.db_path)
-    row = _resolve_ident(conn, ident)
-    conn.close()
-
-    if not row:
-        err_console.print(f"[red]not found: {ident}[/red]")
-        raise typer.Exit(1)
-
-    # output_dir 可能为空串（失败入库的记录），Path("")/"mineru" 会落到不存在目录，
-    # load_document_text 返回 ""，统一走下面的"无原文"分支，无需单独判空。
-    mineru_dir = Path(row.output_dir) / "mineru"
-    text = load_document_text(mineru_dir)
-    if not text:
-        err_console.print(
-            f"[red]no OCR text for id={row.id} sha={row.short_sha}: {mineru_dir}[/red]"
-        )
-        raise typer.Exit(1)
-
-    # 上色判定：always 强制；auto 仅当 stdout 是 TTY；never 禁用。
-    # 管道默认纯文本——保住 raw|grep / raw|less 的既有行为（不破坏 userspace）。
-    use_color = color is ColorWhen.always or (
-        color is ColorWhen.auto and sys.stdout.isatty()
-    )
-    if not use_color:
-        print(text)
-        return
-
-    terms = extracted_terms(row)
-    # 图例走 stderr：解释颜色含义，又不污染 stdout 的原文（even with | less -R）。
-    legend = color_legend(terms)
-    if legend and sys.stderr.isatty():
-        print(legend, file=sys.stderr)
-    sys.stdout.write(render_highlighted(text, terms))
-    if not text.endswith("\n"):
-        sys.stdout.write("\n")
-
-
 # ---------- extract ----------
 
 
@@ -762,49 +303,6 @@ def extract(
         print(_json.dumps(ingest_result_to_dict(result), ensure_ascii=False, indent=2))
     else:
         _print_ingest_result(result)
-
-
-# ---------- stats ----------
-
-
-@app.command()
-def stats(
-    archive: Optional[Path] = _archive_opt,
-    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
-) -> None:
-    """档案库统计：总数 / status 分布 / 按月签订分布 / 近 30 天到期数。"""
-    paths = _resolve_archive(archive)
-    # 库不存在 = 零文档档案：合成零值 Stats，走同一条渲染路径，
-    # 不为"空库"单开分支——json 形状始终是对象（不会退化成 list 的 []）。
-    if paths.db_path.exists():
-        conn = open_archive_db(paths.db_path)
-        s = collect_stats(conn)
-        conn.close()
-    else:
-        s = Stats(
-            total=0, by_status={}, by_sign_month={},
-            new_this_month=0, expiring_within_30d=0,
-        )
-
-    if fmt is OutputFormat.json:
-        print(_json.dumps(asdict(s), ensure_ascii=False, indent=2))
-        return
-
-    table = Table(title=f"Archive Stats · {paths.root}")
-    table.add_column("metric", style="cyan")
-    table.add_column("value")
-    table.add_row("total", str(s.total))
-    table.add_row(
-        "by_status",
-        ", ".join(f"{k}={v}" for k, v in sorted(s.by_status.items())) or "-",
-    )
-    table.add_row("new_this_month", str(s.new_this_month))
-    table.add_row("expiring_within_30d", str(s.expiring_within_30d))
-    table.add_row(
-        "by_sign_month",
-        "\n".join(f"{m}: {c}" for m, c in s.by_sign_month.items()) or "-",
-    )
-    console.print(table)
 
 
 # ---------- delete ----------
@@ -872,150 +370,6 @@ def delete(
     err_console.print(f"[green]✓ deleted DB row id={row.id}[/green]")
 
 
-# ---------- todo ----------
-
-
-@app.command()
-def todo(
-    archive: Optional[Path] = _archive_opt,
-    actor: Optional[Actor] = typer.Option(
-        None, "--actor", help="义务 actor"
-    ),
-    before: Optional[str] = typer.Option(
-        None, "--before", help="deadline ≤ YYYY-MM-DD"
-    ),
-    after: Optional[str] = typer.Option(
-        None, "--after", help="deadline ≥ YYYY-MM-DD"
-    ),
-    include_undated: bool = typer.Option(
-        False, "--include-undated", help="同时显示无 deadline 的义务"
-    ),
-    within_days: Optional[int] = typer.Option(
-        None,
-        "--within-days",
-        help="便捷选项：deadline 在今天到 N 天内（等价于 --after today --before today+N）",
-    ),
-    limit: int = typer.Option(50, "--limit", "-n"),
-    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
-) -> None:
-    """
-    跨合同列出待办义务（"催办看板"）。按 deadline 升序。
-
-    用例：
-      contract-archive todo --within-days 30           本月需要做的事
-      contract-archive todo --actor party_b            乙方所有待办
-      contract-archive todo --actor party_a --before 2026-12-31
-      contract-archive todo --include-undated          含无日期的（如"签订当日支付定金"）
-    """
-    from datetime import date, timedelta
-
-    if within_days is not None:
-        today = date.today().isoformat()
-        before = before or (date.today() + timedelta(days=within_days)).isoformat()
-        after = after or today
-
-    paths = _resolve_archive(archive)
-    if _archive_empty(paths, fmt):
-        return
-    conn = open_archive_db(paths.db_path)
-    items = list_obligations(
-        conn,
-        actor=actor.value if actor else None,
-        before=before,
-        after=after,
-        include_undated=include_undated,
-        limit=limit,
-    )
-    conn.close()
-
-    if fmt is OutputFormat.json:
-        print(
-            _json.dumps(
-                [
-                    {
-                        "doc_id": it.doc_id,
-                        "contract_name": it.contract_name,
-                        "actor": it.actor,
-                        "action": it.action,
-                        "deadline": it.deadline,
-                        "evidence": it.evidence,
-                    }
-                    for it in items
-                ],
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
-        return
-
-    table = Table(title=f"Todo · {len(items)} obligation(s)")
-    table.add_column("deadline", style="cyan")
-    table.add_column("actor")
-    table.add_column("action", overflow="fold")
-    table.add_column("contract", overflow="fold", style="dim")
-    table.add_column("doc", justify="right", style="dim")
-    actor_label = {"party_a": "甲方", "party_b": "乙方", "both": "双方"}
-    for it in items:
-        deadline = it.deadline or "[dim]无日期[/dim]"
-        table.add_row(
-            deadline,
-            actor_label.get(it.actor, it.actor),
-            it.action,
-            it.contract_name or "-",
-            f"#{it.doc_id}",
-        )
-    console.print(table)
-
-
-# ---------- seals ----------
-
-
-@app.command("seals")
-def seals_cmd(
-    archive: Optional[Path] = _archive_opt,
-    owner: Optional[str] = typer.Option(None, "--owner", help="盖章主体包含（LIKE）"),
-    seal_type: Optional[str] = typer.Option(
-        None, "--type", help="印章类型包含（LIKE），如 合同专用章/公章"
-    ),
-    limit: int = typer.Option(200, "--limit", "-n"),
-    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
-) -> None:
-    """
-    跨文档列印章：某主体有哪些章、各出现在哪些文档（按主体/类型聚合阅读）。
-
-    用例：
-      contract-archive seals                  全部印章
-      contract-archive seals --owner 示例公司   某公司的章
-      contract-archive seals --type 合同专用章
-    """
-    paths = _resolve_archive(archive)
-    if _archive_empty(paths, fmt):
-        return
-    conn = open_archive_db(paths.db_path)
-    rows = list_seals(conn, owner=owner, seal_type=seal_type, limit=limit)
-    conn.close()
-
-    if fmt is OutputFormat.json:
-        print(_json.dumps(seal_rows_to_dict(rows), ensure_ascii=False, indent=2))
-        return
-
-    table = Table(title=f"Seals · {len(rows)} 枚")
-    table.add_column("owner", overflow="fold", style="magenta")
-    table.add_column("type")
-    table.add_column("raw_text", overflow="fold", style="dim")
-    table.add_column("doc", overflow="fold")
-    table.add_column("id", justify="right", style="dim")
-    for r in rows:
-        table.add_row(
-            r.owner or "?",
-            r.seal_type or "-",
-            r.raw_text,
-            r.title or "-",
-            f"#{r.doc_id}",
-        )
-    console.print(table)
-
-
 # ---------- vacuum ----------
 
 
@@ -1033,6 +387,18 @@ def vacuum(archive: Optional[Path] = _archive_opt) -> None:
     checkpoint(conn)
     conn.close()
     err_console.print("[green]✓ done[/green]")
+
+
+# ---------- 组装：挂上只读命令、子 app、introspection ----------
+#
+# import cli_query 仅为触发其 @app.command 注册（它只依赖 cli_common，不回头 import 本
+# 模块，无循环）。放写命令之后，让 --help 里 ingest 等写命令仍排在前、贴近历史顺序。
+from . import cli_query  # noqa: E402,F401
+
+app.add_typer(config_app, name="config")
+app.add_typer(party_app, name="party")
+# introspection 命令（capabilities/describe/schema）：给机器发现能力用，见 cli_introspect。
+register_introspect(app)
 
 
 if __name__ == "__main__":
