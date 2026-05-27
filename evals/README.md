@@ -107,11 +107,14 @@ contract-archive show <doc_id>                                          # 肉眼
 uv run --no-sync python -m evals.make_gold                          # 全部已入库文档
 uv run --no-sync python -m evals.make_gold --doc-id <id>            # 单个
 uv run --no-sync python -m evals.make_gold --crosscheck deepseek-v4-pro  # 加异家族交叉抽取
+uv run --no-sync python -m evals.make_gold --scrub-income            # 证明类金额去真值（随机千万级）
 ```
 
-- **数据源**：复用 `_load_document_text`（= 生产喂 extract_document 的同一文本），免重新 OCR/LLM。
-- **脱敏**：LLM 为主（识别上下文人名/中英文机构名/各类号码）+ 正则兜底（身份证/手机/座机/邮编）。
-  每份再跑残留启发式扫描，把可疑 token 写进 `SCAN.txt`。
+- **数据源**：复用 `load_document_text`（= 生产喂 extract_document 的同一文本），免重新 OCR/LLM。
+- **脱敏**：LLM 为主（识别上下文人名/中英文机构名/**楼盘项目名/省市区**/各类号码）+ 正则兜底
+  （身份证/手机/座机/邮编）。每份再跑残留启发式扫描，把可疑 token 写进 `SCAN.txt`。
+- **`--scrub-income`**：对 doc_type=证明 把金额整体按随机系数缩放到千万级（保内部关系：月均≈年度/12、
+  合计=各分量之和），同时清掉 summary/title/fields 里的真实收入阿拉伯数字——收入/薪资本身敏感，去真值。
 - **脱敏不保证完整**（实测仍可能漏 14 位号码片段、罕见写法）。所以产物是 **DRAFT、只进 gitignored
   `cases_private/`**，每份带 `REVIEW.md`：人工①通读确认无残留真实 PII、②对照原文**盲标** parties/
   amounts/issues（破 champion 盲区），确认后才手动复制到可提交的 `cases/extraction/`。

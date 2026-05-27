@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import random
 import re
 from pathlib import Path
 from typing import Any, Optional
@@ -40,6 +41,8 @@ DEID_PROMPT = """你是严谨的脱敏助手。下面是一份文档的文本，
 需脱敏（给占位符，同一实体全文用同一占位）：
 - 人名 → 张三、李四、王五、赵六、孙七…（按出现顺序）
 - 公司/机构/品牌名（**中文与英文都要**，如 EXAMPLE GROUP、示例集团）→ 示例置业有限公司、示例科技有限公司…
+- 楼盘/小区/项目/园区/大厦名（如 示例花园、XX花园、XX苑、XX大厦）→ 示例花园、示例苑、示例大厦…
+- 省/市/区/县等具体行政区划名（如 示例省、示例市、示例区）→ 示例省、示例市、示例区
 - 身份证号 → 3301xxxxxxxxxxxxxx
 - 手机号 → 138xxxxxxxx
 - 座机/传真/分机号（含区号与分机）→ 0000-0000000
@@ -224,6 +227,112 @@ def residual_flags(text: str) -> list[str]:
     return sorted(flags)
 
 
+# ---- 整数 → 人民币中文大写（用于 --scrub-income 重写金额）----
+_CAP_DIGITS = "零壹贰叁肆伍陆柒捌玖"
+_CAP_SMALL = ["仟", "佰", "拾", ""]   # 千百十个对应 仟佰拾
+
+
+def _cap_four(n: int) -> str:
+    """0..9999 → 大写（含组内零处理，如 1106→壹仟壹佰零陆）。"""
+    res, zero_pending, started = "", False, False
+    for i, u in enumerate([1000, 100, 10, 1]):
+        digit = (n // u) % 10
+        if digit == 0:
+            if started:
+                zero_pending = True
+        else:
+            if zero_pending:
+                res += _CAP_DIGITS[0]
+                zero_pending = False
+            res += _CAP_DIGITS[digit] + _CAP_SMALL[i]
+            started = True
+    return res
+
+
+def int_to_cap(n: int) -> str:
+    """非负整数 → 人民币中文大写（万/亿分组 + 组间补零，如 12480360→壹仟贰佰肆拾捌万零叁佰陆拾）。"""
+    if n == 0:
+        return "零"
+    parts, gi, units = [], 0, ["", "万", "亿"]
+    while n > 0:
+        g, higher = n % 10000, n // 10000
+        if g != 0:
+            prefix = "零" if (g < 1000 and higher > 0) else ""
+            parts.append(prefix + _cap_four(g) + units[gi])
+        n = higher
+        gi += 1
+    return "".join(reversed(parts))
+
+
+def scrub_income_amounts(env_json: dict, text: str, seed: Optional[int] = None
+                         ) -> tuple[dict, str, bool]:
+    """
+    仅对 doc_type=证明：把金额整体按随机系数缩放到千万级（保内部关系：月均≈年度/12、
+    各分量比例不变），input.txt 与 gold 一致重写。收入/薪资本身敏感，--scrub-income 用它去真值。
+
+    缩放而非独立随机：保住"月均=年度/12""合计=各分量之和"等关系，避免造出自相矛盾的 case。
+    返回 (env_json, text, 是否改动)。非证明 / 无金额则原样返回。
+    """
+    if env_json.get("doc_type") != "证明":
+        return env_json, text, False
+    amounts = env_json.get("amounts") or []
+    vals = [a["value"] for a in amounts if isinstance(a.get("value"), (int, float))]
+    primary = env_json.get("primary_amount_value")
+    base = primary if isinstance(primary, (int, float)) and primary else (max(vals) if vals else 0)
+    if not base:
+        return env_json, text, False
+
+    rng = random.Random(seed)
+    factor = rng.randrange(12_000_000, 60_000_001) / base   # 把基准金额映到千万级
+
+    def rebuilt(old_text: str, value: int) -> str:
+        prefix = "人民币 " if str(old_text).startswith("人民币 ") else \
+            ("人民币" if str(old_text).startswith("人民币") else "")
+        return prefix + int_to_cap(value) + "元整"
+
+    # 先据旧值建「大写 + 阿拉伯」双替换映射，再更新结构化字段，最后全局套用——
+    # 收入常被 LLM 写进 summary/title/fields 的阿拉伯数字里，只改 amounts 会漏（实测 5907）。
+    cap_repls: list[tuple[str, str]] = []   # (旧大写, 新大写)
+    num_repls: set[tuple[int, int]] = set()  # (旧整数, 新整数)
+    for a in amounts:
+        v = a.get("value")
+        if not isinstance(v, (int, float)):
+            continue
+        nv = round(v * factor)
+        if a.get("text"):
+            cap_repls.append((a["text"], rebuilt(a["text"], nv)))
+        num_repls.add((int(v), nv))          # int(v) 取整数部分，匹配文中 "621106.71" 的整数段
+        a["value"], a["text"] = float(nv), rebuilt(a.get("text", ""), nv)
+    if isinstance(primary, (int, float)) and primary:
+        npv = round(primary * factor)
+        num_repls.add((int(primary), npv))
+        env_json["primary_amount_value"] = float(npv)
+        env_json["primary_amount_text"] = rebuilt(env_json.get("primary_amount_text", ""), npv)
+    env_json["computed_total_value"] = float(
+        sum(a["value"] for a in amounts if a.get("is_total_component")))
+
+    cap_sorted = sorted(cap_repls, key=lambda x: len(x[0]), reverse=True)
+    num_sorted = sorted(num_repls, key=lambda x: x[0], reverse=True)
+
+    def apply_all(s: str) -> str:
+        for old, new in cap_sorted:
+            s = s.replace(old, new)
+        for oldn, newn in num_sorted:        # 阿拉伯：整数 + 可选小数，非数字边界防误伤
+            s = re.sub(rf"(?<!\d){oldn}(\.\d+)?(?!\d)", str(newn), s)
+        return s
+
+    def walk(o: Any) -> Any:
+        if isinstance(o, str):
+            return apply_all(o)
+        if isinstance(o, list):
+            return [walk(x) for x in o]
+        if isinstance(o, dict):
+            return {k: walk(v) for k, v in o.items()}
+        return o
+
+    return walk(env_json), apply_all(text), True
+
+
 def iter_archive_docs(archive_dir: Path, only: Optional[str]) -> list[tuple[str, Path, Path]]:
     """列出 archive 里有 mineru/ + extraction_result.json 的文档 → (doc_id, mineru_dir, result_json)。"""
     docs_dir = archive_dir / "documents"
@@ -287,6 +396,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--deid-model", default=None, help="LLM 脱敏所用模型（默认 settings 的文本模型）")
     ap.add_argument("--no-llm-deid", action="store_true",
                     help="只用规则脱敏，不调 LLM（残留风险更高，不建议）")
+    ap.add_argument("--scrub-income", action="store_true",
+                    help="对 doc_type=证明 的金额按随机千万级整体缩放去真值（保内部关系）")
     args = ap.parse_args(argv)
 
     archive_dir = args.archive_dir
@@ -314,6 +425,8 @@ def main(argv: list[str] | None = None) -> int:
         deid_gold = deidentify_json(json.loads(result_path.read_text(encoding="utf-8")), mapping)
         deid_gold["llm_model"] = None  # gold 不带抽取来源
         deid_gold["llm_usage"] = None
+        if args.scrub_income:           # 证明类金额去真值（随机千万级，保内部关系）
+            deid_gold, deid_text, _ = scrub_income_amounts(deid_gold, deid_text)
 
         crosscheck = None
         if args.crosscheck:
