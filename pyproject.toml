@@ -26,6 +26,9 @@ dependencies = [
 # MinerU 3.x —— 体积大（>1GB 模型），按需 `uv sync --extra mineru` 安装
 mineru = [
     "mineru[core]>=3.1,<4.0",
+    # mineru 自身漏声明：pipeline backend 的 unet 表格识别 import scipy.spatial.distance
+    # （mineru/model/table/rec/unet_table/utils_table_line_rec.py），缺则 mineru 子进程直接退出
+    "scipy>=1.10",
 ]
 
 dev = [
