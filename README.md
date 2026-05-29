@@ -60,7 +60,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 注意是 ".[mineru]"（项目的 mineru extra = mineru[core]，含 torch 等模型依赖）。
 # 不要用 `--with mineru`——裸 mineru 不带 [core]，装出来的工具跑 ingest 会
 # ModuleNotFoundError: No module named 'torch'。
-UV_LINK_MODE=copy uv tool install --force "/path/to/contract-archive-cli[mineru]"
+# 用 --reinstall 而非 --force：版本号没变时 --force 会命中 uv 缓存里的旧 wheel，
+# 把过时代码装进去（实测会停在旧版本）；--reinstall 强制重建，更新才可靠。
+UV_LINK_MODE=copy uv tool install --reinstall "/path/to/contract-archive-cli[mineru]"
 ```
 
 `uv tool install` 会在 `~/.local/bin/contract-archive` 装独立 venv（与项目 venv 隔离）。
@@ -76,6 +78,17 @@ contract-archive ingest ~/Documents/new_contract.pdf --archive ~/contracts
 ```
 
 `DASHSCOPE_API_KEY` 需通过 shell env 提供（建议放进 `~/.zshrc` 或专用 shell wrapper）。
+
+**开发者（改了源码要即时生效）**：加 `--editable`，全局命令指向本仓库源码而非快照——
+改完 `.py` 直接生效，不必每次重装：
+
+```bash
+UV_LINK_MODE=copy uv tool install --editable --reinstall "/path/to/contract-archive-cli[mineru]"
+```
+
+> 不加 `--editable` 装的是「当下代码的快照」：之后改了源码、或仓库升了版本，都得
+> 重新 `--reinstall` 才更新。如果发现 `contract-archive --version` 跟仓库 `pyproject.toml`
+> 对不上，多半就是装了旧快照——重装即可。
 
 卸载：
 
