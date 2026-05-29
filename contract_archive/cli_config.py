@@ -20,6 +20,7 @@ err_console = Console(stderr=True)
 config_app = typer.Typer(
     help="查看/设置全局配置（XDG ~/.config/contract-archive/config.json）",
     pretty_exceptions_show_locals=False,
+    no_args_is_help=True,  # clig.dev：裸 `config` 列出 show/set/unset，而非报 Missing command
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 

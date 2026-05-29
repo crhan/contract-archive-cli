@@ -25,6 +25,7 @@ err_console = Console(stderr=True)
 party_app = typer.Typer(
     help="管理 known_parties 身份基准库（主体固有标识的跨文档核对基准）",
     pretty_exceptions_show_locals=False,
+    no_args_is_help=True,  # clig.dev：裸 `party` 列出 list/show/set/rm，而非报 Missing command
     context_settings={"help_option_names": ["-h", "--help"]},
 )
 
