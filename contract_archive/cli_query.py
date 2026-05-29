@@ -41,6 +41,7 @@ from .cli_common import (
     _resolve_archive,
     _resolve_ident,
     app,
+    color_disabled,
     console,
     err_console,
 )
@@ -266,10 +267,11 @@ def raw(
         )
         raise typer.Exit(1)
 
-    # 上色判定：always 强制；auto 仅当 stdout 是 TTY；never 禁用。
+    # 上色判定：always 强制（显式逃生口，压过 NO_COLOR）；auto 仅当 stdout 是 TTY
+    # 且未被全局禁色（--no-color / NO_COLOR）；never 禁用。
     # 管道默认纯文本——保住 raw|grep / raw|less 的既有行为（不破坏 userspace）。
     use_color = color is ColorWhen.always or (
-        color is ColorWhen.auto and sys.stdout.isatty()
+        color is ColorWhen.auto and sys.stdout.isatty() and not color_disabled()
     )
     if not use_color:
         print(text)

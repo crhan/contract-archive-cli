@@ -8,13 +8,13 @@
 from __future__ import annotations
 
 import typer
-from rich.console import Console
 from rich.table import Table
 
+# 复用 cli_common 的全局 console（别各建实例）：全局 --no-color 在 callback 里只改 cli_common
+# 那对实例，子组自建 Console 会让 --no-color 对 config 命令全失效。cli_common 是叶子模块，
+# import 它不成环（cli_query 已用同款）。
+from .cli_common import console, err_console
 from .config import config_path, find_key, set_value, unset_value, visible_items
-
-console = Console()
-err_console = Console(stderr=True)
 
 # pretty_exceptions_show_locals=False：防 traceback 把 api_key 等局部变量 dump 到终端。
 config_app = typer.Typer(

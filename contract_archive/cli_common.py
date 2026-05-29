@@ -99,6 +99,17 @@ console = Console()                    # 主数据：表格 + JSON
 err_console = Console(stderr=True)      # 人类消息：状态/进度/错误/确认
 
 
+def color_disabled() -> bool:
+    """
+    全局是否应禁用颜色：--no-color flag（落到 console.no_color）或 NO_COLOR 环境变量。
+
+    rich console 自身已尊重 NO_COLOR + 被 callback 的 --no-color 置过 no_color；但 raw 命令的
+    高亮不经 console（直写 ANSI 转义码），故需显式查这个开关。NO_COLOR 规范：非空即禁用
+    （空串不算），故 bool(os.environ.get("NO_COLOR")) 恰好对（空串 falsy）。
+    """
+    return bool(console.no_color) or bool(os.environ.get("NO_COLOR"))
+
+
 def _version_cb(value: bool) -> None:
     """--version 的 eager 回调：版本号打到 stdout（机器可消费），随即退出。"""
     if value:

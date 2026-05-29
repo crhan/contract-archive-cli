@@ -11,15 +11,13 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-from rich.console import Console
 from rich.table import Table
 
 from .archive.party_registry import PartyRegistry
 from .archive.paths import ArchivePaths, default_archive_root
+# 复用 cli_common 的全局 console（理由同 cli_config）：自建实例会让全局 --no-color 失效。
+from .cli_common import console, err_console
 from .config import load_settings
-
-console = Console()
-err_console = Console(stderr=True)
 
 # pretty_exceptions_show_locals=False：防 traceback 把 PII 等局部变量 dump 到终端。
 party_app = typer.Typer(
