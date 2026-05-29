@@ -16,7 +16,7 @@
 ## ✦ 数据流
 
 ```
-PDF ─► sha256 去重 ─► MinerU 解析 ─► LLM 判类型 + 抽字段（合同再走 hybrid）
+PDF ─► sha256 去重 ─► MinerU 解析 ─► LLM 判类型 + 抽字段（合同走专属 prompt，纯 LLM）
                                           │
               ┌───────────────────────────┴──┐
               ▼                              ▼
@@ -70,26 +70,52 @@ UV_LINK_MODE=copy uv tool install --force "/path/to/contract-archive-cli[mineru]
 # 用环境变量指定档案库
 CONTRACT_ARCHIVE_DIR=~/contracts contract-archive list
 
-# 或显式 --archive
-contract-archive --archive ~/contracts list
-contract-archive --archive ~/contracts ingest ~/Documents/new_contract.pdf
+# 或显式 --archive（per-command 选项，放在子命令之后）
+contract-archive list --archive ~/contracts
+contract-archive ingest ~/Documents/new_contract.pdf --archive ~/contracts
 ```
 
 `DASHSCOPE_API_KEY` 需通过 shell env 提供（建议放进 `~/.zshrc` 或专用 shell wrapper）。
 
-## ✦ 配置
+卸载：
 
 ```bash
+uv tool uninstall contract-archive-cli
+# 数据/配置不随之删除，需手动清理：
+#   ~/.local/share/contract-archive   档案库数据（db.sqlite + documents/）
+#   ~/.config/contract-archive        config.json
+```
+
+## ✦ 配置
+
+两种方式，优先级 **环境变量(含 .env) > config 文件 > 默认值**：
+
+```bash
+# 方式一：config 命令（落 ~/.config/contract-archive/config.json，权限 0600，比项目 .env 更安全）
+contract-archive config set dashscope.api_key sk-xxx
+contract-archive config show              # 看各项当前生效值与来源（secret 默认掩码）
+contract-archive config show --format json   # 机读：含 key/env/secret/default/value/source
+contract-archive config unset dashscope.api_key
+
+# 方式二：项目 .env（老方式，仍支持）
 cp .env.example .env
 $EDITOR .env   # 填入 DASHSCOPE_API_KEY
 ```
 
-| 字段 | 说明 |
-| --- | --- |
-| `DASHSCOPE_API_KEY` | 必填。[百炼控制台](https://dashscope.console.aliyun.com/) 申请 |
-| `DASHSCOPE_LLM_MODEL` | 默认 `qwen3.7-max`（用户百炼账户的特定别名；若 404 换 `qwen-max` / `qwen3-max`） |
-| `CONTRACT_ARCHIVE_DIR` | 档案库根目录，默认 XDG `~/.local/share/contract-archive`；CLI `--archive` 优先 |
-| `COMPUTE_DEVICE` | `auto` / `mps` / `cuda` / `cpu`（MinerU 走子进程，主要影响其内部 backend 选择） |
+| 环境变量 | config 键 | 说明 |
+| --- | --- | --- |
+| `DASHSCOPE_API_KEY` | `dashscope.api_key` | 必填。[百炼控制台](https://dashscope.console.aliyun.com/) 申请 |
+| `DASHSCOPE_LLM_MODEL` | `dashscope.model` | 默认 `qwen3.7-max`（用户百炼账户的特定别名；若 404 换 `qwen-max` / `qwen3-max`） |
+| `DASHSCOPE_BASE_URL` | `dashscope.base_url` | 默认 `https://dashscope.aliyuncs.com/api/v1`；海外换 `https://dashscope-intl.aliyuncs.com/api/v1` |
+| `DASHSCOPE_VL_MODEL` | `dashscope.vl_model` | 签章核查视觉模型，默认 `qwen3.6-flash` |
+| `CONTRACT_ARCHIVE_DIR` | `archive.dir` | 档案库根目录，默认 XDG `~/.local/share/contract-archive`；CLI `--archive` 优先 |
+| `COMPUTE_DEVICE` | — | `auto` / `mps` / `cuda` / `cpu`（MinerU 走子进程，主要影响其内部 backend 选择） |
+| `LOG_LEVEL` | — | `DEBUG`/`INFO`/`WARNING`/...，默认 `INFO`；`--verbose`/`--quiet` 覆盖之 |
+| `DASHSCOPE_TIMEOUT_S` | — | LLM/VL 调用超时秒数，默认 `300` |
+| `CONTRACT_ARCHIVE_MINERU_TIMEOUT_S` | — | MinerU 子进程解析超时秒数，默认 `1800` |
+| `MINERU_MODEL_SOURCE` | — | MinerU 模型源，默认 `modelscope`（国内快）；海外可 export `huggingface` |
+
+> 标 `—` 的是运行时旋钮，保持 env-only、不进 config 文件层。
 
 ## ✦ 用法
 
@@ -100,7 +126,7 @@ uv run contract-archive ingest path/to/合同.pdf
 # 批量入库整个目录（递归扫 *.pdf，sha256 去重）
 uv run contract-archive ingest ~/Documents/contracts/
 
-# 调试：只跑 rule 抽取跳过 LLM（不需要 API key）
+# 跳过 LLM（无 API key 时也用）：仅入库 MinerU 产物，抽取字段留空，可后续 extract 补抽
 uv run contract-archive ingest path/to/合同.pdf --no-llm
 
 # 强制重跑（已 ingest 过的也再跑一遍，覆盖旧记录）
@@ -108,6 +134,11 @@ uv run contract-archive ingest path/to/合同.pdf --reingest
 
 # 试跑前 3 个
 uv run contract-archive ingest ~/Documents/contracts/ --limit 3
+
+# 成本/进度（agent 友好）
+uv run contract-archive ingest ~/Documents/contracts/ --dry-run        # 只预览扫到几个、预计几次 API 调用，不建库不烧钱
+uv run contract-archive ingest ~/Documents/contracts/ --max-files 20   # 超 20 个直接报错退出，防误喂大目录
+uv run contract-archive ingest ~/Documents/contracts/ --progress ndjson  # 每文件一行 JSON 事件，供 agent 流式消费
 ```
 
 ### 查询
@@ -189,7 +220,7 @@ LLM 跑挂或想升级 prompt 后批量再抽取——不重跑 MinerU：
 
 ```bash
 uv run contract-archive extract 5            # 复跑 id=5 的抽取
-uv run contract-archive extract 5 --no-llm   # 只跑 rule
+uv run contract-archive extract 5 --no-llm   # 跳过 LLM（抽取字段留空，rule 已退役）
 ```
 
 ### 统计与维护
@@ -203,6 +234,27 @@ uv run contract-archive vacuum               # 大批量 ingest 后整理碎片
 
 > **注意**：`delete` 不会删用户原 PDF 文件——`source_path` 字段记录的是入库时
 > 的源路径，源文件归用户所有。
+
+### 印章总览
+
+```bash
+uv run contract-archive seals                      # 跨文档列全部印章
+uv run contract-archive seals --seal-owner 示例公司   # 某主体的章（--owner 同义）
+uv run contract-archive seals --seal-type 合同专用章   # 按印章类型（--type 同义）
+```
+
+### 机器发现 / agent 接入
+
+把本 CLI 包成 MCP / OpenAI tool，或让 agent 自动调用时，用这几个命令免去硬编码——输出皆 JSON：
+
+```bash
+uv run contract-archive capabilities          # 全部命令 + 副作用/破坏性/幂等元数据
+uv run contract-archive describe ingest       # 单命令参数 schema（名称/类型/必填/默认/可选值）
+uv run contract-archive schema document        # 核心数据结构 JSON Schema（document/contract/confidence/error）
+```
+
+数据命令（list/search/show/stats/todo/seals/party/extract/ingest）都支持 `--format json`，
+stdout 纯净可 `| jq`；失败结果带结构化 `error`（`code`/`category`/`retryable`），供 agent 判是否重试。
 
 ## ✦ 档案库目录结构
 
@@ -221,7 +273,7 @@ archive/
         │   ├── raw_text.txt
         │   ├── pipeline_meta.json
         │   └── preview_images/
-        ├── extracted.json        # 抽取字段
+        ├── extraction_result.json    # 抽取字段（通用信封）
         ├── extraction_confidence.json
         └── ingest.log            # 单合同 stderr
 ```
@@ -251,20 +303,31 @@ contract-archive-cli/
 │   ├── setup.sh
 │   └── run_sample.sh
 ├── contract_archive/
-│   ├── cli.py              # contract-archive 入口
-│   ├── schemas/            # pydantic schema（BBox/LayoutBlock/ContractExtraction 等）
+│   ├── cli.py              # 入口 main_entry + 写命令 ingest/extract/delete/vacuum + 组装
+│   ├── cli_common.py       # app 实例 + 全局 callback + 参数 Enum + 双 console + 路径/ident 解析
+│   ├── cli_query.py        # 只读命令 list/search/show/raw/stats/todo/seals
+│   ├── cli_config.py       # config show/set/unset 子命令组
+│   ├── cli_party.py        # party list/show/set/rm（known_parties PII 基准库）
+│   ├── cli_introspect.py   # capabilities/describe/schema 机器发现命令
+│   ├── cli_render.py       # 纯渲染层（Table / JSON dict / raw 高亮）
+│   ├── schemas/            # pydantic schema（BBox/LayoutBlock/DocumentExtraction 等）
 │   ├── pipelines/
 │   │   └── mineru_pipeline.py   # MinerU subprocess 调用 + 坐标归一化 + markdown 清洗
-│   ├── extraction/
-│   │   ├── rule_extractor.py    # 正则抽取
-│   │   ├── llm_extractor.py     # qwen3.7-max
-│   │   └── hybrid.py            # rule + LLM 字段级合并
+│   ├── extraction/              # 纯 LLM 抽取（rule/hybrid 自 Phase 2 退役）
+│   │   ├── document_extractor.py  # 通用文档判类型 + 抽信封
+│   │   ├── contract_extractor.py  # 合同专属字段（专属 prompt）
+│   │   ├── llm_extractor.py        # DashScope OpenAI 兼容口调用
+│   │   ├── vision_seal.py          # 落款页 VL 签章核查
+│   │   ├── normalize.py / amount_check.py / evidence_page_fix.py / property_fee.py
 │   ├── archive/
 │   │   ├── db.py                # SQLite 连接 + migrations 引擎
 │   │   ├── repository.py        # DAO + 搜索查询构造
 │   │   ├── ingest.py            # 入库流水线（hash → MinerU → extract → rename → DB）
+│   │   ├── party_registry.py    # known_parties 身份基准库
 │   │   ├── paths.py             # 档案库路径约定 + 硬链接工具
-│   │   └── migrations/001_init.sql
+│   │   └── migrations/          # 001_init … 005_completeness（5 个）
+│   ├── errors.py               # 结构化错误模型（code/category/retryable）
+│   ├── config.py               # XDG 配置 + env>file>default
 │   └── utils/                   # 设备选择 / PyMuPDF PDF 渲染
 ├── archive/                # 档案库数据（gitignored）
 ├── input/                  # 用户放待处理 PDF
@@ -274,7 +337,7 @@ contract-archive-cli/
 ## ✦ 设计纪律
 
 - **统一 schema**：MinerU 的 0-1000 归一化坐标全部反算成 PDF point；markdown 反斜杠转义在喂给抽取层前清洗
-- **rule + LLM hybrid**：字段级合并策略（金额/日期信 rule 原文证据，实体名信 LLM 规整），每字段附 `value_source`（rule/llm/merged/missing）+ 置信度
+- **纯 LLM 抽取**：自 Phase 2 退役 rule/hybrid，字段全由 LLM 抽取；每字段附 `value_source`（仅 `llm`/`missing`）+ 置信度。死代码 rule 仅保留为确定性数值归一化（中文大写金额→数值、日期→ISO）
 - **API key 不出包**：仅从 env 读，日志不打印响应体
 - **sha256 去重**：流式 hash 后查 UNIQUE 索引；命中即 skip 避免 MinerU 跑一次几分钟才发现重复
 - **事务边界**：tmp 目录跑全 → `os.rename` 到 documents/ → DB INSERT；任一阶段失败回滚干净，DB 不留半成品

@@ -119,7 +119,7 @@ def _version_cb(value: bool) -> None:
 
 
 app = typer.Typer(
-    help="本地合同档案库 CLI (MinerU + qwen3.7-max)",
+    help="本地文档档案库 CLI（合同/证明/发票等，MinerU + qwen3.7-max）",
     # clig.dev：无参数应展示帮助，而非报 "Missing command" 错误框。
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
