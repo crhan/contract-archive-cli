@@ -8,6 +8,7 @@ from contract_archive.archive.party_registry import (
     _canon,
     _canon_name,
     _is_strong_label,
+    group_by_value,
 )
 from contract_archive.schemas import LabeledValue, PersonIdentity
 
@@ -156,3 +157,36 @@ def test_is_strong_label():
         assert _is_strong_label(lab)
     for lab in ("电话", "开户行", "地址", "职位"):
         assert not _is_strong_label(lab)
+
+
+# ---- 展示折叠：同值多 label 合并（治 party list/show 里同号被不同 label 重复堆叠）----
+
+
+def test_group_by_value_merges_same_number_under_different_labels():
+    """同一个号被两份文档写成『电话』『联系电话』→ 折叠成一行『电话/联系电话』，rec 取首个基准。"""
+    ids = {
+        "身份证号": {"value": "110101199001011234", "first_seen_doc": "docA"},
+        "电话": {"value": "139 1234 5678", "first_seen_doc": "docA"},   # 带空格，canon 后与下行相等
+        "联系电话": {"value": "13912345678", "first_seen_doc": "docB"},
+    }
+    rows = group_by_value(ids)
+    assert [label for label, _ in rows] == ["身份证号", "电话/联系电话"]
+    # 折叠组取首个出现的 rec（即基准首见那条），不被后见的 docB 顶掉
+    assert dict(rows)["电话/联系电话"]["first_seen_doc"] == "docA"
+
+
+def test_group_by_value_keeps_distinct_numbers_separate():
+    """公司总机 vs 联系人线是两个真不同的号 → 各自独立，绝不因 label 近似而合并。"""
+    ids = {
+        "电话": {"value": "0571-88660000"},
+        "联系电话": {"value": "0571-88880051"},
+    }
+    rows = group_by_value(ids)
+    assert [label for label, _ in rows] == ["电话", "联系电话"]
+
+
+def test_group_by_value_empty_and_order_preserved():
+    assert group_by_value({}) == []
+    # 各值互不相同时：原样、保持插入顺序，不动 label
+    ids = {"身份证号": {"value": "A"}, "银行账号": {"value": "B"}, "电话": {"value": "C"}}
+    assert [label for label, _ in group_by_value(ids)] == ["身份证号", "银行账号", "电话"]

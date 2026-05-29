@@ -72,6 +72,36 @@ def _canon_name(name: str) -> str:
     return _ROLE_PREFIX_RE.sub("", name.strip())
 
 
+def group_by_value(ids: dict) -> list[tuple[str, dict]]:
+    """把同一主体下『归一化值相同』的多个 label 折叠成一组，供人读展示去冗余。
+
+    同一个号被不同文档写成不同 label（如『电话』『联系电话』）时，在 party list/show
+    里并排堆着是纯噪声、零信息。canon 值相等即视为同一事实，标签并成『电话/联系电话』，
+    rec 取首个（即基准首见那条）。值不同的 label（如公司总机 vs 联系人线）各自独立、
+    绝不合并——与 reconcile『弱标识不据此并实体』同一立场：这里只折叠展示、不动数据。
+
+    判等用 reconcile 同一套 _canon，保证『展示折叠』与『一致性校对』口径一致：
+    凡 reconcile 视作"无差异"的两值，这里才折叠；有真实数字差异的不会被并掉。
+    保持各组首次出现的插入顺序。
+
+    Args:
+        ids: 某主体的标识基准，label -> rec（rec 含 value/first_seen_doc/role 等）。
+    Returns:
+        [(合并后标签, 首个rec), ...]，按各组首次出现顺序排列。
+    """
+    labels_of: dict[str, list[str]] = {}   # canon(value) -> 同值的 label 列表
+    rep_rec: dict[str, dict] = {}          # canon(value) -> 首个 rec（基准首见那条）
+    order: list[str] = []                  # canon(value) 首次出现顺序，定输出顺序
+    for label, rec in ids.items():
+        key = _canon(rec.get("value") or "")
+        if key not in labels_of:
+            labels_of[key] = []
+            rep_rec[key] = rec
+            order.append(key)
+        labels_of[key].append(label)
+    return [("/".join(labels_of[key]), rep_rec[key]) for key in order]
+
+
 def _is_strong_label(label: str) -> bool:
     """该标识是否为实体唯一的强标识（可据此把不同 name 归并为同一实体）。"""
     return any(k in label for k in _STRONG_LABEL_KEYS)

@@ -15,7 +15,7 @@ from typing import Optional
 import typer
 from rich.table import Table
 
-from .archive.party_registry import PartyRegistry
+from .archive.party_registry import PartyRegistry, group_by_value
 from .archive.paths import ArchivePaths, default_archive_root
 # 复用 cli_common 的全局 console（理由同 cli_config）：自建实例会让全局 --no-color 失效。
 from .cli_common import OutputFormat, console, err_console
@@ -72,9 +72,10 @@ def list_parties(
     table.add_column("标识")
     table.add_column("值", overflow="fold")
     table.add_column("首见", style="dim")
+    # 表格按值折叠同号多 label（电话/联系电话…）去冗余；--format json 保持原始未折叠。
     for name, ids in parties.items():
         first = True
-        for label, rec in ids.items():
+        for label, rec in group_by_value(ids):
             table.add_row(name if first else "", label, rec.get("value", ""), str(rec.get("first_seen_doc", ""))[:12])
             first = False
     console.print(table)
@@ -99,12 +100,14 @@ def show_party(
     if fmt is OutputFormat.json:
         print(_json.dumps(ids, ensure_ascii=False, indent=2))
         return
-    table = Table(title=f"{name} · {len(ids)} 项标识")
+    # 同值多 label 折叠后才是"几项不同标识"——同号的电话/联系电话算一项，故计数用折叠后行数。
+    rows = group_by_value(ids)
+    table = Table(title=f"{name} · {len(rows)} 项标识")
     table.add_column("标识", style="cyan")
     table.add_column("值", overflow="fold")
     table.add_column("角色", style="dim")
     table.add_column("首见出处", style="dim")
-    for label, rec in ids.items():
+    for label, rec in rows:
         table.add_row(label, rec.get("value", ""), rec.get("role", ""), str(rec.get("first_seen_doc", "")))
     console.print(table)
 
