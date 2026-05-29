@@ -156,15 +156,35 @@ def main(
 
     # 日志默认 stderr；--verbose/--quiet 胜过 LOG_LEVEL env。
     if verbose:
-        level = "DEBUG"
+        level: str | int = "DEBUG"
     elif quiet:
         level = "WARNING"
     else:
-        level = os.getenv("LOG_LEVEL", "INFO")
+        level = _resolve_log_level(os.getenv("LOG_LEVEL", "INFO"))
     logging.basicConfig(
         level=level,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+
+
+_VALID_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+
+def _resolve_log_level(raw: str) -> str | int:
+    """
+    LOG_LEVEL 白名单归一：合法名（大小写不敏感）原样、纯数字转 int，其余降级 INFO 并 warning。
+
+    此前把原始字符串直喂 logging.basicConfig，`LOG_LEVEL=bogus` 会抛 ValueError 把所有命令打挂
+    （连只读的 list/show 都崩）。坏 env 不该让命令崩——与 config 层「坏配置不崩、warning 后降级」
+    一个取向，消除「文件配置坏了优雅、env 坏了硬崩」这个特殊情况。
+    """
+    norm = (raw or "").strip().upper()
+    if norm in _VALID_LOG_LEVELS:
+        return norm
+    if norm.isdigit():
+        return int(norm)
+    err_console.print(f"[yellow]无效 LOG_LEVEL={raw!r}，降级为 INFO[/yellow]")
+    return "INFO"
 
 
 # ---------- 全局 archive 路径解析 ----------

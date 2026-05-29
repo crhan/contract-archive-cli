@@ -134,6 +134,7 @@ def ingest(
                 {"archive": str(paths.root), "summary": summary, "results": []},
                 ensure_ascii=False, indent=2,
             ))
+        conn.close()
         raise typer.Exit(0)
 
     err_console.print(f"[cyan]found {len(pdfs)} PDF(s); archive={paths.root}[/cyan]")
@@ -141,41 +142,54 @@ def ingest(
     pipeline = MinerUPipeline()
 
     results: list[dict] = []
-    for i, pdf in enumerate(pdfs, 1):
-        err_console.rule(f"[bold cyan][{i}/{len(pdfs)}] {pdf.name}[/bold cyan]")
-        try:
-            result = ingest_pdf(
-                pdf,
-                paths,
-                conn,
-                reingest=reingest,
-                llm_enabled=not no_llm,
-                pipeline=pipeline,
-            )
-        except Exception as e:
-            err_console.print(f"[red]✗ unexpected error: {e}[/red]")
-            logging.getLogger(__name__).exception("ingest crashed")
-            summary["failed"] += 1
-            fail_dict = {
-                "pdf_path": str(pdf), "sha256": None, "status": "failed",
-                "doc_id": None, "mineru_duration_s": None, "llm_duration_s": None,
-                "error_message": str(e),
-                "error": classify_exception(e).model_dump(),
-                "skipped_reason": None,
-            }
-            results.append(fail_dict)
+    try:
+        for i, pdf in enumerate(pdfs, 1):
+            err_console.rule(f"[bold cyan][{i}/{len(pdfs)}] {pdf.name}[/bold cyan]")
+            try:
+                result = ingest_pdf(
+                    pdf,
+                    paths,
+                    conn,
+                    reingest=reingest,
+                    llm_enabled=not no_llm,
+                    pipeline=pipeline,
+                )
+            except Exception as e:
+                err_console.print(f"[red]✗ unexpected error: {e}[/red]")
+                logging.getLogger(__name__).exception("ingest crashed")
+                summary["failed"] += 1
+                fail_dict = {
+                    "pdf_path": str(pdf), "sha256": None, "status": "failed",
+                    "doc_id": None, "mineru_duration_s": None, "llm_duration_s": None,
+                    "error_message": str(e),
+                    "error": classify_exception(e).model_dump(),
+                    "skipped_reason": None,
+                }
+                results.append(fail_dict)
+                if progress is ProgressFormat.ndjson:
+                    _emit_progress(i, len(pdfs), fail_dict)
+                continue
+            summary[result.status] = summary.get(result.status, 0) + 1
+            result_dict = ingest_result_to_dict(result)
+            results.append(result_dict)
+            _print_ingest_result(result)
             if progress is ProgressFormat.ndjson:
-                _emit_progress(i, len(pdfs), fail_dict)
-            continue
-        summary[result.status] = summary.get(result.status, 0) + 1
-        result_dict = ingest_result_to_dict(result)
-        results.append(result_dict)
-        _print_ingest_result(result)
-        if progress is ProgressFormat.ndjson:
-            _emit_progress(i, len(pdfs), result_dict)
+                _emit_progress(i, len(pdfs), result_dict)
+    except KeyboardInterrupt:
+        # Ctrl-C：先让 finally 跑 checkpoint+close，再把中断抛出去（退出码 130）。
+        err_console.print(
+            f"\n[yellow]中断：已处理 {len(results)}/{len(pdfs)} 个，checkpoint 后退出[/yellow]"
+        )
+        raise
+    finally:
+        # 正常结束 / 循环内异常 / Ctrl-C 三条退出路径都无条件 checkpoint+close：
+        # per-file tmp→rename 已保证数据一致，这里兜 WAL 合并回主库 + 连接关闭的整洁性。
+        try:
+            checkpoint(conn)
+            conn.close()
+        except Exception:  # noqa: BLE001 — 清理失败不能掩盖原始异常/中断
+            logging.getLogger(__name__).debug("ingest 清理失败", exc_info=True)
 
-    checkpoint(conn)
-    conn.close()
     err_console.rule("[bold]summary[/bold]")
     err_console.print(
         f"ok={summary['ok']} partial={summary['partial']} "
@@ -303,6 +317,10 @@ def extract(
         print(_json.dumps(ingest_result_to_dict(result), ensure_ascii=False, indent=2))
     else:
         _print_ingest_result(result)
+    # 抽取失败（空抽取/LLM 异常，re_extract 返回 status=partial + error）必须以非零退出，
+    # 否则纯 shell 调用方靠 $? 完全发现不了 extract 失败（此前一律 exit 0 是 bug）。
+    if result.error is not None:
+        raise typer.Exit(1)
 
 
 # ---------- delete ----------
