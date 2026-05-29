@@ -103,6 +103,50 @@
       "period_start": null,
       "period_end": null,
       "evidence": "第12页 + 剩余房款 【[√]人民币】 【[×] 无 】10430000 元"
+    },
+    {
+      "label": "物业服务费",
+      "text": "2.25元/月·平方米（建筑面积）",
+      "value": 2.25,
+      "unit": "元/月·㎡",
+      "is_total_component": false,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第27页 + 物业服务费为 2.25元/月·平方米（建筑面积）"
+    },
+    {
+      "label": "服务费",
+      "text": "4.55元/月·平方米（建筑面积）",
+      "value": 4.55,
+      "unit": "元/月·㎡",
+      "is_total_component": false,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第27页 + 服务费为4.55元/月·平方米（建筑面积）"
+    },
+    {
+      "label": "能耗费",
+      "text": "0.8元/月·平方米（建筑面积）",
+      "value": 0.8,
+      "unit": "元/月·㎡",
+      "is_total_component": false,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第27页 + 能耗费预收标准为0.8 元/月·平方米（建筑面积）"
+    },
+    {
+      "label": "地下车位管理费",
+      "text": "100元/个/月",
+      "value": 100.0,
+      "unit": "元/个/月",
+      "is_total_component": false,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第27页 + 地下车位服务管理费为100元/个/月"
     }
   ],
   "seals": [],
@@ -206,22 +250,6 @@
     {
       "label": "前期物业服务企业",
       "value": "示例物业服务集团有限公司"
-    },
-    {
-      "label": "物业服务费",
-      "value": "2.25元/月·平方米（建面）"
-    },
-    {
-      "label": "服务费",
-      "value": "4.55元/月·平方米（建面）"
-    },
-    {
-      "label": "地下车位管理费",
-      "value": "100元/个/月"
-    },
-    {
-      "label": "能耗费",
-      "value": "0.8元/月·平方米（建面）"
     },
     {
       "label": "争议解决方式",
@@ -413,5 +441,7 @@
   "raw_evidence": {},
   "llm_model": null,
   "llm_usage": null,
-  "extraction_error": null
+  "extraction_error": null,
+  "monthly_property_fee_value": 2180.59,
+  "monthly_property_fee_text": "（物业服务费2.25＋服务费4.55＋能耗费0.8）=7.6元/月·㎡ × 286.92㎡ ≈ 2,180.59元/月"
 }

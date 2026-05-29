@@ -71,6 +71,7 @@ def check_amount_consistency(
         if (
             not a.is_total_component
             and not a.is_installment
+            and not a.unit            # 单价项（元/月·㎡ 等）量纲不同，不与合同金额比，跳过
             and a.value is not None
             and a.value > computed_total + tol
         ):

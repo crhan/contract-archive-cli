@@ -38,6 +38,7 @@ from .llm_extractor import (
 )
 from .normalize import coerce_obligations, normalize_date, parse_money_value
 from .amount_check import check_amount_consistency
+from .property_fee import estimate_monthly_property_fee
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ JSON 字段定义：
   "primary_date": "该文档最重要的日期 ISO（合同=签订日，证明=出具日，发票=开票日）或 null",
   "primary_amount": "该文档最重要的金额原文（合同=合同额，收入证明=年收入）或 null",
   "key_dates": [{{"label": "出具日/签订日/到期日/入职日 等（用规范名词，见下方约束）", "date": "YYYY-MM-DD"}}],
-  "amounts": [{{"label": "年收入/月均收入/合同金额/首期款/余款 等", "text": "金额原文", "is_total_component": true_or_false, "is_installment": true_or_false, "period_start": "YYYY-MM-DD 或 null", "period_end": "YYYY-MM-DD 或 null", "evidence": "第X页 + 原文片段"}}],
+  "amounts": [{{"label": "年收入/月均收入/合同金额/首期款/余款/物业服务费 等", "text": "金额原文", "unit": "单价量纲或 null（绝对金额填 null；单价/费率填如『元/月·㎡』『元/个/月』『元/日』）", "is_total_component": true_or_false, "is_installment": true_or_false, "period_start": "YYYY-MM-DD 或 null", "period_end": "YYYY-MM-DD 或 null", "evidence": "第X页 + 原文片段"}}],
   "fields": [{{"label": "字段名", "value": "字段值"}}],
   "person_identities": [{{"name": "主体名（须与 parties 对应）", "role": "甲方/乙方/买受人/持证人 等或 null", "identifiers": [{{"label": "身份证号/电话/银行账号/开户行/统一社会信用代码 等", "value": "值"}}]}}],
   "seals": [{{"owner": "盖章主体全称或 null", "seal_type": "公章/合同专用章/财务专用章/发票专用章 等或 null", "raw_text": "印章上识别到的原文"}}],
@@ -122,6 +123,12 @@ JSON 字段定义：
   · 只放"主体固有"的稳定标识（身份证/电话/账号/税号），不放金额、日期、地址这类
     随文档变化的信息。一个标识都绑不出则填空数组 []。
 - amounts 列出文档里**所有**金额（不止主金额），各带语义 label。每个金额还需给出：
+  · unit：计量单位。**绝对金额**（合同总价、首期款、定金、年收入 等一笔确定的钱）填 null；
+    **单价/费率**（每单位若干钱）按原文量纲填，如物业费"2.25 元/月·平方米"→ "元/月·㎡"、
+    车位"100 元/个/月"→ "元/个/月"、违约金"每日万分之一点五"→ 不是金额不抽。
+    商品房合同第物业管理条款的【物业服务费】【服务费】【能耗费】【地下车位管理费】等
+    **都要各列一条**并填 unit——下游会按㎡单价 × 建筑面积派生月物业费。
+    单价项的 is_total_component 与 is_installment **一律 false**（单价不是总价组成、也非分期）。
   · is_total_component：该金额是否计入"文档主合计"。收入证明的【年度税前收入】【年度股权应税收益】
     等一次性年度收入项填 true；【月均收入】【公积金(个人/公司)】等会与年度项重复累加或非收入的填 false。
     宁缺勿错：拿不准一律 false。
@@ -243,11 +250,16 @@ def _coerce_labeled_amounts(raw: Any) -> list[LabeledAmount]:
         if not text:
             continue
         label = str(item.get("label", "")).strip() or "金额"
+        unit = str(item.get("unit") or "").strip() or None
+        # 单价项（unit 非空，如"2.25 元/月·㎡"）：parse_money_value 解析的是币种金额，
+        # 对纯单价数字同样取得数值；但单价不是合同总价组成，强制 is_total_component=False，
+        # 避免污染 computed_total（量纲不同的单价混进合计是错误）。
         out.append(LabeledAmount(
             label=label,
             text=text,
             value=parse_money_value(text),
-            is_total_component=bool(item.get("is_total_component", False)),
+            unit=unit,
+            is_total_component=bool(item.get("is_total_component", False)) and not unit,
             is_installment=bool(item.get("is_installment", False)),
             period_start=_norm_period(item.get("period_start")),
             period_end=_norm_period(item.get("period_end")),
@@ -466,6 +478,10 @@ def extract_document(
     components = [a.value for a in amounts if a.is_total_component and a.value is not None]
     computed_total = round(sum(components), 2) if components else None
 
+    # 派生值（非抽取）：月物业费 = Σ按㎡单价 × 建筑面积。同由代码乘算，LLM 只抽单价。
+    fields = _coerce_labeled_values(raw.get("fields"))
+    monthly_fee_value, monthly_fee_text = estimate_monthly_property_fee(amounts, fields)
+
     # 完整性 = LLM 判的签章/要素 + 代码确定性判的金额自洽异常（分期之和≠总价 等）。
     # 金额异常只对合同挂（completeness 是合同概念）；有异常必判 incomplete。
     # 注：vision_seal.augment 重判签章时保留 category!="signature" 的 issue，amount 类不受影响。
@@ -485,10 +501,12 @@ def extract_document(
         primary_amount_text=primary_amount_text,
         primary_amount_value=parse_money_value(primary_amount_text),
         computed_total_value=computed_total,
+        monthly_property_fee_value=monthly_fee_value,
+        monthly_property_fee_text=monthly_fee_text,
         key_dates=_coerce_labeled_dates(raw.get("key_dates")),
         amounts=amounts,
         seals=_coerce_seals(raw.get("seals")),
-        fields=_coerce_labeled_values(raw.get("fields")),
+        fields=fields,
         person_identities=person_identities,
         obligations=coerce_obligations(raw.get("obligations")),
         sub_agreements=_coerce_sub_agreements(raw.get("sub_agreements")),

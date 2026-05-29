@@ -37,6 +37,7 @@ FIELD_WEIGHTS: dict[str, float] = {
     "doc_type": 2.0,            # 分类错 → 后续字段语义全偏，权重高
     "parties": 2.0,            # 当事人是合同核心主体
     "primary_amount": 2.0,     # 主金额
+    "monthly_property_fee": 1.0,  # 月物业费派生估算（单价×面积，代码算）
     "amounts": 1.5,
     "completeness_issues": 3.0,  # 完整性核查是这个项目的痛点来源，最高权重
     "primary_date": 1.0,
@@ -379,6 +380,9 @@ def score_envelope(case_id: str, gold: DocumentExtraction, pred: DocumentExtract
     es.fields.append(score_scalar("summary", gold.summary, pred.summary))
     es.fields.append(score_scalar("primary_date", gold.primary_date, pred.primary_date, is_date=True))
     es.fields.append(score_scalar_amount("primary_amount", gold.primary_amount_value, pred.primary_amount_value))
+    # 月物业费派生值：代码确定性算（Σ按㎡单价 × 建筑面积），间接评 LLM 单价+面积抽取质量。
+    es.fields.append(score_scalar_amount(
+        "monthly_property_fee", gold.monthly_property_fee_value, pred.monthly_property_fee_value))
     es.fields.append(score_str_list("parties", gold.parties, pred.parties))
     es.fields.append(score_amounts(gold.amounts, pred.amounts))
     es.fields.append(score_labeled_dates(gold.key_dates, pred.key_dates))

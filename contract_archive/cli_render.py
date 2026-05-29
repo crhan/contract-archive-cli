@@ -216,7 +216,11 @@ def _show_amount_rows(table: Table, row, det: dict) -> None:
         lines = []
         for a in amounts:
             v = a.get("value")
-            vs = f"（¥{v:,.2f}）" if isinstance(v, (int, float)) else ""
+            unit = a.get("unit")
+            if unit:  # 单价项：显示量纲（如 2.25 元/月·㎡），不套 ¥（非绝对金额）
+                vs = f"（{v:g} {unit}）" if isinstance(v, (int, float)) else ""
+            else:
+                vs = f"（¥{v:,.2f}）" if isinstance(v, (int, float)) else ""
             mark = " [cyan]✓计入合计[/cyan]" if a.get("is_total_component") else ""
             if a.get("is_installment"):
                 mark += " [magenta]分期[/magenta]"
@@ -237,6 +241,14 @@ def _show_amount_rows(table: Table, row, det: dict) -> None:
         table.add_row(
             "[bold]合计(计算)[/bold]",
             f"[cyan]¥{total:,.2f}[/cyan] [dim](上方标✓项之和，非抽取值)[/dim]",
+        )
+    mfee = det.get("monthly_property_fee_value")
+    if isinstance(mfee, (int, float)):
+        mfee_text = det.get("monthly_property_fee_text") or ""
+        detail = f" [dim]({mfee_text})[/dim]" if mfee_text else ""
+        table.add_row(
+            "[bold]月物业费(估算)[/bold]",
+            f"[cyan]¥{mfee:,.2f}/月[/cyan]{detail}",
         )
     fields = det.get("fields") or []
     if fields:

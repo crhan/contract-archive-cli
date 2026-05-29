@@ -219,9 +219,16 @@ class LabeledAmount(BaseModel):
 
     label: str                      # "年收入" / "月均收入" / "公积金(个人)" / "合同金额"
     text: str                       # 原文（含大写/币种）
-    value: Optional[float] = None   # 归一化数值（人民币元）
+    value: Optional[float] = None   # 归一化数值（人民币元；unit 非空时为该单位下的单价数值）
+    # 计量单位：None=绝对金额（人民币元，默认，与历史一致）；非 None=单价/费率，
+    # value 是「每单位」的数值，量纲见此字段（如"元/月·㎡""元/个/月""元/日"）。
+    # 用于区分"合同总价 1228 万元"(unit=None) 与"物业费 2.25 元/月·㎡"(unit 非空)——
+    # 后者量纲不同，不可与绝对金额相加，也不参与 computed_total / 金额自洽校验。
+    # 同 unit 的周期单价可由代码派生周期费用（如物业费 = Σ按㎡单价 × 建筑面积）。
+    unit: Optional[str] = None
     # 是否计入文档主合计：收入证明的"年度税前收入""年度股权收益"=True；
     # "月均收入""公积金"等不该重复累加的=False。供 computed_total_value 求和。
+    # 单价项（unit 非空）一律 False——单价不是合同总价的组成部分。
     is_total_component: bool = False
     # 是否为某总价的"分期/部分付款"项（首期款/余款/定金/尾款）。供金额自洽校验：
     # 同一总价的各分期项之和应≈总价(合计)，不符即疑似金额笔误
@@ -326,6 +333,13 @@ class DocumentExtraction(BaseModel):
     # 计算值（非抽取）：amounts 中 is_total_component=True 项之和。
     # 例：收入证明 = 年度税前收入 + 年度股权收益。无可累加项则为 None。
     computed_total_value: Optional[float] = None
+    # 派生值（非抽取，代码确定性算）：每月物业费估算
+    # = Σ(按建筑面积计价的物业类单价，元/月·㎡) × 建筑面积。
+    # 合同只给单价（物业服务费 2.25 + 服务费 4.55 + 能耗费 0.8 元/月·㎡），
+    # 买受人关心的是月实付额——由代码乘算（按㎡项才并入，车位"元/个/月"等不同量纲不并）。
+    # 抽不到单价或建筑面积则为 None。_text 是可追溯的算式说明。
+    monthly_property_fee_value: Optional[float] = None
+    monthly_property_fee_text: Optional[str] = None
     key_dates: list[LabeledDate] = Field(default_factory=list)
     amounts: list[LabeledAmount] = Field(default_factory=list)
     seals: list[Seal] = Field(default_factory=list)   # 文档上的印章（有则可验真/索引）
