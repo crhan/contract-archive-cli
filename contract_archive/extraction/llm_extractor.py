@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Optional
 
-from ..config import load_settings
+from ..config import get_timeout_s, load_settings
 from ..errors import ErrorInfo, classify_exception, config_missing
 
 logger = logging.getLogger(__name__)
@@ -155,11 +155,18 @@ def _call_openai_compat(
 
     见 CLAUDE.md：DashScope 一律走兼容口（原生 Generation 不认部分模型 id，如 qwen3.6-flash）。
     开 json_object；**不设 max_tokens**（避免 JSON 被截断成非法串）；各 prompt 已含 "JSON" 字样。
+
+    显式 timeout（默认 300s，DASHSCOPE_TIMEOUT_S 可调）：不设则吃 SDK 默认 ~600s，
+    上游 hang 时 CI/agent 会静默干等近 10 分钟。300s 给长合同（截断后约 6 万字，
+    且故意不设 max_tokens）留足头寸，又不至无界等待。超时异常由调用方 except 兜底降级。
     """
     from openai import OpenAI
 
     compat_url = base_url.replace("/api/v1", "/compatible-mode/v1")
-    client = OpenAI(api_key=api_key, base_url=compat_url)
+    client = OpenAI(
+        api_key=api_key, base_url=compat_url,
+        timeout=get_timeout_s("DASHSCOPE_TIMEOUT_S", 300.0),
+    )
     resp = client.chat.completions.create(
         model=model,
         messages=[

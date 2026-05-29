@@ -16,7 +16,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from ..config import load_settings
+from ..config import get_timeout_s, load_settings
 from ..schemas import (
     Completeness,
     CompletenessIssue,
@@ -120,7 +120,12 @@ def _call_vl(
         content.append({"type": "image_url", "image_url": {"url": _encode_image(p)}})
     content.append({"type": "text", "text": "请逐页核查落款签章，按要求输出 JSON（每个 unit 回填 page）。"})
     try:
-        client = OpenAI(api_key=api_key, base_url=compat_url)
+        # 显式 timeout（默认 300s，DASHSCOPE_TIMEOUT_S 可调）：VL 内联多张落款页大图、
+        # 请求体大更易长挂，不设则吃 SDK 默认 ~600s。超时走下面 except 降级返回 None。
+        client = OpenAI(
+            api_key=api_key, base_url=compat_url,
+            timeout=get_timeout_s("DASHSCOPE_TIMEOUT_S", 300.0),
+        )
         resp = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": content}],

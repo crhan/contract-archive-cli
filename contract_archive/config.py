@@ -185,6 +185,28 @@ def _validate_key(key: str) -> str:
     return name
 
 
+def get_timeout_s(env_name: str, default: float) -> float:
+    """
+    读一个"秒数"类运行时旋钮（如 DASHSCOPE_TIMEOUT_S / CONTRACT_ARCHIVE_MINERU_TIMEOUT_S）。
+
+    超时是运行时旋钮而非持久配置（同 LOG_LEVEL/COMPUTE_DEVICE），保持 env-only、不进 CONFIG_KEYS。
+    坏值（非数字/非正数/缺失）一律回退 default 并 warning——坏配置不该让命令崩，
+    与 load_config_values 的"坏配置不崩、warning 后降级"取向一致。
+    """
+    raw = os.getenv(env_name)
+    if not raw or not raw.strip():
+        return default
+    try:
+        val = float(raw.strip())
+    except ValueError:
+        logger.warning("%s=%r 不是合法数字，回退默认 %ss", env_name, raw, default)
+        return default
+    if val <= 0:
+        logger.warning("%s=%r 非正数，回退默认 %ss", env_name, raw, default)
+        return default
+    return val
+
+
 def display_value(key: ConfigKey, value: str | None, *, reveal: bool) -> str:
     """展示用：secret 不 reveal 时掩码，空值显示 <unset>。"""
     if not value:

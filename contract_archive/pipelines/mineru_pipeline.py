@@ -29,6 +29,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from ..config import get_timeout_s
 from ..schemas import (
     BBox,
     FILE_LAYOUT,
@@ -169,13 +170,25 @@ class MinerUPipeline:
             self.backend,
         ]
         logger.info("[mineru] running: %s", " ".join(cmd))
-        proc = subprocess.run(
-            cmd,
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        # 显式 timeout（默认 1800s，CONTRACT_ARCHIVE_MINERU_TIMEOUT_S 可调）：MinerU 跑深度模型，
+        # 畸形/超大 PDF 可能永久挂死——子进程不抛异常，subprocess.run 会无限阻塞，
+        # 批量串行 ingest 就此冻死。TimeoutExpired 会自动 kill 该子进程（精确，不波及他人），
+        # 转成 RuntimeError 走 run() 的失败落盘 + ingest 的 mineru_failed 分类。
+        timeout_s = get_timeout_s("CONTRACT_ARCHIVE_MINERU_TIMEOUT_S", 1800.0)
+        try:
+            proc = subprocess.run(
+                cmd,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout_s,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"mineru 超时（>{timeout_s:.0f}s），疑似 PDF 过大/畸形: {pdf_path.name}；"
+                "确需处理可调大 CONTRACT_ARCHIVE_MINERU_TIMEOUT_S"
+            ) from e
         if proc.returncode != 0:
             logger.error("[mineru] stdout=%s", proc.stdout[-2000:])
             logger.error("[mineru] stderr=%s", proc.stderr[-2000:])
@@ -354,8 +367,11 @@ def _resolve_mineru() -> str:
 
 def _mineru_version() -> str:
     try:
+        # --version 探测给个短 timeout（30s）：仅是探测，挂住没意义；
+        # TimeoutExpired 是 Exception 子类，被下面 except 兜成 "unknown"。
         proc = subprocess.run(
-            [_resolve_mineru(), "--version"], capture_output=True, text=True, check=False
+            [_resolve_mineru(), "--version"],
+            capture_output=True, text=True, check=False, timeout=30,
         )
         return (proc.stdout or proc.stderr).strip()
     except Exception:
