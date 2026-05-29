@@ -16,7 +16,13 @@ dependencies = [
     "pymupdf>=1.24",
     "pillow>=10.0",
     "tenacity>=8.2",
-    "typer>=0.12",
+    # typer 上限锁 <0.26：0.26 起把 click 从自身依赖里移除（typer-slim 化），且 CLI 内省
+    # API 未在本项目验证过。cli_introspect 用 typer.main.get_command 转 click 对象做命令
+    # schema 内省，依赖 typer+click 的稳定行为，升级需重验。
+    "typer>=0.12,<0.26",
+    # click 是 cli_introspect 的**直接** import（把 typer app 转 click.Group 挖参数 schema）。
+    # 必须显式声明——历史上靠 typer 传递依赖白嫖，typer 0.26 删 click 后即 ModuleNotFoundError。
+    "click>=8.0,<9",
     "rich>=13.7",
     "dashscope>=1.22.2",
     "openai>=1.40",            # 多模态签章核查走 DashScope 的 OpenAI 兼容接口

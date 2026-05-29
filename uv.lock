@@ -496,6 +496,7 @@ name = "contract-archive-cli"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "click" },
     { name = "dashscope" },
     { name = "openai" },
     { name = "pillow" },
@@ -523,6 +524,7 @@ mineru = [
 
 [package.metadata]
 requires-dist = [
+    { name = "click", specifier = ">=8.0,<9" },
     { name = "dashscope", specifier = ">=1.22.2" },
     { name = "ipython", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "mineru", extras = ["core"], marker = "extra == 'mineru'", specifier = ">=3.1,<4.0" },
@@ -537,7 +539,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
     { name = "scipy", marker = "extra == 'mineru'", specifier = ">=1.10" },
     { name = "tenacity", specifier = ">=8.2" },
-    { name = "typer", specifier = ">=0.12" },
+    { name = "typer", specifier = ">=0.12,<0.26" },
 ]
 provides-extras = ["mineru", "dev"]
 
