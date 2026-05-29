@@ -1,0 +1,150 @@
+{
+  "doc_type": "证明",
+  "title": "张三在职收入证明(示例置业有限公司)",
+  "summary": "示例置业有限公司出具，证实员工张三（身份证号3301xxxxxxxxxxxxxx）上年度税前总收入3510581元，股权应税收益3291258.73元。",
+  "parties": [
+    "张三",
+    "示例置业有限公司"
+  ],
+  "primary_date": "2026-05-05",
+  "primary_amount_text": "人民币 叁佰伍拾壹万零伍佰捌拾壹元整",
+  "primary_amount_value": 3510581.0,
+  "computed_total_value": 6801839.73,
+  "key_dates": [
+    {
+      "label": "出具日",
+      "date": "2026-05-05"
+    },
+    {
+      "label": "入职日",
+      "date": "2016-09-19"
+    }
+  ],
+  "amounts": [
+    {
+      "label": "上年度税前总收入",
+      "text": "人民币 叁佰伍拾壹万零伍佰捌拾壹元整",
+      "value": 3510581.0,
+      "is_total_component": true,
+      "is_installment": false,
+      "period_start": "2025-01-01",
+      "period_end": "2025-12-31",
+      "evidence": "第1页 + 其上年度税前总收入为人民币 叁佰伍拾壹万零伍佰捌拾壹元整"
+    },
+    {
+      "label": "税前月均收入",
+      "text": "贰拾玖万贰仟伍佰肆拾捌元整",
+      "value": 292548.0,
+      "is_total_component": false,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第1页 + 即税前月均收入为贰拾玖万贰仟伍佰肆拾捌元整"
+    },
+    {
+      "label": "上年度股权应税收益",
+      "text": "人民币叁佰贰拾玖万壹仟贰佰伍拾捌元柒角叁分",
+      "value": 3291258.73,
+      "is_total_component": true,
+      "is_installment": false,
+      "period_start": "2025-01-01",
+      "period_end": "2025-12-31",
+      "evidence": "第1页 + 另其上年度股权应税收益为人民币叁佰贰拾玖万壹仟贰佰伍拾捌元柒角叁分"
+    },
+    {
+      "label": "当前月公积金缴纳额个人部分",
+      "text": "人民币 叁万伍仟陆佰肆拾陆元整",
+      "value": 35646.0,
+      "is_total_component": false,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第1页 + 其当前月公积金缴纳额个人部分为人民币 叁万伍仟陆佰肆拾陆元整"
+    },
+    {
+      "label": "当前月公积金缴纳额公司部分",
+      "text": "人民币 叁万伍仟陆佰肆拾陆元整",
+      "value": 35646.0,
+      "is_total_component": false,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第1页 + 其当前月公积金缴纳额公司部分为人民币 叁万伍仟陆佰肆拾陆元整"
+    }
+  ],
+  "seals": [],
+  "fields": [
+    {
+      "label": "持证人",
+      "value": "张三"
+    },
+    {
+      "label": "性别",
+      "value": "女"
+    },
+    {
+      "label": "身份证号",
+      "value": "3301xxxxxxxxxxxxxx"
+    },
+    {
+      "label": "用人单位",
+      "value": "示例置业有限公司"
+    },
+    {
+      "label": "职位",
+      "value": "示例科技有限公司-示例事业群-示例部门 高级整合营销专员"
+    },
+    {
+      "label": "入职日期",
+      "value": "2016-09-19"
+    },
+    {
+      "label": "联系人",
+      "value": "李四 / 王五"
+    },
+    {
+      "label": "联系电话",
+      "value": "0000-0000000 / 0000-0000000"
+    },
+    {
+      "label": "职务",
+      "value": "HR"
+    },
+    {
+      "label": "单位地址",
+      "value": "示例市示例区示例路1号"
+    },
+    {
+      "label": "邮编",
+      "value": "000000"
+    },
+    {
+      "label": "总机",
+      "value": "0000-0000000"
+    },
+    {
+      "label": "传真",
+      "value": "0000-0000000"
+    }
+  ],
+  "person_identities": [
+    {
+      "name": "张三",
+      "role": "持证人",
+      "identifiers": [
+        {
+          "label": "身份证号",
+          "value": "3301xxxxxxxxxxxxxx"
+        }
+      ]
+    }
+  ],
+  "obligations": [],
+  "sub_agreements": [],
+  "completeness": null,
+  "identity_issues": [],
+  "raw_evidence": {},
+  "llm_model": null,
+  "llm_usage": null,
+  "extraction_error": null
+}

@@ -1,0 +1,15 @@
+{
+  "doc_type": "合同协议",
+  "stratum": "商品房认购协议（预售前置）",
+  "difficulty": "medium",
+  "exercises": [
+    "单价项带 unit（42799元/㎡ → unit=元/㎡、is_total_component=false，不并入 computed_total）",
+    "预付房款=定金同一笔 500000（含定金，不重复累加），is_installment=true",
+    "签章缺陷：甲方盖销售合同专用章、乙方买受人/委托代理人落款空白（signature issue，带第5页出处）",
+    "多买受人（张三、李四共同买受）parties 齐全",
+    "印章防伪编号脱敏（raw_text 内嵌编号 + person_identities 印章标识）",
+    "computed_total 仅累加总价（单价/预付款均 false）"
+  ],
+  "provenance": "由 evals/make_gold 从真实商品房认购协议生成 DRAFT → agent 深度脱敏（印章防伪编号残留 33010000000001→33010000000001）+ 盲标核对（补单价 unit、修 summary 甲方笔误、盲标乙方签章缺失改 incomplete）；已人工终审提升入库。注：与 c05_real_estate_presale_full 为同一套房（示例苑/示例花园3幢102室，总价12279889）的前置认购书，可作跨文档身份核对样本。 【终审(Claude)：身份证占位统一 3301xxxxxxxxxxxxxx；PII 经脱敏→红队→确定性扫描三道复核无残留；签章/金额 issues 对照原文逐条核实；pydantic 校验通过。源 doc_id=76459fe0b161】",
+  "source_doc_id": "76459fe0b161"
+}

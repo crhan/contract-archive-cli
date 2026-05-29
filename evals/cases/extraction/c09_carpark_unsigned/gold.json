@@ -1,0 +1,272 @@
+{
+  "doc_type": "合同协议",
+  "title": "示例花园28号地下车位使用权转让协议（乙方张三、李四）",
+  "summary": "示例置业有限公司将示例花园项目28号地下车位使用权以总价210000元转让给张三、李四；首期款50000元于签订当日支付，余款160000元通过银行贷款在签订后15日内划付；车位交付日2027-06-30；签订于2026-05-10；含一份明确车位使用权期限及权属登记、税费承担的补充协议。",
+  "parties": [
+    "示例置业有限公司",
+    "张三",
+    "李四"
+  ],
+  "primary_date": "2026-05-10",
+  "primary_amount_text": "210000元整",
+  "primary_amount_value": 210000.0,
+  "computed_total_value": 210000.0,
+  "key_dates": [
+    {
+      "label": "签订日",
+      "date": "2026-05-10"
+    },
+    {
+      "label": "车位交付日",
+      "date": "2027-06-30"
+    },
+    {
+      "label": "余款划付截止日",
+      "date": "2026-05-25"
+    }
+  ],
+  "amounts": [
+    {
+      "label": "车位使用权转让总价",
+      "text": "210000元整",
+      "value": 210000.0,
+      "is_total_component": true,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第2页 + 车位使用权转让总价（人民币)：210000元整"
+    },
+    {
+      "label": "首期车位使用权转让价款",
+      "text": "50000元整",
+      "value": 50000.0,
+      "is_total_component": false,
+      "is_installment": true,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第2页 + 乙方应在本协议签订当日支付首期车位使用权转让价款（人民币）50000元整"
+    },
+    {
+      "label": "余款（银行贷款）",
+      "text": "160000元整",
+      "value": 160000.0,
+      "is_total_component": false,
+      "is_installment": true,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第2页 + 余款（人民币）160000元整通过银行贷款的方式，在本协议签订后15日内全额划付到甲方指定账户"
+    },
+    {
+      "label": "车位服务管理费用",
+      "text": "100元/月·个",
+      "value": 100.0,
+      "unit": "元/月·个",
+      "is_total_component": false,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第5页 + 该车位服务管理费用： 100元/月·个"
+    },
+    {
+      "label": "逾期交还车位占用费",
+      "text": "每日300元",
+      "value": 300.0,
+      "unit": "元/日",
+      "is_total_component": false,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第6页 + 逾期未交还的应按每日300元的标准支付车位占用费"
+    }
+  ],
+  "seals": [],
+  "fields": [
+    {
+      "label": "甲方通讯地址",
+      "value": "示例市示例区示例路1号"
+    },
+    {
+      "label": "甲方电话",
+      "value": "0000-0000000"
+    },
+    {
+      "label": "甲方户名",
+      "value": "示例置业有限公司"
+    },
+    {
+      "label": "甲方开户行",
+      "value": "示例银行示例分行"
+    },
+    {
+      "label": "甲方账号",
+      "value": "6222xxxxxxxxxxxx"
+    },
+    {
+      "label": "乙方电话",
+      "value": "138xxxxxxxx"
+    },
+    {
+      "label": "乙方通讯住址",
+      "value": "示例省示例市示例区示例路1号"
+    },
+    {
+      "label": "车位编号",
+      "value": "28号"
+    },
+    {
+      "label": "车位特征",
+      "value": "在建，大尺寸车位"
+    },
+    {
+      "label": "付款方式",
+      "value": "首期50000元当日付清，余款160000元银行贷款（签订后15日内划付）"
+    },
+    {
+      "label": "车位用途",
+      "value": "停放轿车类小型车辆，车身高度不超过2.2米"
+    }
+  ],
+  "person_identities": [
+    {
+      "name": "示例置业有限公司",
+      "role": "甲方",
+      "identifiers": [
+        {
+          "label": "联系电话",
+          "value": "0000-0000000"
+        },
+        {
+          "label": "开户行",
+          "value": "示例银行示例分行"
+        },
+        {
+          "label": "银行账号",
+          "value": "6222xxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "name": "张三",
+      "role": "乙方（买受人）",
+      "identifiers": [
+        {
+          "label": "身份证号",
+          "value": "3301xxxxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "name": "李四",
+      "role": "乙方（买受人）",
+      "identifiers": [
+        {
+          "label": "身份证号",
+          "value": "3301xxxxxxxxxxxxxx"
+        }
+      ]
+    }
+  ],
+  "obligations": [
+    {
+      "actor": "party_b",
+      "action": "支付首期车位转让价款",
+      "deadline": null,
+      "evidence": "乙方应在本协议签订当日支付首期车位使用权转让价款（人民币）50000元整"
+    },
+    {
+      "actor": "party_b",
+      "action": "通过银行贷款支付余款",
+      "deadline": null,
+      "evidence": "余款（人民币）160000元整通过银行贷款的方式，在本协议签订后15日内全额划付到甲方指定账户"
+    },
+    {
+      "actor": "party_b",
+      "action": "提交贷款申请资料并办妥手续",
+      "deadline": null,
+      "evidence": "乙方应在本协议签订当日提交完备的贷款申请资料，办理完毕所有银行要求手续"
+    },
+    {
+      "actor": "party_b",
+      "action": "改为一次性付款方式付清价款",
+      "deadline": null,
+      "evidence": "乙方应于贷款银行或甲方通知不具备贷款条件...之日起7日内改为一次性付款方式，付清全部车位使用权价款"
+    },
+    {
+      "actor": "party_a",
+      "action": "交付车位",
+      "deadline": "2027-06-30",
+      "evidence": "甲方于 2027年 6月 30日前将上述车位交付乙方"
+    },
+    {
+      "actor": "party_a",
+      "action": "收取物业专项维修资金",
+      "deadline": null,
+      "evidence": "该车位须分担的物业专项维修资金（如有)，由甲方在车位交付时按政府部门相关规定向乙方收取"
+    },
+    {
+      "actor": "party_b",
+      "action": "书面答复是否同意调换方案",
+      "deadline": null,
+      "evidence": "乙方须在接到甲方通知后十天内书面答复是否同意调换方案"
+    },
+    {
+      "actor": "party_b",
+      "action": "交还车位",
+      "deadline": null,
+      "evidence": "乙方应于本协议解除后3天内将该车位按甲方向乙方交付时的状态交还甲方"
+    },
+    {
+      "actor": "party_b",
+      "action": "办理车位权属登记手续",
+      "deadline": null,
+      "evidence": "相关部门同意办理车位权属登记手续的，由乙方自行负责办理"
+    },
+    {
+      "actor": "party_b",
+      "action": "缴纳土地出让金及税费",
+      "deadline": null,
+      "evidence": "若今后需补缴地下车位的土地出让金、物业专项维修资金、契税等税费的，均由乙方承担并自行缴纳"
+    }
+  ],
+  "sub_agreements": [
+    {
+      "title": "《地下车位使用权转让协议》补充协议",
+      "summary": "明确车位使用权期限与该车位占用的土地使用权期限一致；约定车位不计入分摊范围，后续权属登记由乙方自行办理，土地出让金、物业专项维修资金、契税等税费均由乙方承担；与原协议不一致处以本补充协议为准。",
+      "sign_date": "2026-05-10",
+      "seals": [],
+      "evidence": "第9页 + 《地下车位使用权转让协议》补充协议...达成如下补充协议"
+    }
+  ],
+  "completeness": {
+    "status": "incomplete",
+    "issues": [
+      {
+        "item": "主协议·甲方签章",
+        "category": "signature",
+        "detail": "落款处空白，无红章也无手写签字（疑似，可能OCR漏识，需人工复核）",
+        "evidence": "第8页 甲方(签章): 处空白"
+      },
+      {
+        "item": "主协议·乙方签章",
+        "category": "signature",
+        "detail": "落款处仅有斜杠占位，无手写签字（疑似，可能OCR漏识，需人工复核）",
+        "evidence": "第8页 乙方(签章)：/ "
+      },
+      {
+        "item": "补充协议·甲方签章",
+        "category": "signature",
+        "detail": "落款处空白，无红章也无手写签字（疑似，可能OCR漏识，需人工复核）",
+        "evidence": "第9页 甲方(签章)： 处空白"
+      },
+      {
+        "item": "补充协议·乙方签章",
+        "category": "signature",
+        "detail": "落款处空白，无手写签字（疑似，可能OCR漏识，需人工复核）",
+        "evidence": "第9页 乙方(签章)： 处空白"
+      }
+    ]
+  },
+  "raw_evidence": {},
+  "llm_model": null,
+  "llm_usage": null
+}

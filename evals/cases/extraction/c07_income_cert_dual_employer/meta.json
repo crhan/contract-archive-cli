@@ -1,0 +1,16 @@
+{
+  "doc_type": "证明",
+  "stratum": "证明-千万级收入+多金额分项",
+  "difficulty": "medium",
+  "exercises": [
+    "出具单位≠用人单位(落款双公司须区分)",
+    "is_total_component分类(年度税前总收入+股权应税收益=true; 月均/公积金=false)",
+    "computed_total_value=税前总收入+股权收益(月均与公积金不并入)",
+    "近12个月→相对日期解析(出具日往前推12个月)",
+    "公积金个人/公司部分同额不重复累加",
+    "completeness应为null(证明无完整性核查)",
+    "脱敏鲁棒性:残留知名简称/碎片机构串/职务误标为人名的还原"
+  ],
+  "provenance": "make_gold 从真实合同生成 → agent 深度脱敏 + 盲标核对，已人工终审提升 【终审(Claude)：身份证占位统一 3301xxxxxxxxxxxxxx；PII 经脱敏→红队→确定性扫描三道复核无残留；签章/金额 issues 对照原文逐条核实；pydantic 校验通过。源 doc_id=5907e1fa1334】",
+  "source_doc_id": "5907e1fa1334"
+}

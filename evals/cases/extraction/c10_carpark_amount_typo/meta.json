@@ -1,0 +1,18 @@
+{
+  "doc_type": "合同协议",
+  "stratum": "地下车位使用权转让（含补充协议·金额笔误）",
+  "difficulty": "high",
+  "exercises": [
+    "多买受人主体齐全（甲方+张三、李四两位乙方，按人拆 person_identities）",
+    "金额自洽矛盾：分期之和(首期500000+余款150000)>转让总价200000，amount issue（代码确定性校验，c01 同款考点）",
+    "is_total_component 去重：仅转让总价 true，首期/余款 is_installment=true 且 tc=false（防 computed_total 重复累加）",
+    "单价项 unit 标注：车位服务管理费用 元/月·个、逾期占用费 元/日，tc=false 不并入总价",
+    "签章缺陷漏报补抽：主协议+补充协议甲方（签章）处留白（疑似缺章）",
+    "落款人与当事人不符：补充协议乙方落款「王五」不在买受人(张三、李四)名单（signature issue）",
+    "补充协议嵌套：使用权期限随土地、不计入分摊、权属登记与税费承担，独立生效条件",
+    "余款划付截止日派生：签订日2026-05-10 + 15日 = 2026-05-25",
+    "脱敏碎片修复：付款方式位被误替为公司名 + 楼盘名重复（示例项目项目）"
+  ],
+  "provenance": "make_gold 从真实合同生成 → agent 深度脱敏（修第二买受人身份证/双手机号占位、清理「示例项目项目」重复碎片与误替为公司名的付款方式位）+ 盲标核对（修 summary 主体错误、amounts 补 unit、补主协议/补充协议甲方缺章 issue、补 person_identities）→ 已人工终审提升入 cases/ 【终审(Claude)：身份证占位统一 3301xxxxxxxxxxxxxx；PII 经脱敏→红队→确定性扫描三道复核无残留；签章/金额 issues 对照原文逐条核实；pydantic 校验通过。源 doc_id=4a26ef74b79b】",
+  "source_doc_id": "4a26ef74b79b"
+}

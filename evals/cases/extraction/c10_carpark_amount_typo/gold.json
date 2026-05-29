@@ -1,0 +1,287 @@
+{
+  "doc_type": "合同协议",
+  "title": "示例项目29号地下车位使用权转让协议（乙方张三、李四）",
+  "summary": "示例置业有限公司将示例项目29号地下车位使用权以总价人民币200000元转让给买受人张三、李四，2026-05-10签订，约定首期款500000元（原文笔误，远超总价）、余款150000元银行贷款支付，2027-06-30前交付；含一份明确使用权期限随土地使用权、车位不计入分摊、权属登记与税费由乙方承担的补充协议；主协议与补充协议甲方签章页留白，补充协议乙方落款人「王五」不在买受人名单中。",
+  "parties": [
+    "示例置业有限公司",
+    "张三",
+    "李四"
+  ],
+  "primary_date": "2026-05-10",
+  "primary_amount_text": "200000元整",
+  "primary_amount_value": 200000.0,
+  "computed_total_value": 200000.0,
+  "key_dates": [
+    {
+      "label": "签订日",
+      "date": "2026-05-10"
+    },
+    {
+      "label": "车位交付日",
+      "date": "2027-06-30"
+    },
+    {
+      "label": "余款划付截止日",
+      "date": "2026-05-25"
+    }
+  ],
+  "amounts": [
+    {
+      "label": "车位使用权转让总价",
+      "text": "200000元整",
+      "value": 200000.0,
+      "is_total_component": true,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第2页 + 车位使用权转让总价（人民币)：200000元整"
+    },
+    {
+      "label": "首期车位使用权转让价款",
+      "text": "500000元整",
+      "value": 500000.0,
+      "is_total_component": false,
+      "is_installment": true,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第2页 + 乙方应在本协议签订当日支付首期车位使用权转让价款（人民币）500000元整"
+    },
+    {
+      "label": "余款",
+      "text": "150000元整",
+      "value": 150000.0,
+      "is_total_component": false,
+      "is_installment": true,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第2页 + 余款（人民币） 150000元整通过银行贷款的方式"
+    },
+    {
+      "label": "车位服务管理费用",
+      "text": "100元/月·个",
+      "value": 100.0,
+      "unit": "元/月·个",
+      "is_total_component": false,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第5页 + 该车位服务管理费用： 100元/月·个"
+    },
+    {
+      "label": "逾期未交还车位占用费",
+      "text": "每日300元",
+      "value": 300.0,
+      "unit": "元/日",
+      "is_total_component": false,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第7页 + 逾期未交还的应按每日300元的标准支付车位占用费直至交还时止"
+    }
+  ],
+  "seals": [],
+  "fields": [
+    {
+      "label": "车位编号",
+      "value": "29号"
+    },
+    {
+      "label": "车位用途",
+      "value": "停放轿车类小型车辆"
+    },
+    {
+      "label": "车位特征",
+      "value": "在建、普通车位"
+    },
+    {
+      "label": "计价方式",
+      "value": "按个计价，不进行面积差异处理"
+    },
+    {
+      "label": "付款方式",
+      "value": "贷款付款（首期+银行贷款余款）"
+    },
+    {
+      "label": "甲方通讯地址",
+      "value": "示例市示例区示例路1号"
+    },
+    {
+      "label": "甲方电话",
+      "value": "0000-0000000"
+    },
+    {
+      "label": "甲方户名",
+      "value": "示例置业有限公司"
+    },
+    {
+      "label": "甲方开户行",
+      "value": "示例银行分行"
+    },
+    {
+      "label": "甲方账号",
+      "value": "6222xxxxxxxxxxxx"
+    },
+    {
+      "label": "乙方通讯住址",
+      "value": "示例市示例区示例路2号"
+    },
+    {
+      "label": "车位限高",
+      "value": "车身高度不超过2.2米"
+    },
+    {
+      "label": "合同份数",
+      "value": "肆份（甲方叁份、乙方壹份）"
+    },
+    {
+      "label": "争议解决方式",
+      "value": "依法向车位所在地人民法院起诉"
+    }
+  ],
+  "person_identities": [
+    {
+      "name": "示例置业有限公司",
+      "role": "甲方",
+      "identifiers": [
+        {
+          "label": "联系电话",
+          "value": "0000-0000000"
+        },
+        {
+          "label": "开户行",
+          "value": "示例银行分行"
+        },
+        {
+          "label": "银行账号",
+          "value": "6222xxxxxxxxxxxx"
+        }
+      ]
+    },
+    {
+      "name": "张三",
+      "role": "买受人(乙方)",
+      "identifiers": [
+        {
+          "label": "身份证号",
+          "value": "3301xxxxxxxxxxxxxx"
+        },
+        {
+          "label": "联系电话",
+          "value": "138xxxxxxxx"
+        }
+      ]
+    },
+    {
+      "name": "李四",
+      "role": "买受人(乙方)",
+      "identifiers": [
+        {
+          "label": "身份证号",
+          "value": "3301xxxxxxxxxxxxxx"
+        },
+        {
+          "label": "联系电话",
+          "value": "138xxxxxxxx"
+        }
+      ]
+    }
+  ],
+  "obligations": [
+    {
+      "actor": "party_b",
+      "action": "签订当日支付首期车位款",
+      "deadline": "2026-05-10",
+      "evidence": "乙方应在本协议签订当日支付首期车位使用权转让价款（人民币）500000元整"
+    },
+    {
+      "actor": "party_b",
+      "action": "通过银行贷款划付余款",
+      "deadline": "2026-05-25",
+      "evidence": "余款（人民币） 150000元整通过银行贷款的方式，在本协议签订后15日内全额划付到甲方指定账户"
+    },
+    {
+      "actor": "party_b",
+      "action": "签订当日提交贷款申请资料并办妥贷款手续",
+      "deadline": "2026-05-10",
+      "evidence": "乙方应在本协议签订当日提交完备的贷款申请资料，办理完毕所有银行要求手续...办妥贷款手续"
+    },
+    {
+      "actor": "party_a",
+      "action": "交付车位",
+      "deadline": "2027-06-30",
+      "evidence": "乙方付清全部价款后，甲方于 2027年 6月 30日前将上述车位交付乙方"
+    },
+    {
+      "actor": "party_b",
+      "action": "书面提出建筑质量问题",
+      "deadline": null,
+      "evidence": "对质量问题，乙方应当在车位接收时书面提出"
+    },
+    {
+      "actor": "party_b",
+      "action": "十天内书面答复车位调换方案",
+      "deadline": null,
+      "evidence": "乙方须在接到甲方通知后十天内书面答复是否同意调换方案"
+    },
+    {
+      "actor": "party_b",
+      "action": "协议解除后3天内交还车位",
+      "deadline": null,
+      "evidence": "若车位已交付使用的，乙方应于本协议解除后3天内将该车位按甲方向乙方交付时的状态交还甲方"
+    },
+    {
+      "actor": "party_b",
+      "action": "自行办理车位权属登记",
+      "deadline": null,
+      "evidence": "相关部门同意办理车位权属登记手续的，由乙方自行负责办理（具体程序以政府相关规定为准)"
+    },
+    {
+      "actor": "party_b",
+      "action": "承担并缴纳土地出让金/维修资金/契税等税费",
+      "deadline": null,
+      "evidence": "若今后需补缴地下车位的土地出让金、物业专项维修资金、契税等税费的...均由乙方承担并自行缴纳"
+    }
+  ],
+  "sub_agreements": [
+    {
+      "title": "《地下车位使用权转让协议》补充协议",
+      "summary": "明确车位使用权期限与该车位占用的土地使用权期限一致；乙方所受让车位不计入分摊范围，权属登记由乙方自行办理，后续土地出让金、物业专项维修资金、契税等一切税费由乙方承担；与原协议不一致处以本补充协议为准；自甲方加盖公章、乙方签字之日生效。",
+      "sign_date": "2026-05-10",
+      "seals": [],
+      "evidence": "第9页 + 《地下车位使用权转让协议》补充协议...自甲方加盖公章、乙方签字之日生效"
+    }
+  ],
+  "completeness": {
+    "status": "incomplete",
+    "issues": [
+      {
+        "item": "分期款之和超过转让总价",
+        "category": "amount",
+        "detail": "分期款之和（首期车位使用权转让价款500000＋余款150000）=650000元，超过转让总价/合计200000元（多450000元），疑似首期款金额笔误，请人工核对",
+        "evidence": "首期：第2页 + 首期车位使用权转让价款（人民币）500000元整；余款：第2页 + 余款（人民币） 150000元整；总价：第2页 + 车位使用权转让总价（人民币)：200000元整"
+      },
+      {
+        "item": "主协议·甲方签章",
+        "category": "signature",
+        "detail": "落款处「甲方（签章）：」后留白，疑似未盖章（文本未见甲方印章/签字，也可能为红章 OCR 漏识，需人工复核）",
+        "evidence": "第8页 + 甲方（签章）：（其后空白）"
+      },
+      {
+        "item": "补充协议·甲方签章",
+        "category": "signature",
+        "detail": "补充协议生效条件为「自甲方加盖公章、乙方签字之日生效」，但落款处「甲方（签章）：」后留白，疑似未盖章，可能影响生效，需人工复核",
+        "evidence": "第9页 + 甲方（签章）：（其后空白）；本补充协议...自甲方加盖公章、乙方签字之日生效"
+      },
+      {
+        "item": "补充协议·乙方落款人与当事人不符",
+        "category": "signature",
+        "detail": "补充协议落款乙方签字为「王五」，但乙方（买受人）为张三、李四，签字人不在当事人名单中，疑似代签/冒签/笔误，需人工核对",
+        "evidence": "第9页 + 乙方（签章）： 王五；头部乙方：张三、李四"
+      }
+    ]
+  },
+  "raw_evidence": {},
+  "llm_model": null,
+  "llm_usage": null,
+  "extraction_error": null
+}

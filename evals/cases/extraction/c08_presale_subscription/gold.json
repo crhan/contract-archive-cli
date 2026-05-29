@@ -1,0 +1,203 @@
+{
+  "doc_type": "合同协议",
+  "title": "示例苑项目3幢102室商品房认购协议(乙方张三、李四)",
+  "summary": "示例置业有限公司与买受人张三、李四签订示例苑项目3幢102室商品房认购协议，建筑面积约286.92平方米，单价42799元/平方米，总价12279889元，预付房款（含定金）500000元，签订于2026年5月5日；落款区甲方盖销售合同专用章，乙方买受人签章处空白。",
+  "parties": [
+    "示例置业有限公司",
+    "张三",
+    "李四"
+  ],
+  "primary_date": "2026-05-05",
+  "primary_amount_text": "12279889元（大写：壹仟贰佰贰拾柒万玖仟捌佰捌拾玖元整）",
+  "primary_amount_value": 12279889.0,
+  "computed_total_value": 12279889.0,
+  "key_dates": [
+    {
+      "label": "签订日",
+      "date": "2026-05-05"
+    },
+    {
+      "label": "递交审贷资料及签订买卖合同截止日",
+      "date": "2026-05-12"
+    },
+    {
+      "label": "一次性付款签订买卖合同截止日",
+      "date": null
+    }
+  ],
+  "amounts": [
+    {
+      "label": "单位售价",
+      "text": "42799元/平方米",
+      "value": 42799.0,
+      "unit": "元/㎡",
+      "is_total_component": false,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第2页 + 单位售价为（人民币）42799元/平方米"
+    },
+    {
+      "label": "总价",
+      "text": "12279889元（大写：壹仟贰佰贰拾柒万玖仟捌佰捌拾玖元整）",
+      "value": 12279889.0,
+      "is_total_component": true,
+      "is_installment": false,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第2页 + 总价为（人民币）12279889元（大写：壹仟贰佰贰拾柒万玖仟捌佰捌拾玖元整）"
+    },
+    {
+      "label": "预付房款/定金",
+      "text": "500000元整",
+      "value": 500000.0,
+      "is_total_component": false,
+      "is_installment": true,
+      "period_start": null,
+      "period_end": null,
+      "evidence": "第2页 + 应向出卖人支付商品房预付房款人民币500000 元整，其中含定金（人民币）500000元整"
+    }
+  ],
+  "seals": [
+    {
+      "raw_text": "示例置业有限公司 销售合同专用章 33010000000001",
+      "owner": "示例置业有限公司",
+      "seal_type": "销售合同专用章"
+    }
+  ],
+  "fields": [
+    {
+      "label": "项目名称",
+      "value": "示例苑"
+    },
+    {
+      "label": "房屋位置",
+      "value": "3幢--102室"
+    },
+    {
+      "label": "建筑面积",
+      "value": "约286.92平方米"
+    },
+    {
+      "label": "商品房销售特征",
+      "value": "期房"
+    },
+    {
+      "label": "土地使用权及/或在建工程抵押情况",
+      "value": "已抵押"
+    },
+    {
+      "label": "甲方通讯地址",
+      "value": "示例市示例区示例路1号"
+    },
+    {
+      "label": "乙方通讯住址",
+      "value": "示例市示例区示例路1号"
+    }
+  ],
+  "person_identities": [
+    {
+      "name": "示例置业有限公司",
+      "role": "出卖人",
+      "identifiers": [
+        {
+          "label": "电话",
+          "value": "0000-0000000"
+        },
+        {
+          "label": "印章",
+          "value": "33010000000001"
+        }
+      ]
+    },
+    {
+      "name": "张三",
+      "role": "买受人",
+      "identifiers": [
+        {
+          "label": "身份证号",
+          "value": "3301xxxxxxxxxxxxxx"
+        },
+        {
+          "label": "电话",
+          "value": "138xxxxxxxx"
+        }
+      ]
+    },
+    {
+      "name": "李四",
+      "role": "买受人",
+      "identifiers": [
+        {
+          "label": "身份证号",
+          "value": "3301xxxxxxxxxxxxxx"
+        },
+        {
+          "label": "电话",
+          "value": "138xxxxxxxx"
+        }
+      ]
+    }
+  ],
+  "obligations": [
+    {
+      "actor": "party_b",
+      "action": "支付商品房预付房款及定金",
+      "deadline": null,
+      "evidence": "买受人在签订本协议的当日，应向出卖人支付商品房预付房款人民币500000 元整，其中含定金（人民币）500000元整。"
+    },
+    {
+      "actor": "party_b",
+      "action": "递交完整的审贷资料",
+      "deadline": "2026-05-12",
+      "evidence": "买受人于 2026年 5 月 12 前向按揭银行递交完整的审贷资料...办理按揭贷款审查"
+    },
+    {
+      "actor": "party_b",
+      "action": "签订《商品房买卖合同》并付清首付款",
+      "deadline": "2026-05-12",
+      "evidence": "买受人应当于 2026年5月 12前...与出卖人签订《商品房买卖合同》，并于签订合同当日...付清首付款，并办妥按揭贷款手续。"
+    },
+    {
+      "actor": "party_b",
+      "action": "签订《商品房买卖合同》并付清全部房价款",
+      "deadline": null,
+      "evidence": "按揭贷款方式变更为一次性付款方式，在确定买受人的贷款审查未能通过后的【3】日内...签订《商品房买卖合同》，并付清全部房价款。"
+    },
+    {
+      "actor": "party_a",
+      "action": "解除商品房土地使用权及在建工程抵押",
+      "deadline": null,
+      "evidence": "出卖人承诺在该商品房办理产权初始登记前解除抵押。"
+    },
+    {
+      "actor": "party_b",
+      "action": "缴纳商品房买卖相关税费",
+      "deadline": null,
+      "evidence": "有关该商品房买卖需由买受人缴纳之税费，均由买受人承担。"
+    },
+    {
+      "actor": "party_a",
+      "action": "代收代缴物业专项维修资金",
+      "deadline": null,
+      "evidence": "物业专项维修资金由出卖人按政府有关规定向买受人代收代缴。"
+    }
+  ],
+  "sub_agreements": [],
+  "completeness": {
+    "status": "incomplete",
+    "issues": [
+      {
+        "item": "乙方买受人签章",
+        "category": "signature",
+        "detail": "落款区甲方已盖销售合同专用章，但乙方“买受人：”“委托代理人：”后均空白，无手写签字也无印章（疑似，可能OCR漏识，需人工复核）",
+        "evidence": "第5页 + 买受人：/委托代理人：（落款区空白，仅有日期：2026年5月5日）"
+      }
+    ]
+  },
+  "identity_issues": [],
+  "raw_evidence": {},
+  "llm_model": null,
+  "llm_usage": null,
+  "extraction_error": null
+}
