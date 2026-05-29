@@ -419,5 +419,29 @@ app.add_typer(party_app, name="party")
 register_introspect(app)
 
 
+def main_entry() -> None:
+    """
+    console_scripts 入口：在 app() 外包一层顶层异常钩子。
+
+    受控退出（命令里的 typer.Exit/Abort 在 click standalone 模式下已转成 SystemExit，
+    是 BaseException、不被下面 except Exception 接住）原样放行；未预期异常（如底层
+    sqlite OperationalError）翻成一行人话错误走 stderr（不污染 stdout 管道），默认不打
+    完整 traceback——加 -v/--verbose 才用 rich 展开（show_locals=False 防 secret 泄露）。
+
+    此前入口直挂裸 app()、typer pretty 异常开着，底层异常直接 dump 一坨 rich traceback，
+    用户/agent 看到的是实现细节而非可操作信息。配合 app 的 pretty_exceptions_enable=False。
+    """
+    try:
+        app()
+    except Exception as exc:  # noqa: BLE001 — 顶层兜底，把未预期异常翻成人话
+        info = classify_exception(exc)
+        err_console.print(f"[red]意外错误[/red] [{info.code}] {info.message}")
+        if "-v" in sys.argv or "--verbose" in sys.argv:
+            err_console.print_exception(show_locals=False)
+        else:
+            err_console.print("[dim]这可能是 bug；加 -v 看完整 traceback[/dim]")
+        raise SystemExit(1)
+
+
 if __name__ == "__main__":
-    app()
+    main_entry()

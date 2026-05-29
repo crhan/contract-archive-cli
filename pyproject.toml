@@ -45,7 +45,8 @@ dev = [
 ]
 
 [project.scripts]
-contract-archive = "contract_archive.cli:app"
+# 入口指向 main_entry（在 app() 外包顶层异常钩子），而非裸 app——见 cli.main_entry。
+contract-archive = "contract_archive.cli:main_entry"
 
 [build-system]
 requires = ["hatchling>=1.24"]

@@ -122,7 +122,10 @@ app = typer.Typer(
     # clig.dev：无参数应展示帮助，而非报 "Missing command" 错误框。
     no_args_is_help=True,
     context_settings={"help_option_names": ["-h", "--help"]},
-    # 默认 typer 会在 traceback 里 dump 局部变量，可能带出敏感内容，关掉。
+    # 关掉 typer 自带的 rich traceback 接管：未预期异常改由 cli.main_entry 的顶层钩子翻成
+    # 人话（默认一行错误 + 提示 -v 展开），别直接 dump 一坨实现细节给用户/agent。
+    pretty_exceptions_enable=False,
+    # show_locals=False 留作防御纵深：万一将来 enable 翻开，也不把局部变量（可能含 secret）dump 出。
     pretty_exceptions_show_locals=False,
     epilog=(
         "示例：\n"
