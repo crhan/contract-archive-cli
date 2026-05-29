@@ -130,6 +130,30 @@ def test_role_redundant_item_not_penalized():
     assert fs.tp == 1 and fs.fp == 0 and fs.fn == 0
 
 
+def test_double_party_not_matched_to_single():
+    """「双方签章」与「甲方/乙方签章」仅一字之差，不得被 str_sim 误配（_issue_party 三态区分）；
+    「双方」对「双方」应匹配。"""
+    from contract_archive.schemas import CompletenessIssue
+    g = [CompletenessIssue(item="主协议·双方签章", category="signature", detail="x", evidence="第 8 页")]
+    for single in ("主协议·甲方签章", "主协议·乙方签章"):
+        p = [CompletenessIssue(item=single, category="signature", detail="x", evidence="第 8 页")]
+        fs = score_completeness_issues(g, p)
+        assert fs.tp == 0 and fs.fn == 1 and fs.fp == 1, f"双方 vs {single} 不该配上"
+    p2 = [CompletenessIssue(item="主协议·双方签章", category="signature", detail="x", evidence="第 8 页")]
+    assert score_completeness_issues(g, p2).tp == 1
+
+
+def test_role_alias_seller_buyer_aliases():
+    """补充别名：「卖方签章」(→甲方) 与 gold「出卖人签章」(→甲方) 同义匹配；卖方 vs 买方 不配。"""
+    from contract_archive.schemas import CompletenessIssue
+    g = [CompletenessIssue(item="出卖人签章", category="signature", detail="x", evidence="第 3 页")]
+    p = [CompletenessIssue(item="卖方签章", category="signature", detail="x", evidence="第 3 页")]
+    assert score_completeness_issues(g, p).tp == 1
+    p2 = [CompletenessIssue(item="买方签章", category="signature", detail="x", evidence="第 3 页")]
+    fs2 = score_completeness_issues(g, p2)
+    assert fs2.tp == 0 and fs2.fn == 1 and fs2.fp == 1
+
+
 def test_empty_pred_is_parse_failure():
     """空信封（调用/解析失败）→ parse_ok=False。"""
     gold = _load_gold("c03_vat_invoice")
