@@ -6,7 +6,7 @@
   "primary_date": "2026-04-05",
   "primary_amount_text": "￥10,000.00",
   "primary_amount_value": 10000.0,
-  "computed_total_value": null,
+  "computed_total_value": 10000.0,
   "key_dates": [
     {"label": "开票日", "date": "2026-04-05"}
   ],

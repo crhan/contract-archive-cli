@@ -52,7 +52,7 @@
       "text": "500000元整",
       "value": 500000.0,
       "is_total_component": false,
-      "is_installment": true,
+      "is_installment": false,
       "period_start": null,
       "period_end": null,
       "evidence": "第2页 + 应向出卖人支付商品房预付房款人民币500000 元整，其中含定金（人民币）500000元整"
