@@ -313,8 +313,7 @@ contract-archive-cli/
 ├── docker/Dockerfile
 ├── .env.example
 ├── scripts/
-│   ├── setup.sh
-│   └── run_sample.sh
+│   └── setup.sh
 ├── contract_archive/
 │   ├── cli.py              # 入口 main_entry + 写命令 ingest/extract/delete/vacuum + 组装
 │   ├── cli_common.py       # app 实例 + 全局 callback + 参数 Enum + 双 console + 路径/ident 解析
