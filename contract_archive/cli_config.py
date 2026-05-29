@@ -75,7 +75,8 @@ def set_cmd(
         err_console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
     k = find_key(key)
-    console.print(f"[green]已设置[/green] {k.name} → {cfg}")
+    # 状态变更确认是「消息」，走 stderr（与 delete/vacuum 的 ✓ 一致）；stdout 留给数据。
+    err_console.print(f"[green]已设置[/green] {k.name} → {cfg}")
     if k.secret:
         err_console.print(
             "[yellow]注意：该文件明文存储 secret，已设为仅本人可读(0600)；请勿提交或分享。[/yellow]"
@@ -92,4 +93,4 @@ def unset_cmd(
     except ValueError as e:
         err_console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
-    console.print(f"[green]已删除[/green] {key.strip()} ← {cfg}")
+    err_console.print(f"[green]已删除[/green] {key.strip()} ← {cfg}")

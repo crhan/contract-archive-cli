@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json as _json
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -124,7 +125,8 @@ def set_party(
         err_console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
     reg.save()
-    console.print(f"[green]已设置[/green] {name}·{label} → {paths.known_parties_path}")
+    # 状态变更确认走 stderr（与 delete/vacuum 一致），stdout 留给数据。
+    err_console.print(f"[green]已设置[/green] {name}·{label} → {paths.known_parties_path}")
     err_console.print(
         "[yellow]注意：known_parties.json 明文存 PII，已设为仅本人可读(0600)，请勿提交或分享。[/yellow]"
     )
@@ -135,14 +137,27 @@ def rm_party(
     name: str = typer.Argument(..., help="主体名"),
     label: Optional[str] = typer.Argument(None, help="标识名；省略则删除该主体全部标识"),
     archive: Optional[Path] = _archive_opt,
+    yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认（删整个主体时需要）"),
 ) -> None:
     """删除某主体的某标识；不给 label 则删除整个主体。"""
     paths = _resolve_archive(archive)
     reg = PartyRegistry.load(paths.known_parties_path)
     target = f"{name}·{label}" if label else name
+    # 删【整个主体】（省略 label）是更危险路径：known_parties 是跨文档 PII 核对基准，
+    # 删错会让后续身份核对静默失准。比照 delete 的守卫——非交互须显式 --yes，TTY 下确认。
+    # 删单个 label（精确指定）影响小，保持轻量、不强制确认。
+    if label is None and not yes:
+        if not sys.stdin.isatty():
+            err_console.print(
+                f"[red]拒绝在非交互环境删除整个主体 {name}：请加 --yes 确认[/red]"
+            )
+            raise typer.Exit(1)
+        if not typer.confirm(f"删除主体 {name} 的全部标识基准？", default=False):
+            err_console.print("[yellow]aborted[/yellow]")
+            raise typer.Exit(0)
     if reg.remove(name, label):
         reg.save()
-        console.print(f"[green]已删除[/green] {target}")
+        err_console.print(f"[green]已删除[/green] {target}")
     else:
         err_console.print(f"[red]未找到: {target}[/red]")
         raise typer.Exit(1)

@@ -63,7 +63,7 @@ from .cli_render import (
 @app.command("list")
 def list_cmd(
     archive: Optional[Path] = _archive_opt,
-    limit: int = typer.Option(50, "--limit", "-n"),
+    limit: int = typer.Option(50, "--limit", "-n", help="最多返回 N 条（按排序截断）"),
     order_by: OrderBy = typer.Option(
         OrderBy.ingested_at, "--order-by", help="排序字段"
     ),
@@ -155,7 +155,7 @@ def search(
     subject: Optional[str] = typer.Option(
         None, "--subject", help="主体包含（LIKE），覆盖所有文档类型（含合同甲乙方）"
     ),
-    limit: int = typer.Option(50, "--limit", "-n"),
+    limit: int = typer.Option(50, "--limit", "-n", help="最多返回 N 条（按排序截断）"),
     fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
 ) -> None:
     """多字段 AND 过滤查询。"""
@@ -361,7 +361,7 @@ def todo(
         "--within-days",
         help="便捷选项：deadline 在今天到 N 天内（等价于 --after today --before today+N）",
     ),
-    limit: int = typer.Option(50, "--limit", "-n"),
+    limit: int = typer.Option(50, "--limit", "-n", help="最多返回 N 条（按排序截断）"),
     fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
 ) -> None:
     """
@@ -439,11 +439,14 @@ def todo(
 @app.command("seals")
 def seals_cmd(
     archive: Optional[Path] = _archive_opt,
-    owner: Optional[str] = typer.Option(None, "--owner", help="盖章主体包含（LIKE）"),
-    seal_type: Optional[str] = typer.Option(
-        None, "--type", help="印章类型包含（LIKE），如 合同专用章/公章"
+    owner: Optional[str] = typer.Option(
+        None, "--owner", "--seal-owner", help="盖章主体包含（LIKE）；与 search 的 --seal-owner 同义"
     ),
-    limit: int = typer.Option(200, "--limit", "-n"),
+    seal_type: Optional[str] = typer.Option(
+        None, "--type", "--seal-type",
+        help="印章类型包含（LIKE），如 合同专用章/公章；与 search 的 --seal-type 同义",
+    ),
+    limit: int = typer.Option(200, "--limit", "-n", help="最多列 N 枚印章"),
     fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
 ) -> None:
     """

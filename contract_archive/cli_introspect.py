@@ -167,7 +167,11 @@ def describe_cmd(
     cmd = group.commands.get(command)
     if cmd is None:
         # 未知命令是用户错——提示走 stderr，退出码 2（与 typer 参数错一致）。
-        typer.echo(f"unknown command: {command}", err=True)
+        # 列出可选命令（与同模块 schema 对未知 type 的处理对齐），让用户/agent 少一步摸索。
+        names = ", ".join(sorted(group.commands))
+        typer.echo(
+            f"unknown command: {command}；可选: {names}（或跑 capabilities 看全部）", err=True
+        )
         raise typer.Exit(2)
     entry = _command_entry(command, cmd, with_params=True)
     entry["schema_version"] = INTROSPECT_SCHEMA_VERSION
