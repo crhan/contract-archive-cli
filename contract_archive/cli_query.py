@@ -144,7 +144,7 @@ def search(
     ),
     status: Optional[DocStatus] = typer.Option(None, "--status", help="过滤状态"),
     has_seal: Optional[bool] = typer.Option(
-        None, "--has-seal/--no-seal", help="有/无印章（默认不过滤）"
+        None, "--has-seal/--no-seal", help="有/无印章（默认不过滤）；只想列章本身用 seals 命令"
     ),
     seal_owner: Optional[str] = typer.Option(
         None, "--seal-owner", help="盖章主体包含（LIKE）"
@@ -452,10 +452,13 @@ def seals_cmd(
     """
     跨文档列印章：某主体有哪些章、各出现在哪些文档（按主体/类型聚合阅读）。
 
+    与 search 互补：seals 列【印章】本身；要按印章条件筛【文档】（哪些合同盖了某章）
+    用 `search --has-seal/--seal-owner/--seal-type`。
+
     用例：
       contract-archive seals                  全部印章
-      contract-archive seals --owner 示例公司   某公司的章
-      contract-archive seals --type 合同专用章
+      contract-archive seals --seal-owner 示例公司   某公司的章
+      contract-archive seals --seal-type 合同专用章
     """
     paths = _resolve_archive(archive)
     if _archive_empty(paths, fmt):
