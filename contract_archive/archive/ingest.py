@@ -96,8 +96,8 @@ def _run_extraction(
     返回 (合同抽取, 置信度, 通用信封)——三者一并交给 repository 落库。
     """
     if not llm_enabled:
-        # 无 LLM：通用路径纯靠 LLM、无从抽取；保留合同 rule 抽取作为无 key 兜底
-        # （--no-llm 调试能力，见 README），并由其派生信封。
+        # 无 LLM：rule 抽取自 Phase 2 已退役，extract_contract(llm_enabled=False) 返回空对象——
+        # 即 --no-llm 下抽取字段留空（仅 MinerU 产物入库），可后续 `extract <id>` 补抽。
         ext, conf = extract_contract(document_text, llm_enabled=False)
         return ext, conf, contract_to_envelope(ext)
 

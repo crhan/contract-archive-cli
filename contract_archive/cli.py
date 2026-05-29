@@ -76,7 +76,8 @@ def ingest(
         False, "--reingest", help="忽略 sha256 去重，强制重跑 MinerU + 抽取"
     ),
     no_llm: bool = typer.Option(
-        False, "--no-llm", help="只跑 rule 抽取，跳过 LLM（调试用，无 API key 时也用）"
+        False, "--no-llm",
+        help="跳过 LLM 抽取（无 API key 时也用）：仅入库 MinerU 产物，抽取字段留空，可后续 extract 补抽",
     ),
     limit: int = typer.Option(
         0, "--limit", help="最多处理 N 个文件（0 = 无限制；试跑用）"
@@ -291,7 +292,9 @@ def _ingest_dry_run(pdfs: list[Path], paths: ArchivePaths, fmt: OutputFormat) ->
 def extract(
     ident: str = typer.Argument(..., help="档案 id 或 sha 前缀"),
     archive: Optional[Path] = _archive_opt,
-    no_llm: bool = typer.Option(False, "--no-llm", help="只跑 rule，跳过 LLM"),
+    no_llm: bool = typer.Option(
+        False, "--no-llm", help="跳过 LLM（抽取字段留空，rule 已退役）"
+    ),
     fmt: OutputFormat = typer.Option(
         OutputFormat.table, "--format", help="table | json（json 把结构化结果+error 打到 stdout）"
     ),
@@ -299,7 +302,7 @@ def extract(
     """
     只重跑合同字段抽取（不重跑 MinerU）。用于：
       - partial 状态修复
-      - 改 prompt / rule 后批量再抽取
+      - 改 prompt 后批量再抽取
     """
     paths = _resolve_archive(archive)
     conn = open_archive_db(paths.db_path)
