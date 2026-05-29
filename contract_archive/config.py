@@ -220,3 +220,34 @@ def visible_items(*, reveal: bool = False, path: Path | None = None) -> list[tup
     """config show 用：按注册表顺序给出 (name, 展示值)，值已按 env>file>default 解析。"""
     values = load_config_values(path)
     return [(k.name, display_value(k, _read_value(values, k), reveal=reveal)) for k in CONFIG_KEYS]
+
+
+def describe_items(*, reveal: bool = False, path: Path | None = None) -> list[dict[str, object]]:
+    """
+    config show --format json 用：每个配置键的结构化描述（让 agent 程序化发现配置旋钮）。
+
+    含 key / env（对应环境变量名）/ secret / default / value（按 env>file>default 解析，
+    secret 默认掩码）/ source（值来自 env|file|default|unset）。source 判定与 _read_value 同序。
+    """
+    values = load_config_values(path)
+    out: list[dict[str, object]] = []
+    for k in CONFIG_KEYS:
+        env_v = os.getenv(k.env_name)
+        file_v = values.get(k.name)
+        if env_v and env_v.strip():
+            source = "env"
+        elif file_v and file_v.strip():
+            source = "file"
+        elif k.default:
+            source = "default"
+        else:
+            source = "unset"
+        out.append({
+            "key": k.name,
+            "env": k.env_name,
+            "secret": k.secret,
+            "default": k.default,
+            "value": display_value(k, _read_value(values, k), reveal=reveal),
+            "source": source,
+        })
+    return out

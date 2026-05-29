@@ -44,6 +44,7 @@ from .cli_common import (
     color_disabled,
     console,
     err_console,
+    not_found_json,
 )
 from .cli_render import (
     build_list_table,
@@ -203,16 +204,23 @@ def show(
 ) -> None:
     """显示单条档案详情。"""
     paths = _resolve_archive(archive)
-    # show 请求的是具体一条；库不存在/查不到都是错误（exit 1），提示走 stderr。
+    # show 请求的是具体一条；库不存在/查不到都是错误（exit 1）。
+    # table 模式提示走 stderr；json 模式吐 not_found 信封到 stdout（别让 | jq 拿到空输入）。
     if not paths.db_path.exists():
-        err_console.print(f"[yellow]archive empty: {paths.db_path}[/yellow]")
+        if fmt is OutputFormat.json:
+            not_found_json(ident)
+        else:
+            err_console.print(f"[yellow]archive empty: {paths.db_path}[/yellow]")
         raise typer.Exit(1)
     conn = open_archive_db(paths.db_path)
     row = _resolve_ident(conn, ident)
     conn.close()
 
     if not row:
-        err_console.print(f"[red]not found: {ident}[/red]")
+        if fmt is OutputFormat.json:
+            not_found_json(ident)
+        else:
+            err_console.print(f"[red]not found: {ident}[/red]")
         raise typer.Exit(1)
 
     if fmt is OutputFormat.json:

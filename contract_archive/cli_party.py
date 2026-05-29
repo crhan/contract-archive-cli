@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json as _json
 from pathlib import Path
 from typing import Optional
 
@@ -16,7 +17,7 @@ from rich.table import Table
 from .archive.party_registry import PartyRegistry
 from .archive.paths import ArchivePaths, default_archive_root
 # 复用 cli_common 的全局 console（理由同 cli_config）：自建实例会让全局 --no-color 失效。
-from .cli_common import console, err_console
+from .cli_common import OutputFormat, console, err_console
 from .config import load_settings
 
 # pretty_exceptions_show_locals=False：防 traceback 把 PII 等局部变量 dump 到终端。
@@ -50,10 +51,18 @@ def _load_registry(archive_opt: Optional[Path]) -> PartyRegistry:
 
 
 @party_app.command("list")
-def list_parties(archive: Optional[Path] = _archive_opt) -> None:
+def list_parties(
+    archive: Optional[Path] = _archive_opt,
+    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
+) -> None:
     """列出基准库里所有主体及其固有标识。"""
     reg = _load_registry(archive)
     parties = reg.all_parties()
+    if fmt is OutputFormat.json:
+        # known_parties 是跨文档身份核对基准，agent 据此核对身份——给机读出口，别只剩表格。
+        # 空库吐合法 {}（与其它命令空集合吐 [] 同一套契约）。注意：含真实 PII，仍只到本地 stdout。
+        print(_json.dumps(parties, ensure_ascii=False, indent=2))
+        return
     if not parties:
         err_console.print("[yellow]known_parties 为空——入库文档后会自动录入首见标识。[/yellow]")
         return
@@ -74,13 +83,21 @@ def list_parties(archive: Optional[Path] = _archive_opt) -> None:
 def show_party(
     name: str = typer.Argument(..., help="主体名（姓名或机构全称）"),
     archive: Optional[Path] = _archive_opt,
+    fmt: OutputFormat = typer.Option(OutputFormat.table, "--format", help="table | json"),
 ) -> None:
     """查看某主体的全部标识基准。"""
     reg = _load_registry(archive)
     ids = reg.get(name)
     if not ids:
-        err_console.print(f"[red]未找到主体: {name}[/red]")
+        # json 模式吐 not_found 信封到 stdout（别让 | jq 拿空输入）；table 走 stderr。
+        if fmt is OutputFormat.json:
+            print(_json.dumps({"error": "not_found", "name": name}, ensure_ascii=False))
+        else:
+            err_console.print(f"[red]未找到主体: {name}[/red]")
         raise typer.Exit(1)
+    if fmt is OutputFormat.json:
+        print(_json.dumps(ids, ensure_ascii=False, indent=2))
+        return
     table = Table(title=f"{name} · {len(ids)} 项标识")
     table.add_column("标识", style="cyan")
     table.add_column("值", overflow="fold")

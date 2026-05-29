@@ -11,6 +11,7 @@ CLI 基础设施（被各命令模块共享的叶子模块，不依赖任何 cli
 """
 from __future__ import annotations
 
+import json as _json
 import logging
 import os
 from enum import Enum
@@ -243,6 +244,16 @@ def _archive_empty(paths: ArchivePaths, fmt: OutputFormat) -> bool:
     else:
         err_console.print(f"[yellow]archive empty: {paths.db_path} not found[/yellow]")
     return True
+
+
+def not_found_json(ident: str) -> None:
+    """
+    show/extract 的 json 模式未命中时吐合法 JSON 错误信封到 stdout（调用方随后 Exit(1)）。
+
+    与空集合命令吐 `[]`、stats 吐零值对象同一套 JSON 契约：json 模式永不让 stdout 为空，
+    保证 `| jq` / json.loads 拿到可解析对象。退出码仍非零，让 shell 也能判失败。
+    """
+    print(_json.dumps({"error": "not_found", "ident": ident}, ensure_ascii=False))
 
 
 def _resolve_ident(conn, ident: str):

@@ -60,6 +60,7 @@ from .cli_common import (
     app,
     console,  # noqa: F401  —— re-export：历史上有调用方/测试经 cli.console 访问
     err_console,
+    not_found_json,
 )
 
 # ---------- ingest ----------
@@ -304,7 +305,11 @@ def extract(
     conn = open_archive_db(paths.db_path)
     row = _resolve_ident(conn, ident)
     if not row:
-        err_console.print(f"[red]not found: {ident}[/red]")
+        # json 模式吐 not_found 信封到 stdout（与 show 一致，别让 | jq 拿空输入）；table 走 stderr。
+        if fmt is OutputFormat.json:
+            not_found_json(ident)
+        else:
+            err_console.print(f"[red]not found: {ident}[/red]")
         conn.close()
         raise typer.Exit(1)
 

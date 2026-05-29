@@ -7,14 +7,23 @@
 """
 from __future__ import annotations
 
+import json as _json
+
 import typer
 from rich.table import Table
 
 # 复用 cli_common 的全局 console（别各建实例）：全局 --no-color 在 callback 里只改 cli_common
 # 那对实例，子组自建 Console 会让 --no-color 对 config 命令全失效。cli_common 是叶子模块，
 # import 它不成环（cli_query 已用同款）。
-from .cli_common import console, err_console
-from .config import config_path, find_key, set_value, unset_value, visible_items
+from .cli_common import OutputFormat, console, err_console
+from .config import (
+    config_path,
+    describe_items,
+    find_key,
+    set_value,
+    unset_value,
+    visible_items,
+)
 
 # pretty_exceptions_show_locals=False：防 traceback 把 api_key 等局部变量 dump 到终端。
 config_app = typer.Typer(
@@ -28,8 +37,15 @@ config_app = typer.Typer(
 @config_app.command("show")
 def show(
     reveal: bool = typer.Option(False, "--reveal", help="显示 secret 明文（默认掩码）"),
+    fmt: OutputFormat = typer.Option(
+        OutputFormat.table, "--format", help="table | json（json 含 key/env/secret/default/value/source）"
+    ),
 ) -> None:
     """列出各配置项当前生效值（优先级：环境变量 > 配置文件 > 默认）。"""
+    if fmt is OutputFormat.json:
+        # 机器发现：让 agent 程序化拿到「支持哪些配置键、对应哪个 env、是否 secret、当前值与来源」。
+        print(_json.dumps(describe_items(reveal=reveal), ensure_ascii=False, indent=2))
+        return
     cfg = config_path()
     table = Table(
         title=f"Config · {cfg}",
