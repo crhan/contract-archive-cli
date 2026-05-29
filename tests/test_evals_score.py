@@ -107,6 +107,19 @@ def test_page_mismatch_prevents_match():
     assert fs.tp == 0 and fs.fn == 1 and fs.fp == 1
 
 
+def test_role_synonym_matches_issue():
+    """角色称谓归一化：gold「乙方签章」与 pred「买受人签章」同页同义 → 匹配 TP，消除虚假 FP/FN；
+    但「出卖人(→甲方)」与「买受人(→乙方)」是不同方，仍须区分、不得误配。"""
+    from contract_archive.schemas import CompletenessIssue
+    g = [CompletenessIssue(item="主协议·乙方签章", category="signature", detail="x", evidence="第 8 页")]
+    p = [CompletenessIssue(item="主协议·买受人签章", category="signature", detail="x", evidence="第 8 页")]
+    fs = score_completeness_issues(g, p)
+    assert fs.tp == 1 and fs.fp == 0 and fs.fn == 0
+    p2 = [CompletenessIssue(item="主协议·出卖人签章", category="signature", detail="x", evidence="第 8 页")]
+    fs2 = score_completeness_issues(g, p2)
+    assert fs2.tp == 0 and fs2.fn == 1 and fs2.fp == 1
+
+
 def test_empty_pred_is_parse_failure():
     """空信封（调用/解析失败）→ parse_ok=False。"""
     gold = _load_gold("c03_vat_invoice")

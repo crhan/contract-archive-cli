@@ -91,6 +91,39 @@ def extract_page(evidence: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+# 角色称谓 → 甲方/乙方 归一化映射。合同里"甲方/乙方"与具体角色称谓（出卖人/买受人等）
+# 语义等价，但 issue.item 文本不同会让相似度匹配失败（如 gold "主协议·乙方签章" vs
+# pred "主协议·买受人签章"），制造虚假 FP/FN、压低 champion 自身得分、污染 gate 判定。
+# 打 completeness issue 前先把称谓统一到甲方/乙方，只比"哪一方·哪个要素缺/异常"，
+# 不被称谓体系差异干扰。注意：只用于 issue.item 相似度，不动 parties（机构全称不该被并称）。
+_ROLE_TO_CANON = {
+    # 甲方系（出让/出租/转让/发包/供货/出借/放贷方）
+    "出卖人": "甲方", "出租方": "甲方", "出租人": "甲方", "转让方": "甲方",
+    "发包方": "甲方", "供方": "甲方", "出借方": "甲方", "贷款人": "甲方",
+    # 乙方系（受让/承租/承包/购买/借款方）
+    "买受人": "乙方", "承租方": "乙方", "承租人": "乙方", "受让方": "乙方",
+    "承包方": "乙方", "需方": "乙方", "借款人": "乙方", "购买方": "乙方",
+}
+
+
+def normalize_issue_item(s: Optional[str]) -> str:
+    """issue.item 归一化：通用 normalize 后，把角色称谓统一到甲方/乙方，消除术语差异虚假失配。"""
+    out = normalize_str(s)
+    for term, canon in _ROLE_TO_CANON.items():
+        out = out.replace(normalize_str(term), canon)
+    return out
+
+
+def _issue_party(item_norm: str) -> str:
+    """从已归一化的 issue.item 判定它单指哪一方：'甲'/'乙'/''（无单方、双方都提、或无主体）。"""
+    jia, yi = "甲方" in item_norm, "乙方" in item_norm
+    if jia and not yi:
+        return "甲"
+    if yi and not jia:
+        return "乙"
+    return ""
+
+
 # ============================================================================
 # 打分单元
 # ============================================================================
@@ -331,8 +364,12 @@ def score_completeness_issues(gold: list, pred: list) -> FieldScore:
             page = 0.7
         else:
             return 0.0
-        txt = str_sim(normalize_str(g.item), normalize_str(p.item))
-        return page if txt >= STR_SIM_THRESHOLD else 0.0
+        gi, pi = normalize_issue_item(g.item), normalize_issue_item(p.item)
+        # 称谓归一后"甲方/乙方"仅一字之差，str_sim 会误判为高相似（"甲方签章"vs"乙方签章"≈0.9）；
+        # 故先要求明确指向的一方一致，再比要素文本，避免把不同方的同类缺陷误配。
+        if _issue_party(gi) and _issue_party(pi) and _issue_party(gi) != _issue_party(pi):
+            return 0.0
+        return page if str_sim(gi, pi) >= STR_SIM_THRESHOLD else 0.0
 
     fs.tp, fs.fp, fs.fn, _ = _align(gold, pred, sim, threshold=0.5)
     return fs
