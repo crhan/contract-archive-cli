@@ -131,10 +131,15 @@ JSON 字段定义：
     单价项的 is_total_component 与 is_installment **一律 false**（单价不是总价组成、也非分期）。
   · is_total_component：该金额是否计入"文档主合计"。收入证明的【年度税前收入】【年度股权应税收益】
     等一次性年度收入项填 true；【月均收入】【公积金(个人/公司)】等会与年度项重复累加或非收入的填 false。
-    宁缺勿错：拿不准一律 false。
+    **铁律——合计项之间不可有包含关系，否则重复累加**：若文档已给出"总价款/合同总额"这类
+    汇总金额，则**只有该汇总项**标 true，它的各分期子项（首期款/余款/尾款/定金）**一律 false**。
+    例：房屋合同 总价款12279889 标 true；首期1849889、余款10430000 标 false（它们是总价的拆分，
+    再标 true 会让合计变成 总价+首期+余款＝2×总价）。仅当文档**没有**单一汇总项、只有各独立
+    组成项（如收入证明的年度收入+股权收益）时，才让各组成项都标 true。宁缺勿错：拿不准一律 false。
   · is_installment：该金额是否为某总价的"分期/部分付款"项（首期款/定金/余款/尾款 等）。
     车位/房屋合同的【首期款】【余款】填 true；一次性付款总额、单价(元/月·个、元/日)、
     服务费、违约金等非分期项填 false。供代码校验"分期之和是否等于总价"以发现金额笔误。
+    注意：标了 is_installment=true 的项，is_total_component 必为 false（分期不入合计，见上）。
   · evidence：这笔金额在原文的定位，页码(据页脚"第X页共Y页")+ 原文片段，便于翻回核对。
     值本身只填"第X页 + 片段"，勿带"出处"二字——展示时会自动加前缀。
   · period_start / period_end：该金额覆盖的时间区间（ISO）。把"上年度""近12个月"等相对表述
@@ -251,16 +256,25 @@ def _coerce_labeled_amounts(raw: Any) -> list[LabeledAmount]:
             continue
         label = str(item.get("label", "")).strip() or "金额"
         unit = str(item.get("unit") or "").strip() or None
-        # 单价项（unit 非空，如"2.25 元/月·㎡"）：parse_money_value 解析的是币种金额，
-        # 对纯单价数字同样取得数值；但单价不是合同总价组成，强制 is_total_component=False，
-        # 避免污染 computed_total（量纲不同的单价混进合计是错误）。
+        is_installment = bool(item.get("is_installment", False))
+        # is_total_component（计入主合计）的两个**代码强制不变量**，纠正 LLM 误标：
+        #  1) 单价项（unit 非空，如"2.25 元/月·㎡"）量纲不同，绝不入合计；
+        #  2) 分期项（is_installment，如首期/余款/尾款）是某总价的部分付款，不是合计的
+        #     独立组成——若与总价同时计入会重复累加（总价12279889 + 首期 + 余款 = 2×总价）。
+        # 这两类金额无论 LLM 怎么标，is_total_component 一律压成 False。
+        is_total_component = (
+            bool(item.get("is_total_component", False))
+            and not unit
+            and not is_installment
+        )
+        # parse_money_value 对单价文本（"2.25元/月·㎡"）同样取得首个数值（2.25）。
         out.append(LabeledAmount(
             label=label,
             text=text,
             value=parse_money_value(text),
             unit=unit,
-            is_total_component=bool(item.get("is_total_component", False)) and not unit,
-            is_installment=bool(item.get("is_installment", False)),
+            is_total_component=is_total_component,
+            is_installment=is_installment,
             period_start=_norm_period(item.get("period_start")),
             period_end=_norm_period(item.get("period_end")),
             evidence=str(item.get("evidence") or "").strip(),
