@@ -120,6 +120,16 @@ def test_role_synonym_matches_issue():
     assert fs2.tp == 0 and fs2.fn == 1 and fs2.fp == 1
 
 
+def test_role_redundant_item_not_penalized():
+    """角色冗余写法：gold「乙方买受人签章」归一不应产生叠词「乙方乙方」拉低相似度，
+    须与 pred「乙方签章」同页匹配（回归：c08 认购协议曾因此虚假 FP+FN）。"""
+    from contract_archive.schemas import CompletenessIssue
+    g = [CompletenessIssue(item="乙方买受人签章", category="signature", detail="x", evidence="第 5 页")]
+    p = [CompletenessIssue(item="主协议·乙方签章", category="signature", detail="x", evidence="第 5 页")]
+    fs = score_completeness_issues(g, p)
+    assert fs.tp == 1 and fs.fp == 0 and fs.fn == 0
+
+
 def test_empty_pred_is_parse_failure():
     """空信封（调用/解析失败）→ parse_ok=False。"""
     gold = _load_gold("c03_vat_invoice")

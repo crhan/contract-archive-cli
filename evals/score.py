@@ -111,6 +111,9 @@ def normalize_issue_item(s: Optional[str]) -> str:
     out = normalize_str(s)
     for term, canon in _ROLE_TO_CANON.items():
         out = out.replace(normalize_str(term), canon)
+    # 称谓归一后，"乙方买受人签章"会变成"乙方乙方签章"——叠词反而拉低与"乙方签章"的相似度。
+    # 去掉相邻叠词，让"角色+同义角色"的冗余写法（gold 或 pred 任一侧）规整到单一称谓。
+    out = out.replace("乙方乙方", "乙方").replace("甲方甲方", "甲方")
     return out
 
 
