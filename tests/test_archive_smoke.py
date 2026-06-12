@@ -1,7 +1,7 @@
 """
 档案库 happy-path smoke test。
 
-不真跑 MinerU（subprocess 需要 GB 级模型加载几分钟），用 stub pipeline
+不真跑 OCR（subprocess 可能需要 GB 级模型加载几分钟），用 stub pipeline
 直接写出 mineru/ 目录下的产物。验证：
   - 建表 + migrate
   - ingest 单 PDF → DB 写入 + 文件落盘
@@ -145,6 +145,7 @@ def test_ingest_happy_path(archive_root, conn, sample_pdf, sample_markdown):
     # 文件落盘检查（rename 事务边界后所有 archive 内文件都应到位）
     doc_dir = archive_root.doc_dir(result.sha256)
     assert (doc_dir / "source.pdf").exists()
+    assert (doc_dir / "source.pdf").read_bytes() == sample_pdf.read_bytes()
     assert (doc_dir / "mineru" / "markdown.md").exists()
     assert (doc_dir / "mineru" / "raw_text.txt").exists()
     assert (doc_dir / "extraction_result.json").exists()
@@ -207,7 +208,7 @@ def test_ingest_reingest_replaces(archive_root, conn, sample_pdf, sample_markdow
 def test_ingest_mineru_failure_writes_failed_status(
     archive_root, conn, sample_pdf, sample_markdown
 ):
-    """MinerU 抛异常时应留 status=failed 记录，不污染 documents/。"""
+    """OCR 抛异常时应留 status=failed 记录，并保留 archive 内 source.pdf。"""
 
     class FailingPipeline:
         name = "mineru"
@@ -218,11 +219,16 @@ def test_ingest_mineru_failure_writes_failed_status(
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     assert r.status == "failed"
     assert "simulated mineru crash" in r.error_message
-    # 失败时 tmp 应该被清理，documents/<sha> 不应存在
-    assert not archive_root.doc_dir(r.sha256).exists()
+    # 失败时 tmp 应该被清理，但 documents/<sha>/source.pdf 要保留供 show/人工核对。
+    doc_dir = archive_root.doc_dir(r.sha256)
+    assert not (archive_root.tmp_dir / r.sha256[:12]).exists()
+    assert doc_dir.exists()
+    assert (doc_dir / "source.pdf").read_bytes() == sample_pdf.read_bytes()
+    assert (doc_dir / "ingest.log").exists()
     # DB 仍有一条 failed 记录
     doc = get_document(conn, r.doc_id)
     assert doc.status == "failed"
+    assert doc.output_dir == str(doc_dir)
 
 
 def test_ingest_failed_then_retry_not_skipped(
@@ -249,6 +255,23 @@ def test_ingest_failed_then_retry_not_skipped(
         r2 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     assert r2.status == "ok", f"failed 文档应自动重试，却得到 {r2.status}"
     assert r2.doc_id == r1.doc_id  # 复用同一条记录
+
+
+def test_duplicate_ingest_repairs_missing_archived_source(
+    archive_root, conn, sample_pdf, sample_markdown
+):
+    """重复 ingest 即使 skip，也要补回 archive 内误删的 source.pdf。"""
+    stub = StubMineruPipeline(markdown_text=sample_markdown)
+    with _patch_pipeline(stub):
+        r1 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
+    source_pdf = archive_root.doc_dir(r1.sha256) / "source.pdf"
+    source_pdf.unlink()
+
+    with _patch_pipeline(stub):
+        r2 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
+
+    assert r2.status == "skipped"
+    assert source_pdf.read_bytes() == sample_pdf.read_bytes()
 
 
 def test_list_and_search(archive_root, conn, sample_pdf, tmp_path):
@@ -378,6 +401,7 @@ def test_discover_pdfs_recursive(tmp_path):
 
 def test_show_ident_sha_prefix(archive_root, conn, sample_pdf, sample_markdown):
     from contract_archive.archive import find_by_sha_prefix
+    from contract_archive.cli_render import row_to_dict
 
     with _patch_pipeline(StubMineruPipeline(markdown_text=sample_markdown)):
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
@@ -388,6 +412,24 @@ def test_show_ident_sha_prefix(archive_root, conn, sample_pdf, sample_markdown):
 
     with pytest.raises(ValueError, match="prefix must be >= 4"):
         find_by_sha_prefix(conn, "abc")
+
+    payload = row_to_dict(
+        get_document(conn, r.doc_id),
+        archive_root=archive_root.root,
+        include_original_source=False,
+    )
+    archived_source = archive_root.doc_dir(r.sha256) / "source.pdf"
+    assert payload["source_path"] == str(archived_source)
+    assert payload["archive_source_exists"] is True
+    assert "original_source_path" not in payload
+
+    archived_source.unlink()
+    missing = row_to_dict(
+        get_document(conn, r.doc_id),
+        archive_root=archive_root.root,
+        include_original_source=False,
+    )
+    assert missing["archive_source_status"] == "missing"
 
 
 def test_raw_prints_ocr_text(archive_root, conn, sample_pdf, sample_markdown):

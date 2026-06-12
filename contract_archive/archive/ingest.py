@@ -4,16 +4,16 @@
 流程（每个 PDF 一次调用）：
   1) 流式 SHA256
   2) 查 documents.sha256 → 命中 + 非 reingest 直接 skip
-  3) 在 tmp/<sha-short>/ 跑 MinerU + 抽取（mineru 失败立刻退出）
+  3) 在 tmp/<sha-short>/ 先留 source.pdf，再跑 OCR pipeline + 抽取
   4) 全成功后 os.rename(tmp → documents/<sha-short>/) 是事务边界
   5) DB 写入 documents + risk_clauses（单事务，由 repository 保证）
   6) 追加一行 ingest.jsonl 总日志
-  7) 失败时：清 tmp，记 status=failed 或 partial 到 DB（DB 仍要写一条便于查问题）
+  7) 失败时：仍保留 documents/<sha-short>/source.pdf + ingest.log，记 status=failed
 
 状态语义：
-  - ok       MinerU + 抽取都成功
-  - partial  MinerU 成功但 LLM 失败 → markdown 可用，可后续 extract 命令重跑
-  - failed   MinerU 失败 → 没有可用产物
+  - ok       OCR + 抽取都成功
+  - partial  OCR 成功但 LLM 失败 → markdown 可用，可后续 extract 命令重跑
+  - failed   OCR 失败 → 没有 OCR 产物，但 source.pdf 留档可查
 """
 from __future__ import annotations
 
@@ -116,6 +116,19 @@ def _run_extraction(
     return ContractExtraction(), conf, envelope
 
 
+def _ensure_archived_source(paths: ArchivePaths, sha: str, pdf_path: Path) -> Path:
+    """
+    幂等保证 archive 可控目录内有 source.pdf。
+
+    重复 ingest 命中 skip 时也走这里：如果历史产物被误删，当前这次 ingest 仍会
+    把源 PDF 补回 documents/<sha-short>/source.pdf。
+    """
+    source_pdf = paths.doc_dir(sha) / "source.pdf"
+    if not source_pdf.exists():
+        link_or_copy(pdf_path, source_pdf)
+    return source_pdf
+
+
 # ---------- 入口 ----------
 
 
@@ -159,8 +172,9 @@ def ingest_pdf(
             logger.info("sha=%s 上次 ingest 失败，自动重试", sha_short)
             reingest = True
         else:
+            _ensure_archived_source(paths, sha, pdf_path)
             if prev_status == "partial":
-                hint = f"（MinerU 已完成、抽取未完成；用 `extract {existing_id}` 只重跑抽取，省去 MinerU）"
+                hint = f"（OCR 已完成、抽取未完成；用 `extract {existing_id}` 只重跑抽取，省去 OCR）"
             else:
                 hint = "（已成功入库）"
             return IngestResult(
@@ -181,6 +195,8 @@ def ingest_pdf(
     log_path = tmp_doc_dir / "ingest.log"
     log_handle = log_path.open("w", encoding="utf-8")
     log_handle.write(f"# ingest started at {_utc_now()}\n# pdf={pdf_path}\n")
+    link_strategy = link_or_copy(pdf_path, tmp_doc_dir / "source.pdf")
+    log_handle.write(f"[source.pdf] {link_strategy}ed from {pdf_path}\n")
 
     mineru_duration: Optional[float] = None
     llm_duration: Optional[float] = None
@@ -192,18 +208,18 @@ def ingest_pdf(
     status = "ok"
 
     try:
-        # ---- 1. MinerU 解析 ----
-        pl = pipeline or MinerUPipeline()
+        # ---- 1. OCR 解析 ----
+        pl = pipeline or MinerUPipeline(allow_vl_fallback=llm_enabled)
         t0 = time.perf_counter()
         try:
             pl.run(pdf_path, mineru_dir)
             mineru_duration = time.perf_counter() - t0
-            log_handle.write(f"\n[mineru] OK in {mineru_duration:.2f}s\n")
+            log_handle.write(f"\n[ocr] OK in {mineru_duration:.2f}s\n")
         except Exception as e:
             mineru_duration = time.perf_counter() - t0
             status = "failed"
-            error_message = f"mineru: {e}"
-            log_handle.write(f"\n[mineru] FAILED: {error_message}\n")
+            error_message = f"ocr: {e}"
+            log_handle.write(f"\n[ocr] FAILED: {error_message}\n")
             log_handle.write(traceback.format_exc())
             return _commit_failed(
                 conn=conn,
@@ -300,11 +316,7 @@ def ingest_pdf(
             confidence.model_dump_json(indent=2), encoding="utf-8"
         )
 
-        # ---- 4. 硬链接源 PDF（断开后用户挪走原文件也不影响档案副本） ----
-        link_strategy = link_or_copy(pdf_path, tmp_doc_dir / "source.pdf")
-        log_handle.write(f"[source.pdf] {link_strategy}ed from {pdf_path}\n")
-
-        # ---- 5. 事务边界：rename tmp → documents/<sha-short>/ ----
+        # ---- 4. 事务边界：rename tmp → documents/<sha-short>/ ----
         final_doc_dir = paths.doc_dir(sha)
         safe_rmtree(final_doc_dir)
         final_doc_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -314,7 +326,7 @@ def ingest_pdf(
         log_handle.close()
         log_handle = (final_doc_dir / "ingest.log").open("a", encoding="utf-8")
 
-        # ---- 6. DB 写入 ----
+        # ---- 5. DB 写入 ----
         if existing_id:
             replace_document(
                 conn,
@@ -399,25 +411,48 @@ def _commit_failed(
     error: Optional[ErrorInfo] = None,
 ) -> IngestResult:
     """
-    MinerU 失败的收尾。DB 仍要记一条 status=failed 便于查问题，但 tmp 目录清掉。
+    OCR 失败的收尾。DB 仍要记一条 status=failed，且保留 archive 内 source.pdf。
+
+    如果是已成功/partial 的文档强制 reingest 失败，保留旧 output_dir 产物，只把本次
+    失败日志挪到 archive root；如果是新文档或上次本来就是 failed，则把 tmp 提交成
+    documents/<sha-short>/，至少留下 source.pdf + ingest.log。
     """
     log_handle.close()
-    # 把单合同 log 移到 archive root 下方便查（tmp 即将被清）
-    failed_log = paths.root / f"failed_{sha[:SHA_SHORT_LEN]}_{int(time.time())}.log"
-    try:
-        (tmp_doc_dir / "ingest.log").rename(failed_log)
-    except OSError:
-        failed_log = None
-    safe_rmtree(tmp_doc_dir)
+
+    final_doc_dir = paths.doc_dir(sha)
+    existing = get_document(conn, existing_id) if existing_id else None
+    old_output_dir = Path(existing.output_dir) if existing and existing.output_dir else None
+    keep_old_outputs = (
+        existing is not None
+        and existing.status in {"ok", "partial"}
+        and old_output_dir is not None
+        and old_output_dir.exists()
+    )
+
+    failed_log: Optional[Path]
+    if keep_old_outputs:
+        # 旧 OCR 产物仍可用，不能被一次失败的 reingest 覆盖；但确保留档 PDF 在可控目录内。
+        _ensure_archived_source(paths, sha, pdf_path)
+        failed_log = paths.root / f"failed_{sha[:SHA_SHORT_LEN]}_{int(time.time())}.log"
+        try:
+            (tmp_doc_dir / "ingest.log").rename(failed_log)
+        except OSError:
+            failed_log = None
+        safe_rmtree(tmp_doc_dir)
+        output_dir = str(old_output_dir)
+    else:
+        safe_rmtree(final_doc_dir)
+        final_doc_dir.parent.mkdir(parents=True, exist_ok=True)
+        tmp_doc_dir.rename(final_doc_dir)
+        output_dir = str(final_doc_dir)
+        failed_log = final_doc_dir / "ingest.log"
 
     if existing_id:
-        # 失败重跑：保留原 output_dir 不变（旧产物可能还能用），只更状态
-        existing = get_document(conn, existing_id)
         replace_document(
             conn,
             existing_id,
             source_path=str(pdf_path),
-            output_dir=existing.output_dir if existing else "",
+            output_dir=output_dir,
             status="failed",
             mineru_duration_s=mineru_duration,
             llm_duration_s=None,
@@ -431,7 +466,7 @@ def _commit_failed(
             conn,
             sha256=sha,
             source_path=str(pdf_path),
-            output_dir="",
+            output_dir=output_dir,
             status="failed",
             mineru_duration_s=mineru_duration,
             llm_duration_s=None,
@@ -466,7 +501,7 @@ def _commit_failed(
     )
 
 
-# ---------- 复跑抽取（partial 状态修复，不重跑 MinerU） ----------
+# ---------- 复跑抽取（partial 状态修复，不重跑 OCR） ----------
 
 
 def re_extract(

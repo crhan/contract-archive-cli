@@ -32,19 +32,19 @@ INTROSPECT_SCHEMA_VERSION = "1"
 # 未列出的命令按「只读、非破坏、幂等」兜底（见 _command_entry）。
 COMMAND_META: dict[str, dict[str, Any]] = {
     "ingest": {
-        "summary": "跑 MinerU + 抽取，把合同入库",
+        "summary": "跑 OCR + 抽取，把文档入库",
         "side_effects": ["fs_write", "db_write", "network", "cost"],
         "destructive": False, "idempotent": True,
     },
     "extract": {
-        "summary": "只重跑抽取（不重跑 MinerU），修复 partial / 改 prompt 后重抽",
+        "summary": "只重跑抽取（不重跑 OCR），修复 partial / 改 prompt 后重抽",
         "side_effects": ["fs_write", "db_write", "network", "cost"],
         "destructive": False, "idempotent": True,
     },
     "list": {"summary": "列出档案", "side_effects": ["read"], "destructive": False, "idempotent": True},
     "search": {"summary": "多字段过滤查询", "side_effects": ["read"], "destructive": False, "idempotent": True},
     "show": {"summary": "查看单条详情", "side_effects": ["read"], "destructive": False, "idempotent": True},
-    "raw": {"summary": "打印文档原文（MinerU OCR 文本）", "side_effects": ["read"], "destructive": False, "idempotent": True},
+    "raw": {"summary": "打印文档原文（OCR 文本）", "side_effects": ["read"], "destructive": False, "idempotent": True},
     "stats": {"summary": "档案库统计", "side_effects": ["read"], "destructive": False, "idempotent": True},
     "todo": {"summary": "跨合同列待办义务", "side_effects": ["read"], "destructive": False, "idempotent": True},
     "seals": {"summary": "跨文档列印章", "side_effects": ["read"], "destructive": False, "idempotent": True},

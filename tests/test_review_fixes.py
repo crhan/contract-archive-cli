@@ -118,7 +118,7 @@ def test_ndjson_file_event_carries_structured_error(tmp_path, monkeypatch):
     src.mkdir()
     (src / "a.pdf").write_bytes(b"%PDF-1.4 x")
     arch = tmp_path / "arch"
-    monkeypatch.setattr(climod, "MinerUPipeline", lambda: object())
+    monkeypatch.setattr(climod, "MinerUPipeline", lambda **kw: object())
 
     def fake_ingest(pdf, paths, conn, **kw):
         return IngestResult(pdf_path=pdf, sha256="s", status="partial", doc_id=1,

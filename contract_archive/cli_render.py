@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from rich.table import Table
@@ -95,6 +96,31 @@ def ingest_result_to_dict(r) -> dict:
     }
 
 
+def archived_doc_dir(row, archive_root: Optional[Path | str] = None) -> Path:
+    """show 用的档案目录路径；传入 archive_root 时始终落在 archive 可控目录内。"""
+    if archive_root is not None:
+        return Path(archive_root) / "documents" / row.sha256[:12]
+    if row.output_dir:
+        return Path(row.output_dir)
+    return Path("documents") / row.sha256[:12]
+
+
+def archived_source_path(row, archive_root: Optional[Path | str] = None) -> Path:
+    """show 用的留档 PDF 路径：始终指向 archive 可控目录内的 source.pdf。"""
+    return archived_doc_dir(row, archive_root) / "source.pdf"
+
+
+def archive_source_status(row, archive_root: Optional[Path | str] = None) -> dict:
+    """留档 PDF 的路径 + 存在状态；show/json 和 show/table 共用。"""
+    path = archived_source_path(row, archive_root)
+    exists = path.is_file()
+    return {
+        "path": str(path),
+        "exists": exists,
+        "status": "present" if exists else "missing",
+    }
+
+
 def seal_rows_to_dict(rows) -> list[dict]:
     """SealRow 列表 → JSON 友好 dict 列表（seals --format json 用）。"""
     return [
@@ -109,10 +135,17 @@ def seal_rows_to_dict(rows) -> list[dict]:
     ]
 
 
-def row_to_dict(r) -> dict:
+def row_to_dict(
+    r,
+    *,
+    archive_root: Optional[Path | str] = None,
+    include_original_source: bool = True,
+) -> dict:
     """DocumentRow → JSON 友好 dict（list/search/show 的 --format json 用）。"""
     details = r.details()
-    return {
+    archive_dir = archived_doc_dir(r, archive_root)
+    source = archive_source_status(r, archive_root)
+    payload = {
         "id": r.id,
         "sha256": r.sha256,
         "status": r.status,
@@ -143,13 +176,20 @@ def row_to_dict(r) -> dict:
             for o in r.obligations
         ],
         "overall_confidence": r.overall_confidence,
-        "source_path": r.source_path,
-        "output_dir": r.output_dir,
+        "source_path": source["path"] if archive_root is not None else r.source_path,
+        "archive_source_path": source["path"],
+        "archive_source_exists": source["exists"],
+        "archive_source_status": source["status"],
+        "output_dir": str(archive_dir) if archive_root is not None else r.output_dir,
+        "archive_dir": str(archive_dir),
         "ingested_at": r.ingested_at,
     }
+    if include_original_source:
+        payload["original_source_path"] = r.source_path
+    return payload
 
 
-def build_show_table(row) -> Table:
+def build_show_table(row, archive_root: Optional[Path | str] = None) -> Table:
     """
     show 命令的单文档详情表（纯函数：输入 DocumentRow，输出 rich Table，不打印）。
 
@@ -160,7 +200,7 @@ def build_show_table(row) -> Table:
     table.add_column("field", style="cyan", no_wrap=True)
     table.add_column("value", overflow="fold")
     det = row.details()
-    _show_header_rows(table, row, det)
+    _show_header_rows(table, row, det, archive_root)
     _show_amount_rows(table, row, det)
     _show_identity_rows(table, det)
     _show_seal_rows(table, row)
@@ -169,11 +209,20 @@ def build_show_table(row) -> Table:
     return table
 
 
-def _show_header_rows(table: Table, row, det: dict) -> None:
+def _show_header_rows(
+    table: Table,
+    row,
+    det: dict,
+    archive_root: Optional[Path | str] = None,
+) -> None:
     """元信息 + 通用信封 + 合同专属列（party/到期/续约）或非合同的主体/日期。"""
     table.add_row("sha256", row.sha256)
-    table.add_row("source_path", row.source_path)
-    table.add_row("output_dir", row.output_dir)
+    source = archive_source_status(row, archive_root)
+    if source["exists"]:
+        table.add_row("source_pdf", source["path"])
+    else:
+        table.add_row("[red]source_pdf[/red]", f"{source['path']} [red](留档文件丢失)[/red]")
+    table.add_row("archive_dir", str(archived_doc_dir(row, archive_root)))
     table.add_row("ingested_at", local_time(row.ingested_at))
     # mineru_s/llm_s（执行耗时）是运维遥测，不属于档案内容——不在 show 展示。
     if row.error_message:

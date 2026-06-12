@@ -6,7 +6,7 @@ archive/
   ingest.jsonl                # 总 log，每次 ingest 一行 JSON
   documents/
     <sha-short>/              # sha256 前 12 位
-      source.pdf              # 硬链接源 PDF（跨盘 fallback copy）
+      source.pdf              # 留档源 PDF（硬链接优先，跨盘 fallback copy）
       mineru/                 # MinerU 原始产物（markdown.md / layout.json / images/...）
       extracted.json          # 抽取结果 + 置信度（复跑 extract 命令的输入）
       ingest.log              # 单合同详细 stderr

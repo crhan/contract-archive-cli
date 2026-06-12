@@ -224,10 +224,14 @@ def show(
         raise typer.Exit(1)
 
     if fmt is OutputFormat.json:
-        print(_json.dumps(row_to_dict(row), ensure_ascii=False, indent=2))
+        print(_json.dumps(
+            row_to_dict(row, archive_root=paths.root, include_original_source=False),
+            ensure_ascii=False,
+            indent=2,
+        ))
         return
 
-    console.print(build_show_table(row))
+    console.print(build_show_table(row, paths.root))
 
 
 # ---------- raw ----------

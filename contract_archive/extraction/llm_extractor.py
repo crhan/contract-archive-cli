@@ -18,6 +18,7 @@ from typing import Any, Optional
 
 from ..config import get_timeout_s, load_settings
 from ..errors import ErrorInfo, classify_exception, config_missing
+from ..utils.http_env import sanitized_httpx_proxy_env
 
 logger = logging.getLogger(__name__)
 
@@ -163,20 +164,21 @@ def _call_openai_compat(
     from openai import OpenAI
 
     compat_url = base_url.replace("/api/v1", "/compatible-mode/v1")
-    client = OpenAI(
-        api_key=api_key, base_url=compat_url,
-        timeout=get_timeout_s("DASHSCOPE_TIMEOUT_S", 300.0),
-    )
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
-        temperature=0.1,
-        top_p=0.5,
-        response_format={"type": "json_object"},
-    )
+    with sanitized_httpx_proxy_env():
+        client = OpenAI(
+            api_key=api_key, base_url=compat_url,
+            timeout=get_timeout_s("DASHSCOPE_TIMEOUT_S", 300.0),
+        )
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.1,
+            top_p=0.5,
+            response_format={"type": "json_object"},
+        )
     return (resp.choices[0].message.content or ""), _usage_from_openai(resp)
 
 

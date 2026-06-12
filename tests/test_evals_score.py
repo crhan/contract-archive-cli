@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from contract_archive.schemas import DocumentExtraction
+from contract_archive.schemas import DOC_TYPES, DocumentExtraction
 from evals.score import (
     CRITICAL_FIELDS,
     bootstrap_ci,
@@ -35,7 +35,7 @@ def test_seed_golds_are_valid_schema():
     assert case_dirs, "没有种子 case"
     for cd in case_dirs:
         env = _load_gold(cd.name)
-        assert env.doc_type in ("合同协议", "证明", "发票票据", "报告", "证件", "其他")
+        assert env.doc_type in DOC_TYPES
 
 
 def test_perfect_match_scores_one():

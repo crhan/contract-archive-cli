@@ -56,7 +56,7 @@ def test_progress_ndjson_emits_stream(tmp_path, monkeypatch):
     arch = tmp_path / "arch"
 
     # 不真加载 MinerU 模型、不真跑解析。
-    monkeypatch.setattr(climod, "MinerUPipeline", lambda: object())
+    monkeypatch.setattr(climod, "MinerUPipeline", lambda **kw: object())
 
     def fake_ingest(pdf, paths, conn, **kw):
         return IngestResult(

@@ -2,12 +2,12 @@
 本地合同档案库 CLI —— 入口与组装模块。
 
 子命令：
-  ingest <path>         扫描 PDF 文件/目录，跑 MinerU + 抽取，结果入库
+  ingest <path>         扫描 PDF 文件/目录，跑 OCR + 抽取，结果入库
   list                  列出档案；status 颜色标注，支持排序；--incomplete 只列疑似不完整合同
   search                按字段过滤（合同名/甲乙方/金额/日期/自动续约/风险）
   show <ident>          查看单条详情（id 或 sha 前缀 >=4 字符）
-  raw <ident>           打印文档原文（MinerU OCR 文本），与 show 互补，可管道给 grep/less
-  extract <id>          只重跑抽取（不重跑 MinerU），适合 partial 修复 / 改 prompt 后重抽
+  raw <ident>           打印文档原文（OCR 文本），与 show 互补，可管道给 grep/less
+  extract <id>          只重跑抽取（不重跑 OCR），适合 partial 修复 / 改 prompt 后重抽
   stats                 总数 / status 分布 / 按月签订分布 / 近 30 天到期数
   seals                 跨文档列印章（某主体有哪些章、各在哪些文档）
   delete <id>           删除档案记录；默认仅删 DB 行，--purge-files 同时删文件
@@ -73,11 +73,11 @@ def ingest(
     ),
     archive: Optional[Path] = _archive_opt,
     reingest: bool = typer.Option(
-        False, "--reingest", help="忽略 sha256 去重，强制重跑 MinerU + 抽取"
+        False, "--reingest", help="忽略 sha256 去重，强制重跑 OCR + 抽取"
     ),
     no_llm: bool = typer.Option(
         False, "--no-llm",
-        help="跳过 LLM 抽取（无 API key 时也用）：仅入库 MinerU 产物，抽取字段留空，可后续 extract 补抽",
+        help="跳过 LLM 抽取（无 API key 时也用）：仅入库 OCR 产物，抽取字段留空，可后续 extract 补抽",
     ),
     limit: int = typer.Option(
         0, "--limit", help="最多处理 N 个文件（0 = 无限制；试跑用）"
@@ -91,21 +91,21 @@ def ingest(
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run",
-        help="只预览将处理哪些文件 + 预计 API 调用，不跑 MinerU/不调 LLM/不写库",
+        help="只预览将处理哪些文件 + 预计 API 调用，不跑 OCR/不调 LLM/不写库",
     ),
     max_files: int = typer.Option(
         0, "--max-files",
         help="最多处理 N 个文件，超过则报错退出（0=不限；防误喂大目录烧钱，agent 应主动设）",
     ),
 ) -> None:
-    """跑 MinerU + 抽取，把合同入库。"""
+    """跑 OCR + 抽取，把合同入库。"""
     paths = _resolve_archive(archive)
 
     pdfs = discover_pdfs(path)
     if limit > 0:
         pdfs = pdfs[:limit]
 
-    # --dry-run：预览不建库/不跑 MinerU/不调 LLM，提前返回（预览不受 --max-files 限制）。
+    # --dry-run：预览不建库/不跑 OCR/不调 LLM，提前返回（预览不受 --max-files 限制）。
     if dry_run:
         _ingest_dry_run(pdfs, paths, fmt)
         return
@@ -140,8 +140,8 @@ def ingest(
         raise typer.Exit(0)
 
     err_console.print(f"[cyan]found {len(pdfs)} PDF(s); archive={paths.root}[/cyan]")
-    # 复用一个 MinerUPipeline 实例（避免每次重新加载模型）
-    pipeline = MinerUPipeline()
+    # 复用一个 OCR pipeline 实例（避免每次重新加载模型）
+    pipeline = MinerUPipeline(allow_vl_fallback=not no_llm)
 
     results: list[dict] = []
     try:
@@ -216,11 +216,11 @@ def _print_ingest_result(r) -> None:
     color = {"ok": "green", "partial": "yellow", "failed": "red", "skipped": "blue"}.get(
         r.status, "white"
     )
-    mineru_s = f"{r.mineru_duration_s:.1f}s" if r.mineru_duration_s is not None else "-"
+    ocr_s = f"{r.mineru_duration_s:.1f}s" if r.mineru_duration_s is not None else "-"
     llm_s = f"{r.llm_duration_s:.1f}s" if r.llm_duration_s is not None else "-"
     msg = (
         f"[{color}]{r.status:8s}[/{color}] id={r.doc_id} "
-        f"sha={r.sha256[:12]} mineru={mineru_s} llm={llm_s}"
+        f"sha={r.sha256[:12]} ocr={ocr_s} llm={llm_s}"
     )
     if r.error_message:
         msg += f"  [red]err={r.error_message[:80]}[/red]"
@@ -239,7 +239,7 @@ def _emit_progress(seq: int, total: int, result_dict: dict) -> None:
 
 def _ingest_dry_run(pdfs: list[Path], paths: ArchivePaths, fmt: OutputFormat) -> None:
     """
-    预览将处理哪些文件 + 预计 API 调用，不产生任何副作用（不建库/不跑 MinerU/不调 LLM）。
+    预览将处理哪些文件 + 预计 API 调用，不产生任何副作用（不建库/不跑 OCR/不调 LLM）。
 
     用已有库做 sha256 去重预览（库不存在则全部视为新增，且不创建库）；成本预估：
     每个新增文件至少 1 次 LLM 文本抽取，合同还会有最多 1 次 VL 签章核查。
@@ -300,7 +300,7 @@ def extract(
     ),
 ) -> None:
     """
-    只重跑合同字段抽取（不重跑 MinerU）。用于：
+    只重跑合同字段抽取（不重跑 OCR）。用于：
       - partial 状态修复
       - 改 prompt 后批量再抽取
     """

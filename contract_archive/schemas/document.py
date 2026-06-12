@@ -310,7 +310,7 @@ class SubAgreement(BaseModel):
 
 
 # 粗粒度规范类型（用于 --type 过滤）。LLM 从中择一，更细的归类放进 title/fields。
-DOC_TYPES = ("合同协议", "证明", "发票票据", "报告", "证件", "其他")
+DOC_TYPES = ("合同协议", "保险凭证", "旅行资料", "证明", "发票票据", "报告", "证件", "其他")
 DocType = str  # 存库用 str（保持柔性，不上 Literal 以免 LLM 新类型被卡死）
 
 
