@@ -139,8 +139,10 @@ class MinerUPipeline:
             if lite_retry is None
             else lite_retry
         )
+        # VL OCR 现在逐页调用（见 vl_ocr.py），不再受单请求页数限制；此上限退化为
+        # "防超大 PDF 烧太多次调用" 的安全阀，默认放宽到 500（保单条款全文普遍 90+ 页）。
         self.vl_ocr_max_pages = vl_ocr_max_pages or _env_int(
-            "CONTRACT_ARCHIVE_VL_OCR_MAX_PAGES", 10
+            "CONTRACT_ARCHIVE_VL_OCR_MAX_PAGES", 500
         )
         self.vl_ocr_dpi = vl_ocr_dpi or _env_int("CONTRACT_ARCHIVE_VL_OCR_DPI", 160)
 
