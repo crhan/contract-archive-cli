@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +31,33 @@ VL_OCR_PAGE_PROMPT = """你是严谨的 OCR 助理。请只转写这张图片中
 - 只输出本页文本，不要自己加页码标题（调用方会统一加 `## 第 X 页`）。
 """
 
+# 单页三种异常态各用独立标记，互不混淆 —— 关键是把"请求失败"和"模型识别不清"分开：
+#   _MARK_FAILED    请求级失败（SDK 自动重试耗尽后仍抛错）。混进 [看不清] 就永久救不回、
+#                   也无法事后审计/单页补跑，所以必须独立。
+#   _MARK_TRUNCATED 输出触达模型 8192 token 上限被截断；已得内容保留，但显式标记残页。
+#   _MARK_ILLEGIBLE 模型正常返回但本页无可识别文本。
+_MARK_FAILED = "[本页 OCR 调用失败]"
+_MARK_TRUNCATED = "[本页输出达模型上限被截断]"
+_MARK_ILLEGIBLE = "[看不清]"
+
+
+def _ocr_max_retries() -> int:
+    """逐页 OCR 的 SDK 重试次数（CONTRACT_ARCHIVE_VL_OCR_RETRIES 可调，默认 4）。
+
+    openai SDK 对 429/超时/5xx/连接错误本就会自动指数退避重试（且读 Retry-After），
+    这里只是把默认的 2 调高 —— 一份文档逐页要发几十上百个请求，偶发限流/抖动的概率
+    随页数累积，靠 SDK 多重试几次比手写循环干净，也避免单页偶发失败直接丢一整页内容。
+    """
+    raw = os.getenv("CONTRACT_ARCHIVE_VL_OCR_RETRIES")
+    if not raw or not raw.strip():
+        return 4
+    try:
+        val = int(raw.strip())
+    except ValueError:
+        logger.warning("CONTRACT_ARCHIVE_VL_OCR_RETRIES=%r 不是整数，回退默认 4", raw)
+        return 4
+    return val if val >= 0 else 4
+
 
 def ocr_pdf_images_with_vl(
     image_paths: list[Path],
@@ -41,8 +69,9 @@ def ocr_pdf_images_with_vl(
     """
     用 DashScope 专用 OCR 模型（OpenAI 兼容口）逐页转写渲染好的 PDF 页图片。
 
-    每页一次请求，拼成 `## 第 X 页` 分隔的 Markdown。单页失败不中断（记 `[看不清]`），
-    只有全部页都失败才返回 None，让调用方回退到原 MinerU 路径。无凭证时返回 None。
+    每页一次请求，拼成 `## 第 X 页` 分隔的 Markdown。单页异常不中断整份，三种异常态各记
+    独立标记（调用失败 / 输出截断 / 看不清），只有无任何可用页时才返回 None 让调用方回退到
+    原 MinerU 路径。429/超时/5xx 由 SDK 自动重试（见 _ocr_max_retries）。无凭证时返回 None。
     """
     if not image_paths:
         return ""
@@ -63,11 +92,14 @@ def ocr_pdf_images_with_vl(
 
     parts: list[str] = []
     ok_pages = 0
+    failed_pages = 0
+    truncated_pages = 0
     with sanitized_httpx_proxy_env():
         client = OpenAI(
             api_key=api_key,
             base_url=compat_url,
             timeout=get_timeout_s("DASHSCOPE_TIMEOUT_S", 300.0),
+            max_retries=_ocr_max_retries(),
         )
         for idx, path in enumerate(image_paths, 1):
             content = [
@@ -80,18 +112,46 @@ def ocr_pdf_images_with_vl(
                     messages=[{"role": "user", "content": content}],
                     temperature=0.0,
                 )
-                page_text = (resp.choices[0].message.content or "").strip()
+                choice = resp.choices[0]
+                page_text = (choice.message.content or "").strip()
+                truncated = choice.finish_reason == "length"
             except Exception as e:  # noqa: BLE001 - 单页失败不能拖垮整份；全失败才回退 MinerU
-                logger.warning("[vl-ocr] page %s/%s failed: %s", idx, total, e)
-                page_text = ""
+                logger.warning("[vl-ocr] page %s/%s failed after retries: %s", idx, total, e)
+                failed_pages += 1
+                parts.append(f"## 第 {idx} 页\n\n{_MARK_FAILED}")
+                continue
+
+            if truncated:
+                # qwen-vl-ocr 单页输出硬上限 8192 token，超了会被静默截断。
+                # 保留已得内容（残页也有价值），但显式标记，避免下游把残页当完整页。
+                truncated_pages += 1
+                logger.warning(
+                    "[vl-ocr] page %s/%s truncated at output cap (maxOutputTokens=8192)",
+                    idx,
+                    total,
+                )
+                page_text = f"{page_text}\n\n{_MARK_TRUNCATED}".strip()
+
             if page_text:
                 ok_pages += 1
-            parts.append(f"## 第 {idx} 页\n\n{page_text or '[看不清]'}")
+                parts.append(f"## 第 {idx} 页\n\n{page_text}")
+            else:
+                parts.append(f"## 第 {idx} 页\n\n{_MARK_ILLEGIBLE}")
 
     if ok_pages == 0:
-        logger.warning("[vl-ocr] all %s page(s) failed; caller will fall back", total)
+        logger.warning(
+            "[vl-ocr] no usable page (%s failed / %s total); caller will fall back",
+            failed_pages,
+            total,
+        )
         return None
-    logger.info("[vl-ocr] done: %s/%s page(s) ok", ok_pages, total)
+    logger.info(
+        "[vl-ocr] done: %s/%s ok, %s failed, %s truncated",
+        ok_pages,
+        total,
+        failed_pages,
+        truncated_pages,
+    )
     return "\n\n".join(parts).strip() or None
 
 

@@ -20,6 +20,8 @@ ENV_NAMES = [
     "DASHSCOPE_API_KEY",
     "DASHSCOPE_BASE_URL",
     "DASHSCOPE_LLM_MODEL",
+    "DASHSCOPE_VL_MODEL",
+    "DASHSCOPE_OCR_MODEL",
     "CONTRACT_ARCHIVE_DIR",
 ]
 
@@ -55,6 +57,21 @@ def test_config_file_overrides_default(tmp_path):
     p = tmp_path / "c.json"
     cfg.save_config_values({"dashscope.model": "qwen-max"}, p)
     assert cfg.load_settings(p).dashscope_model == "qwen-max"
+
+
+def test_ocr_model_defaults():
+    assert cfg.load_settings().dashscope_ocr_model == cfg.DEFAULT_DASHSCOPE_OCR_MODEL
+
+
+def test_ocr_model_env_over_default(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_OCR_MODEL", "qwen-vl-ocr-custom")
+    assert cfg.load_settings().dashscope_ocr_model == "qwen-vl-ocr-custom"
+
+
+def test_ocr_model_file_over_default(tmp_path):
+    p = tmp_path / "c.json"
+    cfg.save_config_values({"dashscope.ocr_model": "qwen-vl-ocr-file"}, p)
+    assert cfg.load_settings(p).dashscope_ocr_model == "qwen-vl-ocr-file"
 
 
 def test_env_overrides_config(tmp_path, monkeypatch):
