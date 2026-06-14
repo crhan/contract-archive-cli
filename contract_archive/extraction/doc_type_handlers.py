@@ -21,6 +21,7 @@ from pathlib import Path
 
 from ..schemas import ContractExtraction, DocumentExtraction, ExtractionConfidence
 from .contract_extractor import extract_contract
+from .insurance_extractor import INSURANCE_FIELD_DEFS
 from .vision_seal import augment_completeness_with_vision
 
 # 第二层特化抽取：据全文 + 已抽通用信封 + 是否开 LLM，返回 (合同抽取, 置信度)；可就地 enrich envelope。
@@ -39,6 +40,8 @@ class DocTypeHandler:
     specialized_extractor: SpecializedExtractor | None = None
     post_processors: tuple[PostProcessor, ...] = ()
     enable_vision_fusion: bool = False
+    # 开启 vision fusion 时，A 文本路/C 看图路/评判共用的高价值概念键→口径。enable 为真时必给。
+    vision_fusion_fields: dict[str, str] | None = None
 
 
 def _contract_specialized(
@@ -57,6 +60,13 @@ DOC_TYPE_HANDLERS: dict[str, DocTypeHandler] = {
         "合同协议",
         specialized_extractor=_contract_specialized,
         post_processors=(augment_completeness_with_vision,),
+    ),
+    # 保险凭证：无单独第二层文本抽取——A(文本)/C(看图) 两路按 INSURANCE_FIELD_DEFS 抽候选直接融合
+    # （ingest 在通用信封 + 后处理之后，据 enable_vision_fusion 调 fusion.run_vision_fusion）。
+    "保险凭证": DocTypeHandler(
+        "保险凭证",
+        enable_vision_fusion=True,
+        vision_fusion_fields=INSURANCE_FIELD_DEFS,
     ),
 }
 

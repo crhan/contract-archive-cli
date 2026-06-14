@@ -309,3 +309,62 @@ def attach_verdicts(extraction: DocumentExtraction, result: FusionResult) -> Doc
     if result.usage:
         extraction.llm_usage = merge_usage([extraction.llm_usage, result.usage])
     return extraction
+
+
+def run_vision_fusion(
+    extraction: DocumentExtraction,
+    document_text: str,
+    images_by_page: dict[int, Path],
+    *,
+    fields: dict[str, str],
+    threshold: float = DEFAULT_FUSION_THRESHOLD,
+    text_model: str | None = None,
+    vision_model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> bool:
+    """端到端融合编排：A(文本)/C(看图) 两路**并发**按同一组 fields 抽候选 → fuse_sources 评判
+    → attach 到 envelope sidecar。返回是否产出了 verdict。
+
+    A、C 两路无依赖、各发各的 LLM，故并发跑（map_concurrent 2 workers）。两路抽取 + 评判的
+    全部 token 并入 envelope.llm_usage，让成本核算看到融合总开销。无 fields/无候选 → False。
+    """
+    # 延迟导入，避免 fusion ←→ 抽取源模块的潜在环；也让无融合路径零额外加载。
+    from .text_fields import read_fields_in_text
+    from .vl_extract import read_fields_on_images
+
+    if not fields:
+        return False
+
+    labels = sorted(images_by_page) if images_by_page else []
+    image_paths = [images_by_page[p] for p in labels]
+
+    def _a():  # A 路：文本看字段
+        return read_fields_in_text(
+            document_text, fields, model=text_model, api_key=api_key, base_url=base_url
+        )
+
+    def _c():  # C 路：看图看字段（无图则跳过）
+        if not image_paths:
+            return None
+        return read_fields_on_images(
+            image_paths, fields, page_labels=labels,
+            model=vision_model, api_key=api_key, base_url=base_url,
+        )
+
+    a_res, c_res = map_concurrent(lambda f: f(), [_a, _c], max_workers=2)
+    text_by_key = a_res.by_key if a_res else {}
+    vision_by_key = c_res.by_key if c_res else {}
+    if not text_by_key and not vision_by_key:
+        return False
+
+    result = fuse_sources(
+        text_by_key, vision_by_key,
+        images_by_page=images_by_page, field_defs=fields, threshold=threshold,
+        model=vision_model, api_key=api_key, base_url=base_url,
+    )
+    attach_verdicts(extraction, result)  # 已并入评判开销
+    extraction.llm_usage = merge_usage(
+        [extraction.llm_usage, a_res.usage if a_res else None, c_res.usage if c_res else None]
+    )
+    return bool(result.verdicts)

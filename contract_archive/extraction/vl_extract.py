@@ -107,7 +107,7 @@ def read_fields_on_images(
         parsed, usage = res
         usages.append(usage)
         for k in keys:
-            cand = _candidate_from(parsed.get(k), page=label)
+            cand = candidate_from_raw(parsed.get(k), source="vision", page=label)
             if cand is not None:
                 by_key[k].append(cand)
 
@@ -144,8 +144,13 @@ def _read_one(client, model: str, prompt: str, path: Path) -> tuple[dict, Option
 _NULLISH = {"", "null", "none", "n/a", "无", "未知"}
 
 
-def _candidate_from(raw: Any, *, page: int) -> Optional[FieldCandidate]:
-    """把模型对某 key 的返回（str 或 {value,evidence}）规整为一个候选；空/null → None。"""
+def candidate_from_raw(
+    raw: Any, *, source: str, page: Optional[int] = None
+) -> Optional[FieldCandidate]:
+    """把模型对某 key 的返回（str 或 {value,evidence}）规整为候选；空/null → None。
+
+    文本路（source="text"，无页号）与看图路（source="vision"，带页号）共用同一规整逻辑。
+    """
     if raw is None:
         return None
     if isinstance(raw, dict):
@@ -158,4 +163,4 @@ def _candidate_from(raw: Any, *, page: int) -> Optional[FieldCandidate]:
     value = str(value).strip()
     if value.lower() in _NULLISH:
         return None
-    return FieldCandidate(source="vision", value=value, evidence=evidence, page=page)
+    return FieldCandidate(source=source, value=value, evidence=evidence, page=page)
