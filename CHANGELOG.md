@@ -3,6 +3,15 @@
 本项目变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，
 版本号语义化（单用户本地工具，破坏性变更会在此显著标注）。
 
+## [0.3.1] — 2026-06-14
+
+### 修复
+- **`--version` 报告陈旧版本**：`contract_archive/__init__.py` 历史硬编码 `__version__='0.2.6'`，
+  历次只 bump `pyproject.toml` 漏改它 → 装上 0.2.7/0.3.0 后 `--version` 仍显 `0.2.6`。改为
+  `importlib.metadata.version()` 从已安装包元数据动态读取，版本号**单一真相源 = pyproject**，根除脱节。
+- **发版 CI**：`release.yml` 的 `astral-sh/setup-uv@v8` 不存在（该 action 最新 major 为 v7），
+  致 v0.3.0 发版 CI 在 "Set up job" 解析 action 失败、未发布。改回 `@v7`。
+
 ## [0.3.0] — 2026-06-14
 
 多源融合提取 + 文档类型路由泛化 + 评测私有化（PR #1）+ 评测调试驱动的 6 项融合改进（PR #2）。
