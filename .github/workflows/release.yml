@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v7
       - run: uv run --extra dev pytest -q
 
   publish:
@@ -25,7 +25,7 @@ jobs:
       id-token: write # Trusted Publishing 必需：换取 OIDC 令牌
     steps:
       - uses: actions/checkout@v6
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v7
       - name: Build
         run: |
           rm -rf dist
