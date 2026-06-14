@@ -201,6 +201,16 @@ def test_normalize_value_digit_gate():
     assert fusion._normalize_value("陈意") == "陈意"
 
 
+def test_normalize_value_whole_year_months():
+    """整年的月份表述归一到年：保险期间'12个月'与'1年'等价，不该判失配。"""
+    assert fusion._normalize_value("12个月") == "1年"
+    assert fusion._normalize_value("12月") == "1年"
+    assert fusion._normalize_value("24个月") == "2年"
+    assert fusion._normalize_value("1年") == "1年"
+    assert fusion._normalize_value("13个月") == "13个月"  # 非整年 → 不折
+    assert fusion._normalize_value("90天") == "90天"      # 天 → 不动
+
+
 def test_name_values_not_falsely_agreed(monkeypatch):
     """非金额值（姓名）不剥币种字：文本'张元' vs 看图'张'是分歧，应送评判而非误判一致。"""
     _install_fake_openai(monkeypatch, [_json({"value": "张", "confidence": 0.85, "low_confidence": False})])
