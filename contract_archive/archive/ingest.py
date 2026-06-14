@@ -29,7 +29,7 @@ from typing import Optional
 
 from ..errors import ErrorInfo, classify_exception, extract_empty, mineru_failed
 from ..extraction import extract_contract, extract_document
-from ..extraction.vision_seal import augment_completeness_with_vision
+from ..extraction.doc_type_handlers import get_handler
 from ..extraction.evidence_page_fix import correct_evidence_pages
 from ..pipelines import MinerUPipeline
 from ..schemas import (
@@ -91,8 +91,7 @@ def _run_extraction(
     document_text: str, llm_enabled: bool
 ) -> tuple[ContractExtraction, ExtractionConfidence, DocumentExtraction]:
     """
-    LLM-first 抽取：先判类型抽通用信封；若是合同，再跑合同抽取补专属列。
-    （合同抽取自 Phase 2 起也是纯 LLM，不再有 rule/hybrid。）
+    LLM-first 抽取：先判类型抽通用信封；据 doc_type 查处理器跑第二层特化抽取。
     返回 (合同抽取, 置信度, 通用信封)——三者一并交给 repository 落库。
     """
     if not llm_enabled:
@@ -102,15 +101,12 @@ def _run_extraction(
         return ext, conf, contract_to_envelope(ext)
 
     envelope = extract_document(document_text, llm_enabled=llm_enabled)
-    if envelope.doc_type == "合同协议" and llm_enabled:
-        ext, conf = extract_contract(document_text, llm_enabled=llm_enabled)
-        # 合同义务用合同抽取的（专属 prompt 对义务/罚则区分更细）
-        envelope.obligations = ext.obligations
-        # 标题若合同抽取没给，回退用信封的
-        if not ext.contract_name and envelope.title:
-            ext.contract_name = envelope.title
+    handler = get_handler(envelope.doc_type)
+    if handler.specialized_extractor is not None:
+        # 第二层特化（合同→extract_contract；保险→insurance）。可就地 enrich envelope。
+        ext, conf = handler.specialized_extractor(document_text, envelope, llm_enabled)
         return ext, conf, envelope
-    # 非合同：无合同专属列，overall 走信封启发式
+    # 无特化的类型：无专属列，overall 走信封启发式
     conf = ExtractionConfidence()
     conf.overall = _envelope_confidence(envelope)
     return ContractExtraction(), conf, envelope
@@ -277,15 +273,16 @@ def ingest_pdf(
             log_handle.write(f"\n[extract] FAILED (status=partial): {error_message}\n")
             log_handle.write(traceback.format_exc())
 
-        # ---- 2.5 多模态签章核查：看落款页图覆盖文本对签章的判断（有图 + 有 key 才跑）----
+        # ---- 2.5 类型专属后处理（据 doc_type 查处理器；合同=看落款页图重判签章，其他类型可能无）----
         if status != "failed" and llm_enabled:
-            try:
-                if augment_completeness_with_vision(envelope, mineru_dir):
-                    log_handle.write("[seal-vision] 签章核查完成（看落款页图）\n")
-            except Exception as e:  # noqa: BLE001 — VL 失败不能中断入库
-                log_handle.write(f"[seal-vision] 跳过（异常）: {e}\n")
+            for pp in get_handler(envelope.doc_type).post_processors:
+                try:
+                    if pp(envelope, mineru_dir):
+                        log_handle.write(f"[post:{pp.__name__}] 完成\n")
+                except Exception as e:  # noqa: BLE001 — 专属后处理失败不能中断入库
+                    log_handle.write(f"[post:{pp.__name__}] 跳过（异常）: {e}\n")
 
-            # ---- 2.6 出处页码校正：用 content_list 的 page_idx 覆盖 LLM 猜的页码 ----
+            # ---- 2.6 出处页码校正（通用，类型无关）：用 content_list 的 page_idx 覆盖 LLM 猜的页码 ----
             try:
                 if correct_evidence_pages(envelope, mineru_dir):
                     log_handle.write("[page-fix] 出处页码已据 content_list 校正\n")
@@ -559,12 +556,13 @@ def re_extract(
         envelope = DocumentExtraction()
     llm_duration = time.perf_counter() - t0
 
-    # 多模态签章核查：看落款页图重判签章（augment 内部处理 doc_type/无图/无 key 降级）。
+    # 类型专属后处理（据 doc_type 查处理器；合同=看落款页图重判签章）。
     if llm_enabled and status == "ok":
-        try:
-            augment_completeness_with_vision(envelope, mineru_dir)
-        except Exception as e:  # noqa: BLE001 — VL 失败不能中断重抽
-            logger.warning("seal-vision 跳过（异常）: %s", e)
+        for pp in get_handler(envelope.doc_type).post_processors:
+            try:
+                pp(envelope, mineru_dir)
+            except Exception as e:  # noqa: BLE001 — 专属后处理失败不能中断重抽
+                logger.warning("post:%s 跳过（异常）: %s", pp.__name__, e)
         try:
             correct_evidence_pages(envelope, mineru_dir)
         except Exception as e:  # noqa: BLE001 — 页码校正失败不能中断重抽
