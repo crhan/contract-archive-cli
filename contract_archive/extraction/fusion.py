@@ -79,11 +79,17 @@ def collect_candidates(
 
 
 def _normalize_value(v: str) -> str:
-    """轻量归一化用于一致性比较：去空白/币种修饰、万元→万、大小写。不动语义。"""
+    """轻量归一化用于一致性比较：去空白/大小写；**仅对含数字的值**剥币种/单位、万元→万。
+
+    币种剥离只在金额场景才对。若无差别地剥，姓名等纯文本会被误削——如被保险人文本路给"张元"、
+    看图给"张"，剥掉"元"后都成"张"，_agree 误判一致、跳过评判，放过本该以图为准的分歧。
+    以"是否含数字"为闸：金额必含数字（200万元/100%/90天），人名/机构名一般不含——纯文本不动。
+    """
     s = v.strip().lower().replace(" ", "").replace("　", "")
-    for junk in ("元整", "圆整", "元", "圆", "￥", "¥", "rmb", "人民币", "整"):
-        s = s.replace(junk, "")
-    s = s.replace("万元", "万")
+    if any(ch.isdigit() for ch in s):
+        for junk in ("元整", "圆整", "元", "圆", "￥", "¥", "rmb", "人民币", "整"):
+            s = s.replace(junk, "")
+        s = s.replace("万元", "万")
     return s
 
 
@@ -352,7 +358,11 @@ def run_vision_fusion(
             model=vision_model, api_key=api_key, base_url=base_url,
         )
 
-    a_res, c_res = map_concurrent(lambda f: f(), [_a, _c], max_workers=2)
+    # A/C 两路并发：各自内部还会开 sanitized_httpx_proxy_env（改进程级 os.environ）。两个并发
+    # 上下文各自进退会乱序恢复 NO_PROXY（竞态）。外层再套一层 guard：内层都只在"已 sanitize"值上
+    # 进退，真正的原值恢复由外层在 map_concurrent join 之后单线程完成，消除竞态。
+    with sanitized_httpx_proxy_env():
+        a_res, c_res = map_concurrent(lambda f: f(), [_a, _c], max_workers=2)
     text_by_key = a_res.by_key if a_res else {}
     vision_by_key = c_res.by_key if c_res else {}
     if not text_by_key and not vision_by_key:

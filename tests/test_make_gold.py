@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 
 from evals.make_gold import iter_archive_docs, write_case
+from evals.make_gold import main as make_gold_main
+from evals.run import DEFAULT_CASES
 
 
 def _make_archive_doc(archive_dir, doc_id, with_pdf=True):
@@ -71,3 +73,26 @@ def test_write_case_includes_crosscheck(tmp_path):
         dataset, "doc_y", "文本", {"doc_type": "证明"}, None, {"doc_type": "证明", "by": "异家族"}
     )
     assert json.loads((case_dir / "crosscheck.json").read_text(encoding="utf-8"))["by"] == "异家族"
+
+
+def test_make_gold_refuses_public_cases_dir(tmp_path, monkeypatch):
+    """安全闸：未指向私有数据集（回退主仓库公开 cases）时，拒绝写不脱敏真实数据。"""
+    monkeypatch.delenv("CONTRACT_ARCHIVE_EVALSET_DIR", raising=False)
+    _make_archive_doc(tmp_path, "doc_a")  # 有文档，确保不是因"无文档"才退出
+    rc = make_gold_main(["--archive-dir", str(tmp_path)])
+    assert rc == 2  # 拒绝
+    # 没把真实数据写进公开 cases
+    assert not (DEFAULT_CASES / "extraction" / "doc_a").exists()
+
+
+def test_make_gold_allows_explicit_private_dir(tmp_path):
+    """显式 --dataset-dir 指向私有目录 → 放行，真实数据落私有目录。"""
+    _make_archive_doc(tmp_path, "doc_a")
+    # mineru 文本非空（load_document_text 读 mineru 产物）
+    (tmp_path / "documents" / "doc_a" / "mineru" / "raw_text.txt").write_text(
+        "保单全文 被保险人：陈意", encoding="utf-8"
+    )
+    private = tmp_path / "private_dataset"
+    rc = make_gold_main(["--archive-dir", str(tmp_path), "--dataset-dir", str(private)])
+    assert rc == 0
+    assert (private / "extraction" / "doc_a" / "gold.json").exists()

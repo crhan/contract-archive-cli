@@ -193,6 +193,25 @@ def test_threshold_forces_low_confidence_even_if_model_says_ok(monkeypatch):
 # ---------- ③ 值不同 → 触发评判 ----------
 
 
+def test_normalize_value_digit_gate():
+    """仅对含数字的值剥币种/单位；纯文本（姓名）不动。"""
+    assert fusion._normalize_value("200万元") == "200万"
+    assert fusion._normalize_value("200万") == "200万"
+    assert fusion._normalize_value("张元") == "张元"  # 无数字 → 不剥"元"
+    assert fusion._normalize_value("陈意") == "陈意"
+
+
+def test_name_values_not_falsely_agreed(monkeypatch):
+    """非金额值（姓名）不剥币种字：文本'张元' vs 看图'张'是分歧，应送评判而非误判一致。"""
+    _install_fake_openai(monkeypatch, [_json({"value": "张", "confidence": 0.85, "low_confidence": False})])
+    res = fusion.fuse_sources(
+        {"被保险人": [_t("张元")]}, {"被保险人": [_v("张", page=1)]},
+        images_by_page={1: Path("p1")},
+    )
+    # 不一致 → 走评判（source=adjudicated），而非 agreed 直接采信文本
+    assert res.verdicts[0].source == "adjudicated"
+
+
 def test_differing_values_trigger_adjudication(monkeypatch):
     holder = _install_fake_openai(
         monkeypatch,

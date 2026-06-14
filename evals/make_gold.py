@@ -27,7 +27,7 @@ from contract_archive.archive import load_document_text
 from contract_archive.config import load_settings
 from contract_archive.schemas import DocumentExtraction
 
-from .run import evalset_dir
+from .run import DEFAULT_CASES, evalset_dir
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +124,16 @@ def main(argv: list[str] | None = None) -> int:
             else Path.home() / ".local/share/contract-archive"
         )
     dataset_dir = args.dataset_dir or evalset_dir()
+    # 安全闸：make_gold 写的是**不脱敏**真实数据。绝不能落进主仓库公开的 evals/cases/
+    # （会把真实 PII 推上 github）。未显式指向私有数据集就拒绝——必须 --dataset-dir 或
+    # 设 CONTRACT_ARCHIVE_EVALSET_DIR 指向私有仓库的 dataset/。
+    if dataset_dir.resolve() == DEFAULT_CASES.resolve():
+        print(
+            "❌ 拒绝把真实（不脱敏）数据写入主仓库公开的 evals/cases/。\n"
+            "   请设 CONTRACT_ARCHIVE_EVALSET_DIR 或传 --dataset-dir 指向**私有**评测数据集目录\n"
+            "   （如 ~/project/contract-archive-evalset/dataset）。"
+        )
+        return 2
     docs = iter_archive_docs(archive_dir, args.doc_id)
     if not docs:
         print(f"⚠️  {archive_dir}/documents 下没有可用文档（需含 mineru/ + extraction_result.json）")

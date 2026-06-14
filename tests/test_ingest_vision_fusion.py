@@ -9,7 +9,7 @@ from pathlib import Path
 import fitz
 
 from contract_archive.archive import ingest
-from contract_archive.schemas import DocumentExtraction, FieldVerdict
+from contract_archive.schemas import DocumentExtraction, ExtractionConfidence, FieldVerdict
 
 _TEXT_BODY = "This insurance policy certificate page carries plenty of readable english content present."
 
@@ -113,6 +113,22 @@ def test_maybe_fusion_no_escalate_when_high(monkeypatch, tmp_path):
     env = DocumentExtraction(doc_type="保险凭证")
     ingest._maybe_run_vision_fusion(env, "text", tmp_path / "mineru", lambda m: None)
     assert escalated == {}  # 高置信不兜底
+
+
+def test_maybe_fusion_persists_confidence_to_overall(monkeypatch, tmp_path):
+    """融合分写进 confidence.overall（落 documents.overall_confidence 列），不留旧启发式分。"""
+    monkeypatch.setattr(ingest, "_select_fusion_images", lambda d: {1: Path("p1")})
+
+    def fake_fusion(env, text, images, *, fields, threshold):
+        env.fusion_overall_confidence = 0.85
+        env.field_verdicts = [FieldVerdict(key="k", value="v", confidence=0.85)]
+        return True
+
+    monkeypatch.setattr(ingest, "run_vision_fusion", fake_fusion)
+    conf = ExtractionConfidence(overall=0.4)  # 融合前的旧启发式分
+    env = DocumentExtraction(doc_type="保险凭证")
+    ingest._maybe_run_vision_fusion(env, "t", tmp_path / "m", lambda m: None, conf)
+    assert conf.overall == 0.85  # 被融合分覆盖
 
 
 def test_maybe_fusion_swallows_exceptions(monkeypatch):

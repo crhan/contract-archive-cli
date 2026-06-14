@@ -202,12 +202,14 @@ def _maybe_run_vision_fusion(
     document_text: str,
     mineru_dir: Path,
     log: Callable[[str], None],
+    confidence: Optional[ExtractionConfidence] = None,
 ) -> None:
     """据 doc_type 处理器的 enable_vision_fusion 决定是否跑多源融合（如保险）。
 
     A(文本)/C(看图) 两路抽高价值概念候选 → 评判 → 写 field_verdicts/fusion_overall_confidence
-    sidecar（不回写原字段）。融合后整体置信低于阈值 → 调 agent_fallback（本期 no-op 仅标记）。
-    任何异常都不中断入库。
+    sidecar（不回写原字段）。融合产出整体置信后，把它写进 confidence.overall（落 documents
+    .overall_confidence 列，复用现列），否则查询/列表仍显融合前的旧启发式分。整体置信低于阈值
+    → 调 agent_fallback（本期 no-op 仅标记）。任何异常都不中断入库。
     """
     handler = get_handler(envelope.doc_type)
     if not handler.enable_vision_fusion or not handler.vision_fusion_fields:
@@ -230,7 +232,12 @@ def _maybe_run_vision_fusion(
         log(f"[fusion] 跳过（异常）: {e}")
         return
     conf = envelope.fusion_overall_confidence
-    if conf is not None and conf < threshold:
+    if conf is None:
+        return
+    # 融合分写进可查询的 overall_confidence 列（sidecar 与列保持一致，不留旧启发式分）
+    if confidence is not None:
+        confidence.overall = conf
+    if conf < threshold:
         escalate_low_confidence(envelope, source_pdf=str(mineru_dir.parent / "source.pdf"))
 
 
@@ -429,7 +436,8 @@ def ingest_pdf(
 
             # ---- 2.8 多源融合（仅 enable_vision_fusion 的类型，如保险）：A文本/C看图评判 → sidecar ----
             _maybe_run_vision_fusion(
-                envelope, document_text, mineru_dir, lambda m: log_handle.write(m + "\n")
+                envelope, document_text, mineru_dir,
+                lambda m: log_handle.write(m + "\n"), confidence,
             )
 
         # ---- 3. extracted.json 落盘（写通用信封；即使 partial 也写空对象，便于后续 extract 复跑） ----
@@ -707,7 +715,7 @@ def re_extract(
             logger.warning("identity 跳过（异常）: %s", e)
 
         # 多源融合（仅 enable_vision_fusion 的类型，如保险）：A文本/C看图评判 → sidecar。
-        _maybe_run_vision_fusion(envelope, document_text, mineru_dir, logger.info)
+        _maybe_run_vision_fusion(envelope, document_text, mineru_dir, logger.info, confidence)
 
     # 落盘新 extracted.json（通用信封）
     (Path(doc.output_dir) / FILE_EXTRACTION).write_text(
