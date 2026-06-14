@@ -50,10 +50,16 @@ class TextLayerStats:
     cjk_chars: int
     control_chars: int
     replacement_chars: int
+    pages_with_text: int = 0  # 含实质文本的页数；扫描件夹少量文本页时远小于 pages
 
     @property
     def printable_ratio(self) -> float:
         return self.printable_chars / self.non_ws_chars if self.non_ws_chars else 0.0
+
+    @property
+    def text_coverage(self) -> float:
+        """含实质文本的页占比。扫描件即便夹几页原生文本，覆盖率也极低。"""
+        return self.pages_with_text / self.pages if self.pages else 0.0
 
     @property
     def cjk_ratio(self) -> float:
@@ -155,6 +161,26 @@ def extract_text_layer(pdf_path: str | Path, max_chars: int | None = None) -> st
     return "\n".join(chunks)
 
 
+def count_text_pages(pdf_path: str | Path, page_min_chars: int = 20) -> tuple[int, int]:
+    """逐页统计含实质文本的页数，返回 (pages_with_text, total_pages)。
+
+    扫描件即便夹了少量原生文本页（如打印叠加的保单信息页），文本层覆盖率也极低。
+    据此把"扫描件夹文本页"与"真·电子文档"分开，不被文本总量的质量比例误导
+    （后者只看 printable/cjk 比例，对夹页扫描件失效）。逐页统计独立于
+    analyze_text_layer 的 max_chars 采样截断，长文档也不会失真。
+    """
+    pdf_path = Path(pdf_path)
+    pages_with_text = 0
+    total = 0
+    with fitz.open(pdf_path) as doc:
+        for page in doc:
+            total += 1
+            non_ws = sum(1 for c in page.get_text() if not c.isspace())
+            if non_ws >= page_min_chars:
+                pages_with_text += 1
+    return pages_with_text, total
+
+
 def analyze_text_layer(pdf_path: str | Path, max_chars: int = 20000) -> TextLayerStats:
     """
     Inspect the embedded text layer without running OCR.
@@ -176,9 +202,9 @@ def analyze_text_layer(pdf_path: str | Path, max_chars: int = 20000) -> TextLaye
     )
     replacement = text.count("\ufffd")
     try:
-        pages = len(inspect_pdf_pages(pdf_path))
+        pages_with_text, pages = count_text_pages(pdf_path)
     except Exception:
-        pages = 0
+        pages_with_text, pages = 0, 0
     return TextLayerStats(
         pages=pages,
         chars=chars,
@@ -187,16 +213,31 @@ def analyze_text_layer(pdf_path: str | Path, max_chars: int = 20000) -> TextLaye
         cjk_chars=cjk,
         control_chars=control,
         replacement_chars=replacement,
+        pages_with_text=pages_with_text,
     )
 
 
-def is_text_layer_usable(stats: TextLayerStats, min_chars: int = 200) -> bool:
+def is_text_layer_usable(
+    stats: TextLayerStats,
+    min_chars: int = 200,
+    min_coverage: float = 0.5,
+    coverage_min_pages: int = 5,
+) -> bool:
     """Heuristic gate for using native PDF text instead of OCR."""
     if stats.non_ws_chars < min_chars:
         return False
     if stats.control_ratio > 0.02 or stats.replacement_ratio > 0.005:
         return False
-    return stats.printable_ratio >= 0.85 or stats.cjk_ratio >= 0.12
+    if not (stats.printable_ratio >= 0.85 or stats.cjk_ratio >= 0.12):
+        return False
+    # 覆盖率门槛：多页文档若只有少数页带原生文本，几乎必是扫描件夹了打印叠加页。
+    # 实测一份 184 页保险合同仅 2 页保单信息页有文本层（共 9500 字、质量很高），
+    # 覆盖率 ~1%，却因 printable/cjk 比例达标而骗过旧判据，导致 182 页扫描条款
+    # 被整体跳过 OCR。短文档（如保单凭证）页少、文本页占比天然高，豁免此检查
+    # 以免误伤本就该走文本层的几页凭证。
+    if stats.pages >= coverage_min_pages and stats.text_coverage < min_coverage:
+        return False
+    return True
 
 
 def is_scanned_pdf(pdf_path: str | Path, min_chars: int = 50) -> bool:
