@@ -10,14 +10,13 @@ OCR 模型，也消除了"页数超上限就回退 mineru"的硬限制。
 """
 from __future__ import annotations
 
-import base64
 import logging
 import os
 from pathlib import Path
 from typing import NamedTuple, Optional
 
 from ..config import get_timeout_s, load_settings
-from ..utils import map_concurrent
+from ..utils import encode_image_data_uri, map_concurrent
 from ..utils.http_env import sanitized_httpx_proxy_env
 
 logger = logging.getLogger(__name__)
@@ -81,7 +80,7 @@ def _ocr_one_page(client, model: str, idx: int, path: Path, total: int) -> _Page
     """
     try:
         content = [
-            {"type": "image_url", "image_url": {"url": _encode_image(path)}},
+            {"type": "image_url", "image_url": {"url": encode_image_data_uri(path)}},
             {"type": "text", "text": VL_OCR_PAGE_PROMPT},
         ]
         resp = client.chat.completions.create(
@@ -199,8 +198,3 @@ def ocr_pdf_images_with_vl(
         truncated_pages,
     )
     return "\n\n".join(parts).strip() or None
-
-
-def _encode_image(path: Path) -> str:
-    data = base64.b64encode(path.read_bytes()).decode("ascii")
-    return f"data:image/png;base64,{data}"

@@ -3,7 +3,7 @@
 空输入、缺凭证、重试旋钮。
 
 不碰真实网络/模型：把 sys.modules["openai"] 换成一个 fake，按预设 behaviors 逐次返回或
-抛错；_encode_image / load_settings 也 mock 掉，与 config / 本机 .env 完全隔离。
+抛错；encode_image_data_uri / load_settings 也 mock 掉，与 config / 本机 .env 完全隔离。
 """
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def _settings(api_key: str | None = "test-key"):
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch):
     monkeypatch.setattr(vl_ocr, "load_settings", lambda: _settings())
-    monkeypatch.setattr(vl_ocr, "_encode_image", lambda p: "data:image/png;base64,FAKE")
+    monkeypatch.setattr(vl_ocr, "encode_image_data_uri", lambda p: "data:image/png;base64,FAKE")
     monkeypatch.delenv("CONTRACT_ARCHIVE_VL_OCR_RETRIES", raising=False)
     # _FakeClient 按 self.calls 自增索引消费 behaviors，非线程安全；强制 CONCURRENCY=1
     # 让逐页 OCR 退化为串行、确定性消费 behaviors 序列。真并发保序另有专测（用线程安全 fake）。
@@ -163,7 +163,9 @@ def test_concurrent_preserves_page_order(monkeypatch):
     """
     monkeypatch.setenv("CONTRACT_ARCHIVE_LLM_CONCURRENCY", "4")
     # 把页号编进 image_url（p1..p4），让 fake 据此识别是哪一页
-    monkeypatch.setattr(vl_ocr, "_encode_image", lambda p: f"data:image/png;base64,{p.stem}")
+    monkeypatch.setattr(
+        vl_ocr, "encode_image_data_uri", lambda p: f"data:image/png;base64,{p.stem}"
+    )
 
     class _OrderFake:
         def __init__(self, **kwargs):

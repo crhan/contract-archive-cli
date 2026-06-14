@@ -8,6 +8,7 @@ PDF 公共工具：分页转图片、获取页面尺寸。
 """
 from __future__ import annotations
 
+import base64
 import string
 import unicodedata
 from dataclasses import dataclass
@@ -159,6 +160,16 @@ def extract_text_layer(pdf_path: str | Path, max_chars: int | None = None) -> st
             if max_chars is not None and total >= max_chars:
                 break
     return "\n".join(chunks)
+
+
+def encode_image_data_uri(path: str | Path) -> str:
+    """本地图片 → data URI（base64 内联）。
+
+    DashScope OpenAI 兼容接口不收 file://，图片必须 base64 内联。逐页 OCR、看图抽字段、
+    签章核查三处共用，集中一处避免散落多份同款实现。
+    """
+    data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{data}"
 
 
 def extract_pages_text(
