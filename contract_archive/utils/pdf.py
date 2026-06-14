@@ -161,6 +161,25 @@ def extract_text_layer(pdf_path: str | Path, max_chars: int | None = None) -> st
     return "\n".join(chunks)
 
 
+def extract_pages_text(
+    pdf_path: str | Path, page_indices: set[int] | list[int]
+) -> dict[int, str]:
+    """抽取指定页（0-based）的原生文本层，返回 {page_index: text}。
+
+    供页级混合提取用：文本页走原生抽取、扫描页走 VL，再按页序拼回。只取需要的页，
+    不整份 get_text 后再切分。
+    """
+    wanted = set(page_indices)
+    if not wanted:
+        return {}
+    out: dict[int, str] = {}
+    with fitz.open(pdf_path) as doc:
+        for idx, page in enumerate(doc):
+            if idx in wanted:
+                out[idx] = page.get_text()
+    return out
+
+
 def count_text_pages(pdf_path: str | Path, page_min_chars: int = 20) -> tuple[int, int]:
     """逐页统计含实质文本的页数，返回 (pages_with_text, total_pages)。
 

@@ -129,6 +129,9 @@ class PipelineMeta(BaseModel):
     finished_at: datetime
     duration_seconds: float
     notes: str = ""
+    # 页级分流摘要：{"total","text_pages","ocr_pages","table_pages"}。混合提取/原生快路径
+    # 才填；MinerU CLI 整份路径留空（其内部分流不归我们统计）。供评测/调试看一份文档怎么被分流。
+    page_routing: dict[str, int] = Field(default_factory=dict)
 
 
 class PipelineOutput(BaseModel):

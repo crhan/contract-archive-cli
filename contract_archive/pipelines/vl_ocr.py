@@ -109,22 +109,25 @@ def _ocr_one_page(client, model: str, idx: int, path: Path, total: int) -> _Page
     return _PageResult(_MARK_ILLEGIBLE, ok=False, failed=False, truncated=False)
 
 
-def ocr_pdf_images_with_vl(
+def ocr_pages(
     image_paths: list[Path],
     *,
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
-) -> Optional[str]:
-    """
-    用 DashScope 专用 OCR 模型（OpenAI 兼容口）逐页转写渲染好的 PDF 页图片。
+    page_labels: list[int] | None = None,
+) -> Optional[list[_PageResult]]:
+    """逐页并发 OCR，返回 **与 image_paths 同序** 的 per-page 结果（_PageResult 列表）。
 
-    每页一次请求，拼成 `## 第 X 页` 分隔的 Markdown。单页异常不中断整份，三种异常态各记
-    独立标记（调用失败 / 输出截断 / 看不清），只有无任何可用页时才返回 None 让调用方回退到
-    原 MinerU 路径。429/超时/5xx 由 SDK 自动重试（见 _ocr_max_retries）。无凭证时返回 None。
+    无凭证 → None（让调用方回退）。空输入 → []。page_labels 仅用于日志页号（缺省 1..N），
+    不影响返回顺序——页级混合提取据此把"只 OCR 扫描页"的结果按真实页号拼回全文。
+
+    并发要点：openai SDK 同步阻塞、GIL 在网络等待时释放，线程池即可；client 与 proxy-env
+    上下文在并发块外层一次性构造，worker 只复用 client（sanitized_httpx_proxy_env 改的是
+    进程级 os.environ，多线程各自进退会竞态）。单页失败已在 _ocr_one_page 内隔离、不返回 None。
     """
     if not image_paths:
-        return ""
+        return []
 
     settings = load_settings()
     model = model or settings.dashscope_ocr_model
@@ -138,12 +141,9 @@ def ocr_pdf_images_with_vl(
 
     compat_url = base_url.replace("/api/v1", "/compatible-mode/v1")
     total = len(image_paths)
+    labels = page_labels if page_labels is not None else list(range(1, total + 1))
     logger.info("[vl-ocr] %s page(s) via %s (逐页)", total, model)
 
-    # 逐页并发：openai SDK 同步阻塞，GIL 在网络等待时释放，线程池即可。client 与
-    # proxy-env 上下文在并发块外层一次性构造，worker 只复用 client（sanitized_httpx_proxy_env
-    # 改的是进程级 os.environ，多线程各自进退会竞态）。map_concurrent 保序：结果按页序拼接，
-    # 不随完成先后变化；单页失败已在 _ocr_one_page 内隔离，不返回 None。
     with sanitized_httpx_proxy_env():
         client = OpenAI(
             api_key=api_key,
@@ -151,11 +151,34 @@ def ocr_pdf_images_with_vl(
             timeout=get_timeout_s("DASHSCOPE_TIMEOUT_S", 300.0),
             max_retries=_ocr_max_retries(),
         )
-        results = map_concurrent(
+        return map_concurrent(
             lambda item: _ocr_one_page(client, model, item[0], item[1], total),
-            list(enumerate(image_paths, 1)),
+            list(zip(labels, image_paths)),
         )
 
+
+def ocr_pdf_images_with_vl(
+    image_paths: list[Path],
+    *,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> Optional[str]:
+    """
+    用 DashScope 专用 OCR 模型（OpenAI 兼容口）逐页转写渲染好的 PDF 页图片。
+
+    每页一次请求，拼成 `## 第 X 页` 分隔的 Markdown（整份页号 1..N）。单页异常不中断整份，
+    三种异常态各记独立标记（调用失败 / 输出截断 / 看不清），只有无任何可用页时才返回 None 让
+    调用方回退到原 MinerU 路径。429/超时/5xx 由 SDK 自动重试（见 _ocr_max_retries）。
+    无凭证时返回 None。整份 OCR 路径用本函数；页级混合提取用 ocr_pages 拿 per-page 结果。
+    """
+    if not image_paths:
+        return ""
+    results = ocr_pages(image_paths, model=model, api_key=api_key, base_url=base_url)
+    if results is None:
+        return None  # 无凭证
+
+    total = len(results)
     parts = [f"## 第 {i} 页\n\n{r.body}" for i, r in enumerate(results, 1)]
     ok_pages = sum(1 for r in results if r.ok)
     failed_pages = sum(1 for r in results if r.failed)

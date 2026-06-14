@@ -29,6 +29,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -49,18 +50,22 @@ from ..schemas import (
     Table,
 )
 from ..utils import (
+    PageRoute,
     PdfPageInfo,
     TextLayerStats,
     analyze_text_layer,
+    classify_pages,
     describe_device,
+    extract_pages_text,
     extract_text_layer,
     inspect_pdf_pages,
-    is_text_layer_usable,
     render_pdf_to_images,
+    routing_summary,
     select_device,
 )
 from ..utils.http_env import sanitize_no_proxy_for_httpx
-from .vl_ocr import ocr_pdf_images_with_vl
+from ..utils.page_router import MODE_OCR, MODE_TEXT
+from .vl_ocr import _MARK_ILLEGIBLE, ocr_pages
 
 logger = logging.getLogger(__name__)
 
@@ -193,13 +198,16 @@ class MinerUPipeline:
         page_infos = inspect_pdf_pages(pdf_path)
         text_stats = analyze_text_layer(pdf_path)
 
-        if self.prefer_text_layer and is_text_layer_usable(text_stats):
-            logger.info(
-                "[pdf] using native text layer: chars=%s printable=%.2f cjk=%.2f",
-                text_stats.non_ws_chars,
-                text_stats.printable_ratio,
-                text_stats.cjk_ratio,
-            )
+        # 页级分流取代整份"二选一"：每页各判走原生文本还是 VL 看图。
+        routes = classify_pages(pdf_path)
+        if not self.prefer_text_layer:
+            # 调用方显式不信任文本层（如已知乱码扫描件）→ 强制整份走 VL：原生抽取也会是垃圾。
+            routes = [replace(r, mode=MODE_OCR) for r in routes]
+        summary = routing_summary(routes)
+
+        # 快路径：整份都是干净文本页 → 原生整份抽取（零渲染、零网络）。
+        if summary["ocr_pages"] == 0:
+            logger.info("[pdf] all %s page(s) native-text; using text layer", summary["total"])
             text = extract_text_layer(pdf_path)
             return _output_from_text(
                 pdf_path=pdf_path,
@@ -208,37 +216,35 @@ class MinerUPipeline:
                 device=self.device,
                 source="native-text-layer",
                 notes=_text_stats_note("backend=native-text-layer", text_stats),
+                page_routing=summary,
             )
 
         logger.info(
-            "[pdf] native text layer unusable: chars=%s printable=%.2f cjk=%.2f control=%.2f",
-            text_stats.non_ws_chars,
-            text_stats.printable_ratio,
-            text_stats.cjk_ratio,
-            text_stats.control_ratio,
+            "[pdf] hybrid routing: %s text / %s ocr / %s table (of %s)",
+            summary["text_pages"],
+            summary["ocr_pages"],
+            summary["table_pages"],
+            summary["total"],
         )
 
-        # 1) preview images（独立于 MinerU 内部产物，供下游审阅）
-        # 旧实现会在 OCR 前无条件渲染整份 PDF。大 PDF 会先产生大量 PNG 和内存压力，
-        # 即使后续 OCR 失败也白做。现在先跑 OCR；成功后再尽力渲染 preview。
-        preview_dir = work_dir / PREVIEW_DIR
-
+        # 有页需看图：混合提取（文本页原生、扫描/表格页 VL）。prefer_vl_ocr 控制是否在
+        # MinerU CLI 前先试——混合提取既是质量优选，也避免大份扫描件白跑一遍 MinerU。
         if self.prefer_vl_ocr:
-            reason = (
-                "native text layer unusable"
-                if self.prefer_text_layer
-                else "native text layer skipped"
-            )
-            vl_first = self._try_vl_ocr(
+            hybrid = self._try_hybrid(
                 pdf_path,
                 work_dir,
                 page_infos,
+                routes,
                 text_stats,
-                f"{reason}; CONTRACT_ARCHIVE_VL_OCR_FIRST enabled",
+                summary,
                 source="vl-ocr-first",
+                reason="CONTRACT_ARCHIVE_VL_OCR_FIRST enabled",
             )
-            if vl_first is not None:
-                return vl_first
+            if hybrid is not None:
+                return hybrid
+
+        # preview 目录（MinerU CLI 成功后再尽力渲染，见下方）。
+        preview_dir = work_dir / PREVIEW_DIR
 
         # 2) 调用 mineru CLI
         mineru_out = work_dir / "_mineru_raw"
@@ -271,8 +277,8 @@ class MinerUPipeline:
             if retry is not None:
                 proc = retry
             else:
-                fallback = self._try_vl_ocr(
-                    pdf_path, work_dir, page_infos, text_stats, reason
+                fallback = self._try_hybrid(
+                    pdf_path, work_dir, page_infos, routes, text_stats, summary, reason=reason
                 )
                 if fallback is not None:
                     return fallback
@@ -292,8 +298,8 @@ class MinerUPipeline:
             logger.error("[mineru-cli] stdout=%s", proc.stdout[-2000:])
             logger.error("[mineru-cli] stderr=%s", proc.stderr[-2000:])
             failure = _mineru_failure_reason(proc)
-            fallback = self._try_vl_ocr(
-                pdf_path, work_dir, page_infos, text_stats, failure
+            fallback = self._try_hybrid(
+                pdf_path, work_dir, page_infos, routes, text_stats, summary, reason=failure
             )
             if fallback is not None:
                 return fallback
@@ -418,45 +424,97 @@ class MinerUPipeline:
             logger.warning("[mineru-lite] retry failed: %s", _mineru_failure_reason(proc))
         return None
 
-    def _try_vl_ocr(
+    def _try_hybrid(
         self,
         pdf_path: Path,
         work_dir: Path,
         page_infos: list[PdfPageInfo],
+        routes: list[PageRoute],
         text_stats: TextLayerStats,
-        reason: str,
+        summary: dict[str, int],
+        *,
         source: str = "vl-ocr-fallback",
+        reason: str = "",
     ) -> PipelineOutput | None:
-        """Use DashScope VL OCR for small PDFs when remote OCR is allowed."""
+        """页级混合提取：文本页原生抽取、扫描/表格页 VL OCR，按页序拼回整份。
+
+        取代旧的整份 VL OCR（_try_vl_ocr）。只把扫描/表格页交给 VL（贵的是网络调用），
+        文本页直接读原生文本层——既省 token，又避免 VL 转写干净电子页时反而引入误差。
+
+        返回 None 让调用方回退 MinerU 的情形：
+        - allow_vl_fallback=False（关掉了远程 OCR）
+        - 页数 > vl_ocr_max_pages（超大 PDF 防烧太多调用）
+        - 无 DashScope 凭证（ocr_pages → None）
+        - 渲染失败 / 所有需 OCR 的页都失败且无可用文本页
+        """
         if not self.allow_vl_fallback:
             return None
         if len(page_infos) > self.vl_ocr_max_pages:
             logger.warning(
-                "[vl-ocr] skip fallback: pages=%s exceeds max=%s",
+                "[vl-ocr] skip hybrid: pages=%s exceeds max=%s",
                 len(page_infos),
                 self.vl_ocr_max_pages,
             )
             return None
 
-        logger.info("[%s] trying DashScope VL OCR: %s", source, reason)
+        logger.info("[%s] hybrid extraction: %s", source, reason or "page-level routing")
+        # 渲染整份预览（光栅化便宜、预览图下游审阅有用）；只把扫描/表格页交给 VL。
         preview_dir = work_dir / PREVIEW_DIR
         pages = _render_previews_safe(pdf_path, preview_dir, self.vl_ocr_dpi)
         if not pages:
             return None
-        text = ocr_pdf_images_with_vl([p.image_path for p in pages])
-        if not text:
+        img_by_idx = {p.page_index: p.image_path for p in pages}
+
+        ocr_pairs = [
+            (r.page_index, img_by_idx[r.page_index])
+            for r in routes
+            if r.mode == MODE_OCR and r.page_index in img_by_idx
+        ]
+        page_results = ocr_pages(
+            [img for _, img in ocr_pairs],
+            page_labels=[idx + 1 for idx, _ in ocr_pairs],
+        )
+        if page_results is None:
+            return None  # 无凭证
+        ocr_body_by_idx = {idx: res.body for (idx, _), res in zip(ocr_pairs, page_results)}
+        ocr_ok = any(res.ok for res in page_results)
+
+        native_by_idx = extract_pages_text(
+            pdf_path, [r.page_index for r in routes if r.mode == MODE_TEXT]
+        )
+
+        # 按页序拼接：扫描/表格页取 VL 结果，文本页取原生文本（统一交给 _output_from_text 去转义）。
+        blocks: list[str] = []
+        native_ok = False
+        for r in routes:
+            idx = r.page_index
+            if idx in ocr_body_by_idx:
+                body = ocr_body_by_idx[idx]
+            else:
+                native = native_by_idx.get(idx, "").strip()
+                if native:
+                    native_ok = True
+                    body = native
+                else:
+                    body = _MARK_ILLEGIBLE  # 防御：文本页却抽不到字（分类已要求 >=50 字，理论不至于）
+            blocks.append(f"## 第 {idx + 1} 页\n\n{body}")
+
+        if not ocr_ok and not native_ok:
+            logger.warning("[%s] hybrid produced no usable page; caller will fall back", source)
             return None
+
+        notes = _text_stats_note(f"backend=hybrid-text-vl, source={source}", text_stats)
+        if reason:
+            notes = f"{notes}; reason={reason}"
         return _output_from_text(
             pdf_path=pdf_path,
             page_infos=page_infos,
-            text=text,
+            text="\n\n".join(blocks).strip(),
             device=self.device,
             source=source,
-            notes=_text_stats_note(
-                f"backend={source}, reason={reason}",
-                text_stats,
-            ),
+            notes=notes,
             preview_image_paths=[str(p.image_path) for p in pages],
+            page_routing=summary,
         )
 
 
@@ -779,6 +837,7 @@ def _output_from_text(
     source: str,
     notes: str,
     preview_image_paths: list[str] | None = None,
+    page_routing: dict[str, int] | None = None,
 ) -> PipelineOutput:
     markdown = _unescape_markdown(text)
     sections = _split_sections(markdown)
@@ -813,6 +872,7 @@ def _output_from_text(
             finished_at=now,
             duration_seconds=0.0,
             notes=notes,
+            page_routing=page_routing or {},
         ),
         raw_text=markdown,
         markdown=markdown,
