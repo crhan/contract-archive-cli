@@ -1,83 +1,73 @@
-"""make_gold 脱敏加固单测：中文大写转换器 + 证明类金额随机缩放。"""
+"""make_gold（去脱敏后）单测：archive 文档枚举 + draft case 落盘（含 source.pdf 复制）。
+
+脱敏机制已删（数据私有化、放私有仓库 git.crhan.com）。这里验"跑生产链路产物 →
+draft gold 落私有数据集（不脱敏）"。
+"""
 from __future__ import annotations
 
-import pytest
+import json
 
-from evals.make_gold import int_to_cap, scrub_income_amounts
-
-
-@pytest.mark.parametrize("n,exp", [
-    (0, "零"),
-    (4883, "肆仟捌佰捌拾叁"),
-    (10000, "壹万"),
-    (106643, "壹拾万陆仟陆佰肆拾叁"),
-    (621106, "陆拾贰万壹仟壹佰零陆"),         # 组内零
-    (1279720, "壹佰贰拾柒万玖仟柒佰贰拾"),
-    (1000006, "壹佰万零陆"),                  # 组间零
-    (12480360, "壹仟贰佰肆拾捌万零叁佰陆拾"),  # 组间零 + 进位
-    (35964000, "叁仟伍佰玖拾陆万肆仟"),
-])
-def test_int_to_cap(n, exp):
-    assert int_to_cap(n) == exp
+from evals.make_gold import iter_archive_docs, write_case
 
 
-def _income_env():
-    return {
-        "doc_type": "证明",
-        "primary_amount_value": 1279720.0,
-        "primary_amount_text": "人民币 壹佰贰拾柒万玖仟柒佰贰拾元整",
-        "computed_total_value": 1900826.0,
-        "amounts": [
-            {"label": "年收入", "text": "人民币 壹佰贰拾柒万玖仟柒佰贰拾元整",
-             "value": 1279720.0, "is_total_component": True},
-            {"label": "股权收益", "text": "人民币陆拾贰万壹仟壹佰零陆元整",
-             "value": 621106.0, "is_total_component": True},
-            {"label": "公积金", "text": "肆仟捌佰捌拾叁元整",
-             "value": 4883.0, "is_total_component": False},
-        ],
-    }
+def _make_archive_doc(archive_dir, doc_id, with_pdf=True):
+    doc = archive_dir / "documents" / doc_id
+    (doc / "mineru").mkdir(parents=True)
+    (doc / "extraction_result.json").write_text(
+        json.dumps({"doc_type": "保险凭证", "title": "某保单"}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    if with_pdf:
+        (doc / "source.pdf").write_bytes(b"%PDF-1.4 fake")
+    return doc
 
 
-def test_scrub_income_scales_to_ten_million_and_consistent():
-    env = _income_env()
-    text = ("年收入人民币 壹佰贰拾柒万玖仟柒佰贰拾元整；"
-            "股权人民币陆拾贰万壹仟壹佰零陆元整；公积金肆仟捌佰捌拾叁元整。")
-    new_env, new_text, changed = scrub_income_amounts(env, text, seed=42)
-    assert changed
-    # 主金额到千万级
-    assert 10_000_000 <= new_env["primary_amount_value"] <= 100_000_000
-    # 旧大写已从文本消失（去真值）
-    assert "壹佰贰拾柒万玖仟柒佰贰拾元整" not in new_text
-    assert "陆拾贰万壹仟壹佰零陆元整" not in new_text
-    # gold.text 与缩放后数值一致（大写可还原回 value）
-    for a in new_env["amounts"]:
-        assert int_to_cap(int(a["value"])) in a["text"]
-        assert a["text"] in new_text          # input 与 gold 文本一致
-    # computed_total = 两个 is_total_component 之和
-    comps = [a["value"] for a in new_env["amounts"] if a["is_total_component"]]
-    assert new_env["computed_total_value"] == pytest.approx(sum(comps))
-    # 比例保持（缩放不破坏内部关系）：股权/年收入 比值不变
-    ratio_old = 621106.0 / 1279720.0
-    a_year = next(a for a in new_env["amounts"] if a["label"] == "年收入")
-    a_eq = next(a for a in new_env["amounts"] if a["label"] == "股权收益")
-    assert a_eq["value"] / a_year["value"] == pytest.approx(ratio_old, rel=0.001)
+def test_iter_archive_docs_lists_valid(tmp_path):
+    _make_archive_doc(tmp_path, "doc_a")
+    _make_archive_doc(tmp_path, "doc_b")
+    # 缺 extraction_result.json 的不算
+    (tmp_path / "documents" / "doc_c" / "mineru").mkdir(parents=True)
+    docs = iter_archive_docs(tmp_path, only=None)
+    assert [d[0] for d in docs] == ["doc_a", "doc_b"]
+    assert all(len(d) == 4 for d in docs)  # (doc_id, doc_dir, mineru_dir, result_path)
 
 
-def test_scrub_income_scrubs_summary_arabic():
-    """收入常被 LLM 写进 summary 的阿拉伯数字（含小数）——也要被替换掉，不只改 amounts。"""
-    env = _income_env()
-    env["summary"] = "证明其近12个月税前总收入1279720元及股权应税收益621106.71元。"
-    new_env, _, _ = scrub_income_amounts(env, "", seed=7)
-    assert "1279720" not in new_env["summary"]
-    assert "621106" not in new_env["summary"]   # 含 621106.71 的整数段也清掉
-    # summary 里应出现缩放后的新主金额
-    assert str(int(new_env["primary_amount_value"])) in new_env["summary"]
+def test_iter_archive_docs_only_filter(tmp_path):
+    _make_archive_doc(tmp_path, "doc_a")
+    _make_archive_doc(tmp_path, "doc_b")
+    assert [d[0] for d in iter_archive_docs(tmp_path, only="doc_b")] == ["doc_b"]
 
 
-def test_scrub_income_skips_non_certificate():
-    env = {"doc_type": "合同协议", "primary_amount_value": 200000.0,
-           "amounts": [{"label": "总价", "text": "贰拾万元整", "value": 200000.0,
-                        "is_total_component": True}]}
-    new_env, new_text, changed = scrub_income_amounts(env, "总价贰拾万元整", seed=1)
-    assert changed is False
-    assert new_env["primary_amount_value"] == 200000.0
+def test_iter_archive_docs_empty_when_no_documents(tmp_path):
+    assert iter_archive_docs(tmp_path, only=None) == []
+
+
+def test_write_case_emits_real_data_with_pdf(tmp_path):
+    doc = _make_archive_doc(tmp_path, "doc_a")
+    dataset = tmp_path / "dataset"
+    gold = {"doc_type": "保险凭证", "title": "某保单", "parties": ["陈意"]}
+    case_dir = write_case(
+        dataset, "doc_a", "保单全文……被保险人：陈意", gold, doc / "source.pdf", None
+    )
+    assert case_dir == dataset / "extraction" / "doc_a"
+    # 真实数据原样落盘，不脱敏
+    assert "陈意" in (case_dir / "input.txt").read_text(encoding="utf-8")
+    assert json.loads((case_dir / "gold.json").read_text(encoding="utf-8"))["parties"] == ["陈意"]
+    # 原始 PDF 复制进来 → 评测走整条链路
+    assert (case_dir / "source.pdf").exists()
+    assert (case_dir / "meta.json").exists()
+    assert (case_dir / "REVIEW.md").exists()
+
+
+def test_write_case_without_pdf_skips_copy(tmp_path):
+    dataset = tmp_path / "dataset"
+    case_dir = write_case(dataset, "doc_x", "文本", {"doc_type": "证明"}, None, None)
+    assert not (case_dir / "source.pdf").exists()
+
+
+def test_write_case_includes_crosscheck(tmp_path):
+    dataset = tmp_path / "dataset"
+    case_dir = write_case(
+        dataset, "doc_y", "文本", {"doc_type": "证明"}, None, {"doc_type": "证明", "by": "异家族"}
+    )
+    assert json.loads((case_dir / "crosscheck.json").read_text(encoding="utf-8"))["by"] == "异家族"

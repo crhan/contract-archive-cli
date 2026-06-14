@@ -119,6 +119,27 @@ def _run_extraction(
     return ContractExtraction(), conf, envelope
 
 
+def run_full_extraction(document_text: str, mineru_dir: Path) -> DocumentExtraction:
+    """跑完整抽取链路（类型路由 + 特化 + 通用后处理 + 多源融合），**不落库**——供评测/复用。
+
+    与 ingest 的抽取段同源：_run_extraction（类型路由+特化）→ 类型专属后处理（签章等）
+    → 通用后处理（页码校正）→ 多源融合（保险等）。跳过身份核对（跨文档、需基准库，与单文档
+    评测无关）。用生产默认模型。任何后处理/融合异常不中断，尽力返回已得信封。
+    """
+    _, _, envelope = _run_extraction(document_text, llm_enabled=True)
+    for pp in get_handler(envelope.doc_type).post_processors:
+        try:
+            pp(envelope, mineru_dir)
+        except Exception as e:  # noqa: BLE001 — 专属后处理失败不影响其余
+            logger.warning("post:%s 跳过（异常）: %s", getattr(pp, "__name__", pp), e)
+    try:
+        correct_evidence_pages(envelope, mineru_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("page-fix 跳过（异常）: %s", e)
+    _maybe_run_vision_fusion(envelope, document_text, mineru_dir, logger.info)
+    return envelope
+
+
 def _vision_fusion_max_pages() -> int:
     """vision 融合看图页数上限（CONTRACT_ARCHIVE_VISION_FUSION_MAX_PAGES，默认 20）。坏值回退。"""
     raw = os.getenv("CONTRACT_ARCHIVE_VISION_FUSION_MAX_PAGES")
