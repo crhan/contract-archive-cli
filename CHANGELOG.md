@@ -3,6 +3,47 @@
 本项目变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，
 版本号语义化（单用户本地工具，破坏性变更会在此显著标注）。
 
+## [0.3.0] — 2026-06-14
+
+多源融合提取 + 文档类型路由泛化 + 评测私有化（PR #1）+ 评测调试驱动的 6 项融合改进（PR #2）。
+含若干**破坏性变更**（抽取流水线行为变化），单用户本地工具，升级后建议对关键文档重抽一遍核对。
+
+### 破坏性变更
+- **页级分流取代整份"二选一"**：mineru 改**混合提取**——逐页判 text/ocr（主判据=单页文本层质量，
+  含表格的文本页也走 VL），文本页原生抽取、扫描/表格页 VL OCR，按页序拼回。取代旧的"整份 native
+  OR 整份 OCR"，混合版式（夹扫描页/夹表格页）不再系统性丢数据。
+- **文档类型路由泛化**：`doc_type → handler` 映射（`extraction/doc_type_handlers.py`）取代散落各处的
+  `if doc_type == "合同协议"`。本项目处理**所有** PDF 类型（合同/保险/证明/发票/旅行/证件…）——先识别
+  doc_type（通用信封）再据类型走特化（特化抽取/后处理/是否开多源融合）。
+- **评测私有化**：评测**数据集**（原始 PDF + 真实金标准，**不脱敏**）迁私有仓库，评测**框架代码**留主仓库；
+  框架读 env `CONTRACT_ARCHIVE_EVALSET_DIR` 定位数据集，删 `make_gold` 三层脱敏机制。
+
+### 新增
+- **多源融合**（保险为首个落地类型）：A(文本 `read_fields_in_text`)/C(看图 `read_fields_on_images`)两路
+  **并发**按同一组高价值概念键抽候选——**一致直接采信**（省一次 LLM）、**矛盾才据原图评判**
+  （`fusion.fuse_sources`）。结论只写 `field_verdicts`/`fusion_overall_confidence` **sidecar，绝不回写原
+  `amounts/fields`**（保护 evidence/unit/is_total_component 与 computed_total 的勾稽不变量）。
+- 保险特化概念键 `INSURANCE_FIELD_DEFS`：投保人/被保险人（分列且各带口径，防文本路把投保人误当被保险人）、
+  保单号/保险期间/各档保额（一般/特定医疗/重疾/身故各独立键）/年度限额/免赔额/赔付比例（社保内外）/
+  等待期/保证续保年限。
+- **并发基建** `utils.map_concurrent`（保序、单项失败隔离）+ `merge_usage`；逐页 OCR、看图抽字段、多字段
+  评判都走它。旋钮 `CONTRACT_ARCHIVE_LLM_CONCURRENCY`（默认 4）。
+- `agent_fallback.escalate_low_confidence` 兜底接口（本期 **no-op** 仅标记 low_confidence，未来插 agentic 只改这一处）。
+- 配置键 `dashscope.vl_extract_model`（env `DASHSCOPE_VL_EXTRACT_MODEL`，看图抽字段模型，默认 `qwen3.6-flash`）。
+- 评测支持**原始 PDF 全链路评测**（OCR→类型路由→特化→多源融合，对照 gold）；融合 `field_verdicts` 纳入评分门禁。
+
+### 变更
+- 逐页 OCR 由串行改**并发**（`map_concurrent`），计数器竞态用结构化结果消除。实测 91 页保单提速明显。
+- 文本层判据加覆盖率门槛 + "绝对纯扫描页数"判据：修扫描件夹文本页被错跳 OCR、小份夹页扫描件漏网。
+- **评测调试（6 份真实保单实测 field_verdicts micro-F1 = 0.979）驱动的 6 项融合改进**：
+  ① 补 `保额_身故` 概念键（意外/寿险身故金额原无键，doc36 身故300万由全漏→捕获）；
+  ② `_normalize_value` 整年月归一（"12个月"=="1年"）；
+  ③ 评判 prompt 投保人/被保险人**取投保单结构化栏**（签名常代签，防被签名栏误覆盖真值）；
+  ④ `年度限额` 定义锐化（仅医疗类，排除身故限额双标）；
+  ⑤ vision 选页**封面页优先纳入**（大文档封面不被表格页挤出截断窗）；
+  ⑥ native-text 快路（ocr_pages==0）下按需补渲 vision 选中页（`render_pdf_to_images` 加 `pages` 参数）。
+- CI：`checkout` v4→v6、`setup-uv` v5→v8（消除 Node 20 弃用警告）。
+
 ## [0.2.7] — 2026-06-13
 
 ### 变更
