@@ -19,9 +19,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 import traceback
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,18 +31,23 @@ from typing import Optional
 
 from ..errors import ErrorInfo, classify_exception, extract_empty, mineru_failed
 from ..extraction import extract_contract, extract_document
-from ..extraction.vision_seal import augment_completeness_with_vision
+from ..extraction.agent_fallback import escalate_low_confidence
+from ..extraction.doc_type_handlers import get_handler
 from ..extraction.evidence_page_fix import correct_evidence_pages
+from ..extraction.fusion import DEFAULT_FUSION_THRESHOLD, run_vision_fusion
 from ..pipelines import MinerUPipeline
 from ..schemas import (
     FILE_EXTRACTION,
     FILE_EXTRACTION_CONF,
     FILE_MARKDOWN,
     FILE_RAW_TEXT,
+    PREVIEW_DIR,
     ContractExtraction,
     DocumentExtraction,
     ExtractionConfidence,
 )
+from ..utils import classify_pages
+from ..utils.page_router import MODE_OCR
 from .party_registry import PartyRegistry
 from .paths import ArchivePaths, SHA_SHORT_LEN, link_or_copy, safe_rmtree, sha256_of_file
 from .repository import (
@@ -91,8 +98,7 @@ def _run_extraction(
     document_text: str, llm_enabled: bool
 ) -> tuple[ContractExtraction, ExtractionConfidence, DocumentExtraction]:
     """
-    LLM-first 抽取：先判类型抽通用信封；若是合同，再跑合同抽取补专属列。
-    （合同抽取自 Phase 2 起也是纯 LLM，不再有 rule/hybrid。）
+    LLM-first 抽取：先判类型抽通用信封；据 doc_type 查处理器跑第二层特化抽取。
     返回 (合同抽取, 置信度, 通用信封)——三者一并交给 repository 落库。
     """
     if not llm_enabled:
@@ -102,18 +108,137 @@ def _run_extraction(
         return ext, conf, contract_to_envelope(ext)
 
     envelope = extract_document(document_text, llm_enabled=llm_enabled)
-    if envelope.doc_type == "合同协议" and llm_enabled:
-        ext, conf = extract_contract(document_text, llm_enabled=llm_enabled)
-        # 合同义务用合同抽取的（专属 prompt 对义务/罚则区分更细）
-        envelope.obligations = ext.obligations
-        # 标题若合同抽取没给，回退用信封的
-        if not ext.contract_name and envelope.title:
-            ext.contract_name = envelope.title
+    handler = get_handler(envelope.doc_type)
+    if handler.specialized_extractor is not None:
+        # 第二层特化（合同→extract_contract；保险→insurance）。可就地 enrich envelope。
+        ext, conf = handler.specialized_extractor(document_text, envelope, llm_enabled)
         return ext, conf, envelope
-    # 非合同：无合同专属列，overall 走信封启发式
+    # 无特化的类型：无专属列，overall 走信封启发式
     conf = ExtractionConfidence()
     conf.overall = _envelope_confidence(envelope)
     return ContractExtraction(), conf, envelope
+
+
+def run_full_extraction(document_text: str, mineru_dir: Path) -> DocumentExtraction:
+    """跑完整抽取链路（类型路由 + 特化 + 通用后处理 + 多源融合），**不落库**——供评测/复用。
+
+    与 ingest 的抽取段同源：_run_extraction（类型路由+特化）→ 类型专属后处理（签章等）
+    → 通用后处理（页码校正）→ 多源融合（保险等）。跳过身份核对（跨文档、需基准库，与单文档
+    评测无关）。用生产默认模型。任何后处理/融合异常不中断，尽力返回已得信封。
+    """
+    _, _, envelope = _run_extraction(document_text, llm_enabled=True)
+    for pp in get_handler(envelope.doc_type).post_processors:
+        try:
+            pp(envelope, mineru_dir)
+        except Exception as e:  # noqa: BLE001 — 专属后处理失败不影响其余
+            logger.warning("post:%s 跳过（异常）: %s", getattr(pp, "__name__", pp), e)
+    try:
+        correct_evidence_pages(envelope, mineru_dir)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("page-fix 跳过（异常）: %s", e)
+    _maybe_run_vision_fusion(envelope, document_text, mineru_dir, logger.info)
+    return envelope
+
+
+def _vision_fusion_max_pages() -> int:
+    """vision 融合看图页数上限（CONTRACT_ARCHIVE_VISION_FUSION_MAX_PAGES，默认 20）。坏值回退。"""
+    raw = os.getenv("CONTRACT_ARCHIVE_VISION_FUSION_MAX_PAGES")
+    if not raw or not raw.strip():
+        return 20
+    try:
+        val = int(raw.strip())
+    except ValueError:
+        return 20
+    return val if val > 0 else 20
+
+
+def _fusion_threshold() -> float:
+    """融合低置信阈值（CONTRACT_ARCHIVE_FUSION_THRESHOLD，默认 DEFAULT_FUSION_THRESHOLD）。坏值回退。"""
+    raw = os.getenv("CONTRACT_ARCHIVE_FUSION_THRESHOLD")
+    if not raw or not raw.strip():
+        return DEFAULT_FUSION_THRESHOLD
+    try:
+        return float(raw.strip())
+    except ValueError:
+        return DEFAULT_FUSION_THRESHOLD
+
+
+def _select_fusion_images(mineru_dir: Path) -> dict[int, Path]:
+    """选 vision 融合要看的页图：优先表格页、其次扫描页（高价值表格/扫描所在），映射到 preview 图。
+
+    据 source.pdf 的 classify_pages 复用页级分流选页；上限 _vision_fusion_max_pages 防超大文档
+    烧太多看图调用（截断记日志，不静默）。无 source.pdf / 无 preview 图 / 无表格扫描页 → 空（退文本路）。
+    返回 {1-based 页号: 页图路径}。
+    """
+    source_pdf = mineru_dir.parent / "source.pdf"
+    preview_dir = mineru_dir / PREVIEW_DIR
+    if not source_pdf.exists() or not preview_dir.exists():
+        return {}
+    try:
+        routes = classify_pages(source_pdf)
+    except Exception as e:  # noqa: BLE001 — 分流失败不能中断入库，退文本路
+        logger.warning("[fusion] classify_pages 失败，退文本路: %s", e)
+        return {}
+    table_pages = [r.page_index for r in routes if r.has_tables]
+    other_ocr = [r.page_index for r in routes if r.mode == MODE_OCR and not r.has_tables]
+    ordered = table_pages + other_ocr  # 表格优先
+    cap = _vision_fusion_max_pages()
+    if len(ordered) > cap:
+        logger.info(
+            "[fusion] 候选 vision 页 %s 超上限 %s，截断（CONTRACT_ARCHIVE_VISION_FUSION_MAX_PAGES 可调）",
+            len(ordered),
+            cap,
+        )
+    out: dict[int, Path] = {}
+    for idx in ordered[:cap]:
+        img = preview_dir / f"page_{idx + 1:03d}.png"
+        if img.exists():
+            out[idx + 1] = img  # render_pdf_to_images 用 1-based page_NNN 命名
+    return out
+
+
+def _maybe_run_vision_fusion(
+    envelope: DocumentExtraction,
+    document_text: str,
+    mineru_dir: Path,
+    log: Callable[[str], None],
+    confidence: Optional[ExtractionConfidence] = None,
+) -> None:
+    """据 doc_type 处理器的 enable_vision_fusion 决定是否跑多源融合（如保险）。
+
+    A(文本)/C(看图) 两路抽高价值概念候选 → 评判 → 写 field_verdicts/fusion_overall_confidence
+    sidecar（不回写原字段）。融合产出整体置信后，把它写进 confidence.overall（落 documents
+    .overall_confidence 列，复用现列），否则查询/列表仍显融合前的旧启发式分。整体置信低于阈值
+    → 调 agent_fallback（本期 no-op 仅标记）。任何异常都不中断入库。
+    """
+    handler = get_handler(envelope.doc_type)
+    if not handler.enable_vision_fusion or not handler.vision_fusion_fields:
+        return
+    threshold = _fusion_threshold()
+    try:
+        images = _select_fusion_images(mineru_dir)
+        if run_vision_fusion(
+            envelope,
+            document_text,
+            images,
+            fields=handler.vision_fusion_fields,
+            threshold=threshold,
+        ):
+            log(
+                f"[fusion] 多源融合：{len(envelope.field_verdicts)} 项评判，"
+                f"overall={envelope.fusion_overall_confidence}"
+            )
+    except Exception as e:  # noqa: BLE001 — 融合失败不能中断入库
+        log(f"[fusion] 跳过（异常）: {e}")
+        return
+    conf = envelope.fusion_overall_confidence
+    if conf is None:
+        return
+    # 融合分写进可查询的 overall_confidence 列（sidecar 与列保持一致，不留旧启发式分）
+    if confidence is not None:
+        confidence.overall = conf
+    if conf < threshold:
+        escalate_low_confidence(envelope, source_pdf=str(mineru_dir.parent / "source.pdf"))
 
 
 def _ensure_archived_source(paths: ArchivePaths, sha: str, pdf_path: Path) -> Path:
@@ -277,15 +402,16 @@ def ingest_pdf(
             log_handle.write(f"\n[extract] FAILED (status=partial): {error_message}\n")
             log_handle.write(traceback.format_exc())
 
-        # ---- 2.5 多模态签章核查：看落款页图覆盖文本对签章的判断（有图 + 有 key 才跑）----
+        # ---- 2.5 类型专属后处理（据 doc_type 查处理器；合同=看落款页图重判签章，其他类型可能无）----
         if status != "failed" and llm_enabled:
-            try:
-                if augment_completeness_with_vision(envelope, mineru_dir):
-                    log_handle.write("[seal-vision] 签章核查完成（看落款页图）\n")
-            except Exception as e:  # noqa: BLE001 — VL 失败不能中断入库
-                log_handle.write(f"[seal-vision] 跳过（异常）: {e}\n")
+            for pp in get_handler(envelope.doc_type).post_processors:
+                try:
+                    if pp(envelope, mineru_dir):
+                        log_handle.write(f"[post:{pp.__name__}] 完成\n")
+                except Exception as e:  # noqa: BLE001 — 专属后处理失败不能中断入库
+                    log_handle.write(f"[post:{pp.__name__}] 跳过（异常）: {e}\n")
 
-            # ---- 2.6 出处页码校正：用 content_list 的 page_idx 覆盖 LLM 猜的页码 ----
+            # ---- 2.6 出处页码校正（通用，类型无关）：用 content_list 的 page_idx 覆盖 LLM 猜的页码 ----
             try:
                 if correct_evidence_pages(envelope, mineru_dir):
                     log_handle.write("[page-fix] 出处页码已据 content_list 校正\n")
@@ -307,6 +433,12 @@ def ingest_pdf(
                     log_handle.write("[identity] 身份核对：与基准一致（或首见已入库）\n")
             except Exception as e:  # noqa: BLE001 — 核对失败不能中断入库
                 log_handle.write(f"[identity] 跳过（异常）: {e}\n")
+
+            # ---- 2.8 多源融合（仅 enable_vision_fusion 的类型，如保险）：A文本/C看图评判 → sidecar ----
+            _maybe_run_vision_fusion(
+                envelope, document_text, mineru_dir,
+                lambda m: log_handle.write(m + "\n"), confidence,
+            )
 
         # ---- 3. extracted.json 落盘（写通用信封；即使 partial 也写空对象，便于后续 extract 复跑） ----
         (tmp_doc_dir / FILE_EXTRACTION).write_text(
@@ -559,12 +691,13 @@ def re_extract(
         envelope = DocumentExtraction()
     llm_duration = time.perf_counter() - t0
 
-    # 多模态签章核查：看落款页图重判签章（augment 内部处理 doc_type/无图/无 key 降级）。
+    # 类型专属后处理（据 doc_type 查处理器；合同=看落款页图重判签章）。
     if llm_enabled and status == "ok":
-        try:
-            augment_completeness_with_vision(envelope, mineru_dir)
-        except Exception as e:  # noqa: BLE001 — VL 失败不能中断重抽
-            logger.warning("seal-vision 跳过（异常）: %s", e)
+        for pp in get_handler(envelope.doc_type).post_processors:
+            try:
+                pp(envelope, mineru_dir)
+            except Exception as e:  # noqa: BLE001 — 专属后处理失败不能中断重抽
+                logger.warning("post:%s 跳过（异常）: %s", pp.__name__, e)
         try:
             correct_evidence_pages(envelope, mineru_dir)
         except Exception as e:  # noqa: BLE001 — 页码校正失败不能中断重抽
@@ -580,6 +713,9 @@ def re_extract(
             envelope.identity_issues = id_issues
         except Exception as e:  # noqa: BLE001 — 核对失败不能中断重抽
             logger.warning("identity 跳过（异常）: %s", e)
+
+        # 多源融合（仅 enable_vision_fusion 的类型，如保险）：A文本/C看图评判 → sidecar。
+        _maybe_run_vision_fusion(envelope, document_text, mineru_dir, logger.info, confidence)
 
     # 落盘新 extracted.json（通用信封）
     (Path(doc.output_dir) / FILE_EXTRACTION).write_text(

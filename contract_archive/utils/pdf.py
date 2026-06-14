@@ -8,6 +8,7 @@ PDF 公共工具：分页转图片、获取页面尺寸。
 """
 from __future__ import annotations
 
+import base64
 import string
 import unicodedata
 from dataclasses import dataclass
@@ -161,6 +162,35 @@ def extract_text_layer(pdf_path: str | Path, max_chars: int | None = None) -> st
     return "\n".join(chunks)
 
 
+def encode_image_data_uri(path: str | Path) -> str:
+    """本地图片 → data URI（base64 内联）。
+
+    DashScope OpenAI 兼容接口不收 file://，图片必须 base64 内联。逐页 OCR、看图抽字段、
+    签章核查三处共用，集中一处避免散落多份同款实现。
+    """
+    data = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    return f"data:image/png;base64,{data}"
+
+
+def extract_pages_text(
+    pdf_path: str | Path, page_indices: set[int] | list[int]
+) -> dict[int, str]:
+    """抽取指定页（0-based）的原生文本层，返回 {page_index: text}。
+
+    供页级混合提取用：文本页走原生抽取、扫描页走 VL，再按页序拼回。只取需要的页，
+    不整份 get_text 后再切分。
+    """
+    wanted = set(page_indices)
+    if not wanted:
+        return {}
+    out: dict[int, str] = {}
+    with fitz.open(pdf_path) as doc:
+        for idx, page in enumerate(doc):
+            if idx in wanted:
+                out[idx] = page.get_text()
+    return out
+
+
 def count_text_pages(pdf_path: str | Path, page_min_chars: int = 20) -> tuple[int, int]:
     """逐页统计含实质文本的页数，返回 (pages_with_text, total_pages)。
 
@@ -175,9 +205,14 @@ def count_text_pages(pdf_path: str | Path, page_min_chars: int = 20) -> tuple[in
     with fitz.open(pdf_path) as doc:
         for page in doc:
             total += 1
-            non_ws = sum(1 for c in page.get_text() if not c.isspace())
-            if non_ws >= page_min_chars:
-                pages_with_text += 1
+            # 只需判断是否够门槛，数到 page_min_chars 即停，长条款页不必数满。
+            non_ws = 0
+            for ch in page.get_text():
+                if not ch.isspace():
+                    non_ws += 1
+                    if non_ws >= page_min_chars:
+                        pages_with_text += 1
+                        break
     return pages_with_text, total
 
 
@@ -221,7 +256,7 @@ def is_text_layer_usable(
     stats: TextLayerStats,
     min_chars: int = 200,
     min_coverage: float = 0.5,
-    coverage_min_pages: int = 5,
+    min_scanned_pages: int = 2,
 ) -> bool:
     """Heuristic gate for using native PDF text instead of OCR."""
     if stats.non_ws_chars < min_chars:
@@ -230,12 +265,16 @@ def is_text_layer_usable(
         return False
     if not (stats.printable_ratio >= 0.85 or stats.cjk_ratio >= 0.12):
         return False
-    # 覆盖率门槛：多页文档若只有少数页带原生文本，几乎必是扫描件夹了打印叠加页。
-    # 实测一份 184 页保险合同仅 2 页保单信息页有文本层（共 9500 字、质量很高），
-    # 覆盖率 ~1%，却因 printable/cjk 比例达标而骗过旧判据，导致 182 页扫描条款
-    # 被整体跳过 OCR。短文档（如保单凭证）页少、文本页占比天然高，豁免此检查
-    # 以免误伤本就该走文本层的几页凭证。
-    if stats.pages >= coverage_min_pages and stats.text_coverage < min_coverage:
+    # 覆盖率门槛：文档若同时（1）带文本的页占比过低、（2）有相当数量的纯扫描页，
+    # 几乎必是扫描件夹了少量打印叠加页（如保单信息页），整份当电子文档会丢掉那些
+    # 纯扫描页的内容。实测一份 184 页保险合同仅 ~8% 页有文本层，却因 printable/cjk
+    # 比例达标骗过质量判据，导致一百多页扫描条款被跳过 OCR。
+    #
+    # 用"绝对纯扫描页数"而非纯页数阈值把关：既拦住 184 页夹几页、也拦住 4 页夹 1 页
+    # 这种小份夹页（旧逻辑按 pages<5 豁免会放过后者）；又放过真·短凭证——页少但几乎
+    # 页页有文本、纯扫描页数为 0，自然不触发。
+    scanned_pages = stats.pages - stats.pages_with_text
+    if stats.text_coverage < min_coverage and scanned_pages >= min_scanned_pages:
         return False
     return True
 

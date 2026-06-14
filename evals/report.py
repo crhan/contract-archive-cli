@@ -22,7 +22,7 @@ from typing import Optional
 
 from contract_archive.schemas import DocumentExtraction
 
-from .run import DEFAULT_CASES
+from .run import evalset_dir
 from .score import (
     CRITICAL_FIELDS,
     DELTA,
@@ -306,12 +306,13 @@ def build_report(results_dir: Path, cases_dir: Path, champion: Optional[str]) ->
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="评测报告：gate 决策表")
     ap.add_argument("results_dir", type=Path)
-    ap.add_argument("--cases-dir", type=Path, default=DEFAULT_CASES)
+    ap.add_argument("--cases-dir", type=Path, default=None,
+                    help="评测集根目录（默认 CONTRACT_ARCHIVE_EVALSET_DIR 或主仓库内合成 cases）")
     ap.add_argument("--champion", default=None, help="基准模型（默认 JSONL 里首个出现的模型）")
     ap.add_argument("--out", type=Path, default=None, help="报告输出路径（默认 results_dir/report.md）")
     args = ap.parse_args(argv)
 
-    md = build_report(args.results_dir, args.cases_dir, args.champion)
+    md = build_report(args.results_dir, args.cases_dir or evalset_dir(), args.champion)
     out = args.out or (args.results_dir / "report.md")
     out.write_text(md, encoding="utf-8")
     print(md)

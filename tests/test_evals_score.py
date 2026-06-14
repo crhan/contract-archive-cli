@@ -10,13 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from contract_archive.schemas import DOC_TYPES, DocumentExtraction
+from contract_archive.schemas import DOC_TYPES, DocumentExtraction, FieldVerdict
 from evals.score import (
     CRITICAL_FIELDS,
     bootstrap_ci,
     score_amounts,
     score_completeness_issues,
     score_envelope,
+    score_field_verdicts,
     score_str_list,
 )
 
@@ -205,3 +206,52 @@ def test_critical_fields_are_flagged():
     es = score_envelope("c04", gold, copy.deepcopy(gold))
     flagged = {fs.field for fs in es.fields if fs.critical}
     assert flagged == set(CRITICAL_FIELDS)
+
+
+# ---- 多源融合 verdict 评分（保证融合回归过不了 gate）----
+
+
+def test_field_verdicts_perfect_match():
+    gold = [FieldVerdict(key="保额_重疾", value="400万")]
+    pred = [FieldVerdict(key="保额_重疾", value="400万")]
+    fs = score_field_verdicts(gold, pred)
+    assert fs.tp == 1 and fs.fbeta() == 1.0
+
+
+def test_field_verdicts_wrong_value_caught():
+    """verdict 值抽错：gold 漏(FN) + pred 错(FP)，F-beta=0——融合回归被门禁逮住。"""
+    gold = [FieldVerdict(key="保额_重疾", value="400万")]
+    pred = [FieldVerdict(key="保额_重疾", value="500万")]
+    fs = score_field_verdicts(gold, pred)
+    assert fs.tp == 0 and fs.fn == 1 and fs.fp == 1
+    assert fs.fbeta() == 0.0
+
+
+def test_field_verdicts_amount_unit_normalized():
+    """200万元 == 200万（归一化数字闸内的币种剥离）。"""
+    fs = score_field_verdicts(
+        [FieldVerdict(key="保额_一般医疗", value="200万元")],
+        [FieldVerdict(key="保额_一般医疗", value="200万")],
+    )
+    assert fs.tp == 1
+
+
+def test_field_verdicts_empty_is_neutral():
+    """gold 未标 verdict → 真空不失分（待人工标真值后 gate 才守它）。"""
+    assert score_field_verdicts([], []).fbeta() == 1.0
+
+
+def test_field_verdicts_empty_gold_neutral_even_with_pred():
+    """gold 未标 verdict 但 pred 产出 verdict → 中性、**不罚**（否则现有未标注 case 全假性失败）。"""
+    fs = score_field_verdicts([], [FieldVerdict(key="保额_重疾", value="400万")])
+    assert fs.fp == 0 and fs.fn == 0 and fs.fbeta() == 1.0
+
+
+def test_field_verdicts_missing_pred_penalized_when_gold_annotated():
+    """gold 已标 verdict 但 pred 漏抽 → FN，被门禁逮住（标注后即生效）。"""
+    fs = score_field_verdicts([FieldVerdict(key="保额_重疾", value="400万")], [])
+    assert fs.fn == 1 and fs.fbeta() == 0.0
+
+
+def test_field_verdicts_is_critical_field():
+    assert "field_verdicts" in CRITICAL_FIELDS

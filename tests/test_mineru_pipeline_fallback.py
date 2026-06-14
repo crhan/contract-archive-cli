@@ -6,6 +6,7 @@ import fitz
 
 from contract_archive.pipelines import mineru_pipeline as mp
 from contract_archive.pipelines.mineru_pipeline import MinerUPipeline
+from contract_archive.pipelines.vl_ocr import _PageResult
 from contract_archive.utils.http_env import sanitized_httpx_proxy_env
 
 
@@ -15,6 +16,11 @@ def _make_pdf(path: Path) -> None:
     page.insert_text((32, 64), "dummy insurance certificate")
     doc.save(path)
     doc.close()
+
+
+def _ok_page(body: str) -> _PageResult:
+    """构造一页成功 OCR 结果，给混合提取的 ocr_pages monkeypatch 用。"""
+    return _PageResult(body, ok=True, failed=False, truncated=False)
 
 
 def test_mineru_timeout_can_fall_back_to_vl_ocr(tmp_path, monkeypatch):
@@ -29,8 +35,8 @@ def test_mineru_timeout_can_fall_back_to_vl_ocr(tmp_path, monkeypatch):
     monkeypatch.setattr(mp, "_run_mineru_cli", timeout_run)
     monkeypatch.setattr(
         mp,
-        "ocr_pdf_images_with_vl",
-        lambda image_paths: "## 第 1 页\n保险凭证\n被保险人：张三",
+        "ocr_pages",
+        lambda image_paths, **kw: [_ok_page("保险凭证\n被保险人：张三")],
     )
 
     out = MinerUPipeline(
@@ -45,6 +51,13 @@ def test_mineru_timeout_can_fall_back_to_vl_ocr(tmp_path, monkeypatch):
     assert out.meta.model == "vl-ocr-fallback"
     assert "保险凭证" in out.raw_text
     assert out.preview_image_paths
+    # 混合提取记录页级分流：该页文本 <50 字 → 判为 ocr 页
+    assert out.meta.page_routing == {
+        "total": 1,
+        "text_pages": 0,
+        "ocr_pages": 1,
+        "table_pages": 0,
+    }
 
 
 def test_mineru_timeout_retries_lite_profile_before_vl(tmp_path, monkeypatch):
@@ -74,8 +87,10 @@ def test_mineru_timeout_retries_lite_profile_before_vl(tmp_path, monkeypatch):
     monkeypatch.setattr(mp, "_run_mineru_cli", fake_run)
     monkeypatch.setattr(
         mp,
-        "ocr_pdf_images_with_vl",
-        lambda image_paths: (_ for _ in ()).throw(AssertionError("VL fallback should not run")),
+        "ocr_pages",
+        lambda image_paths, **kw: (_ for _ in ()).throw(
+            AssertionError("VL fallback should not run")
+        ),
     )
 
     out = MinerUPipeline(
@@ -106,8 +121,8 @@ def test_vl_ocr_first_skips_mineru_when_enabled(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(
         mp,
-        "ocr_pdf_images_with_vl",
-        lambda image_paths: "## 第 1 页\n保险凭证\n被保险人：张三",
+        "ocr_pages",
+        lambda image_paths, **kw: [_ok_page("保险凭证\n被保险人：张三")],
     )
 
     out = MinerUPipeline(
@@ -121,6 +136,56 @@ def test_vl_ocr_first_skips_mineru_when_enabled(tmp_path, monkeypatch):
     assert out.meta.model == "vl-ocr-first"
     assert "保险凭证" in out.raw_text
     assert out.preview_image_paths
+
+
+def test_hybrid_extraction_mixes_native_text_and_vl(tmp_path, monkeypatch):
+    """混合提取：文本页走原生、扫描页走 VL，按页序拼回；**只把扫描页交给 VL**（省 token）。"""
+    pdf = tmp_path / "mixed.pdf"
+    doc = fitz.open()
+    p1 = doc.new_page(width=400, height=300)
+    p1.insert_text(
+        (40, 60),
+        "This insurance policy certificate page carries plenty of readable english content here.",
+        fontsize=10,
+    )
+    doc.new_page(width=400, height=300)  # 第 2 页空白 → 扫描页
+    doc.save(pdf)
+    doc.close()
+
+    monkeypatch.setattr(mp, "_mineru_version", lambda: "mineru-test")
+
+    seen: dict = {}
+
+    def fake_ocr_pages(image_paths, **kw):
+        seen["n_images"] = len(image_paths)
+        seen["labels"] = kw.get("page_labels")
+        return [_ok_page("扫描页 VL 抽取内容") for _ in image_paths]
+
+    monkeypatch.setattr(mp, "ocr_pages", fake_ocr_pages)
+
+    out = MinerUPipeline(
+        prefer_text_layer=True,
+        allow_vl_fallback=True,
+        prefer_vl_ocr=True,
+        lite_retry=False,
+        vl_ocr_max_pages=10,
+        vl_ocr_dpi=72,
+    ).run(pdf, tmp_path / "out")
+
+    assert out.meta.model == "vl-ocr-first"
+    assert out.meta.page_routing == {
+        "total": 2,
+        "text_pages": 1,
+        "ocr_pages": 1,
+        "table_pages": 0,
+    }
+    # 只把扫描页（第 2 页）交给 VL，文本页不浪费一次看图调用
+    assert seen["n_images"] == 1
+    assert seen["labels"] == [2]
+    # 文本页原生内容 + 扫描页 VL 内容，按真实页序拼接
+    assert "readable english content" in out.raw_text
+    assert "扫描页 VL 抽取内容" in out.raw_text
+    assert out.raw_text.index("## 第 1 页") < out.raw_text.index("## 第 2 页")
 
 
 def test_mineru_subprocess_env_filters_secrets_and_sanitizes_no_proxy():

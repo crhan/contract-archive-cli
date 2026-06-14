@@ -9,7 +9,6 @@
 """
 from __future__ import annotations
 
-import base64
 import json
 import logging
 import re
@@ -24,6 +23,7 @@ from ..schemas import (
     LabeledValue,
     PersonIdentity,
 )
+from ..utils import encode_image_data_uri
 from .llm_extractor import _parse_json_loose
 
 logger = logging.getLogger(__name__)
@@ -96,12 +96,6 @@ def locate_signature_pages(mineru_dir: Path, max_pages: int = 4) -> list[Path]:
     return out
 
 
-def _encode_image(path: Path) -> str:
-    """本地图 → data URI。OpenAI 兼容接口不收 file://，用 base64 内联。"""
-    data = base64.b64encode(path.read_bytes()).decode("ascii")
-    return f"data:image/png;base64,{data}"
-
-
 def _call_vl(
     image_paths: list[Path], model: str, api_key: str, base_url: str
 ) -> Optional[str]:
@@ -117,7 +111,7 @@ def _call_vl(
     content: list[dict] = [{"type": "text", "text": VL_PROMPT}]
     for p in image_paths:
         content.append({"type": "text", "text": f"【第 {_page_no(p)} 页】"})
-        content.append({"type": "image_url", "image_url": {"url": _encode_image(p)}})
+        content.append({"type": "image_url", "image_url": {"url": encode_image_data_uri(p)}})
     content.append({"type": "text", "text": "请逐页核查落款签章，按要求输出 JSON（每个 unit 回填 page）。"})
     try:
         # 显式 timeout（默认 300s，DASHSCOPE_TIMEOUT_S 可调）：VL 内联多张落款页大图、

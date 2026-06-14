@@ -30,6 +30,7 @@ DEFAULT_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
 DEFAULT_DASHSCOPE_MODEL = "qwen3.7-max"
 DEFAULT_DASHSCOPE_VL_MODEL = "qwen3.6-flash"  # 多模态签章核查（OpenAI 兼容接口）；更准用 qwen3.6-plus
 DEFAULT_DASHSCOPE_OCR_MODEL = "qwen-vl-ocr-latest"  # OCR 阶段专用 OCR 模型，逐页调用（maxInput 30000，不能一次塞多页）
+DEFAULT_DASHSCOPE_VL_EXTRACT_MODEL = "qwen3.6-flash"  # 多源融合的看图抽字段（通用 VL，需理解版式/表格，非纯 OCR）
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +50,11 @@ CONFIG_KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("dashscope.model", "DASHSCOPE_LLM_MODEL", default=DEFAULT_DASHSCOPE_MODEL),
     ConfigKey("dashscope.vl_model", "DASHSCOPE_VL_MODEL", default=DEFAULT_DASHSCOPE_VL_MODEL),
     ConfigKey("dashscope.ocr_model", "DASHSCOPE_OCR_MODEL", default=DEFAULT_DASHSCOPE_OCR_MODEL),
+    ConfigKey(
+        "dashscope.vl_extract_model",
+        "DASHSCOPE_VL_EXTRACT_MODEL",
+        default=DEFAULT_DASHSCOPE_VL_EXTRACT_MODEL,
+    ),
     ConfigKey("archive.dir", "CONTRACT_ARCHIVE_DIR"),
 )
 _KEYS_BY_NAME = {k.name: k for k in CONFIG_KEYS}
@@ -63,6 +69,7 @@ class Settings:
     dashscope_model: str
     dashscope_vl_model: str
     dashscope_ocr_model: str
+    dashscope_vl_extract_model: str
     archive_dir: str | None
     config_path: Path
 
@@ -160,6 +167,8 @@ def load_settings(path: Path | None = None) -> Settings:
         dashscope_model=read("dashscope.model") or DEFAULT_DASHSCOPE_MODEL,
         dashscope_vl_model=read("dashscope.vl_model") or DEFAULT_DASHSCOPE_VL_MODEL,
         dashscope_ocr_model=read("dashscope.ocr_model") or DEFAULT_DASHSCOPE_OCR_MODEL,
+        dashscope_vl_extract_model=read("dashscope.vl_extract_model")
+        or DEFAULT_DASHSCOPE_VL_EXTRACT_MODEL,
         archive_dir=read("archive.dir"),
         config_path=path or config_path(),
     )

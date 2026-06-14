@@ -74,6 +74,24 @@ def test_ocr_model_file_over_default(tmp_path):
     assert cfg.load_settings(p).dashscope_ocr_model == "qwen-vl-ocr-file"
 
 
+def test_vl_extract_model_defaults():
+    assert (
+        cfg.load_settings().dashscope_vl_extract_model
+        == cfg.DEFAULT_DASHSCOPE_VL_EXTRACT_MODEL
+    )
+
+
+def test_vl_extract_model_env_over_default(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_VL_EXTRACT_MODEL", "qwen3.6-plus")
+    assert cfg.load_settings().dashscope_vl_extract_model == "qwen3.6-plus"
+
+
+def test_vl_extract_model_file_over_default(tmp_path):
+    p = tmp_path / "c.json"
+    cfg.save_config_values({"dashscope.vl_extract_model": "qwen3.6-file"}, p)
+    assert cfg.load_settings(p).dashscope_vl_extract_model == "qwen3.6-file"
+
+
 def test_env_overrides_config(tmp_path, monkeypatch):
     p = tmp_path / "c.json"
     cfg.save_config_values({"dashscope.model": "from-file"}, p)

@@ -83,42 +83,60 @@ contract-archive show <doc_id>                                          # 肉眼
 | sub_agreements | 递归对齐 | title 配对 + sign_date/印章数核对 |
 | completeness issues | **F-beta(β=2)** | 偏召回；对齐 key=(category,页码)；签章召回单设硬门槛 |
 
-## 怎么加 case（关键：避免偏袒 champion + PII 红线）
+## 数据私有化：代码公开、评测数据私有（**不脱敏**）
 
-1. **PII 红线**：committed case 一律合成匿名（张三/李四/示例置业占位）。`input/` 里的示例苑等
-   真实合同**绝不能**做 committed gold。真实脱敏样例放 `cases/<suite>/<id>/private/`（已 gitignore）。
-2. **gold 不要用 champion 单源生成**——会继承 champion 盲区（它漏抽的，人工跟着漏，候选抽到反被判 FP）。
-   - 高风险字段（parties / amounts / issues）**从原文盲标**，不看任何模型输出。
-     用 **`python -m evals.review <case_id>`**：只显示 input.txt + 空白模板，填完
+评测**框架代码**（本目录）留在公开主仓库（github）；评测**数据集**（原始 PDF + 真实金标准）
+放**私有 git 仓库**（`git.crhan.com`，自建私有）。判据是 remote 指向，不是文件本身——私有仓库
+不外流，故真实数据**无需脱敏**，原样入库。
+
+- 框架读 env **`CONTRACT_ARCHIVE_EVALSET_DIR`** 定位数据集根目录（结构 `<root>/<suite>/<case>/`）；
+  不设则回退主仓库内合成 `cases/`（保 CI smoke 不依赖私有数据）。
+- 主仓库 `cases/` 里只保留**合成匿名**样例（张三/李四/示例置业占位）作 smoke——它们仍走公开 CI。
+- 真实数据（含 PII）只进私有数据集仓库，**绝不进主仓库**。
+
+## 怎么加 case（关键：避免偏袒 champion）
+
+1. **gold 不要用 champion 单源生成**——会继承 champion 盲区（它漏抽的，人工跟着漏，候选抽到反被判 FP）。
+   - 高风险字段（parties / amounts / 保险保额各类·免赔·赔付比例·被保险人 / issues）**从原文盲标**，
+     不看任何模型输出。用 **`python -m evals.review <case_id>`**：只显示 input.txt + 空白模板，
      `--diff` 自动列出"你标了 gold 没有 / gold 有你没标"，想偷看 gold 都看不到。
-   - 要 draft 就用**两个异家族**模型各跑一遍取**并集**喂人工修正（make_gold 的 `--crosscheck`）。
-   - judge 评分时候选与 champion 输出**匿名+随机左右顺序**（盲测）。
+   - 要 draft 就用 make_gold（champion）起草，再用 **`--crosscheck <异家族模型>`** 取并集喂人工修正。
+2. **原始 PDF case**：case 目录放 `source.pdf` → 评测走整条生产链路（OCR→类型路由→特化→多源融合），
+   测的是端到端实际产出；纯文本 case（`input.txt`）走文本抽取，供模型对比。两者皆可。
 3. **分层 + 过采样**：`meta.json` 标 `stratum`/`difficulty`。稀有但致命的层（含补充协议/多落款/
-   留白多选一）天然少，要**主动过采样**（每层 ≥ ~100），单独报指标，别被主分布淹没。
-4. **样本量**：bootstrap CI 非劣检验，每分层单元约需 80-150 例，6 类×难度档总量 oom 在 1000-2000 例。
-   当前种子仅几例，**只够验证 harness 跑通**，不够下替换结论。
+   留白多选一/保险夹页扫描）天然少，要**主动过采样**，单独报指标，别被主分布淹没。
+4. **样本量**：bootstrap CI 非劣检验，每分层单元约需 80-150 例。当前种子仅几例，**只够验证 harness
+   跑通**，不够下替换结论。
 
-## 用 make_gold 从真实合同批量起草（省人工）
+## 用 make_gold 从真实文档批量起草（省人工，不脱敏）
 
-`evals.make_gold` 把**已入库**的真实合同（archive 的 mineru 文本 + extraction_result.json）
-转成**脱敏 draft gold**，落到 gitignored 的 `evals/cases_private/extraction/<id>/`：
+`evals.make_gold` 把**已入库**的真实文档（archive 的 mineru 文本 + extraction_result.json
++ 原始 source.pdf）转成 **draft gold**，落到 `CONTRACT_ARCHIVE_EVALSET_DIR/extraction/<id>/`：
 
 ```bash
-uv run --no-sync python -m evals.make_gold                          # 全部已入库文档
-uv run --no-sync python -m evals.make_gold --doc-id <id>            # 单个
-uv run --no-sync python -m evals.make_gold --crosscheck deepseek-v4-pro  # 加异家族交叉抽取
-uv run --no-sync python -m evals.make_gold --scrub-income            # 证明类金额去真值（随机千万级）
+CONTRACT_ARCHIVE_EVALSET_DIR=~/project/contract-archive-evalset/dataset \
+  uv run --no-sync python -m evals.make_gold                          # 全部已入库文档
+... --doc-id <id>                                                     # 单个
+... --crosscheck deepseek-v4-pro                                      # 加异家族交叉抽取破盲区
 ```
 
-- **数据源**：复用 `load_document_text`（= 生产喂 extract_document 的同一文本），免重新 OCR/LLM。
-- **脱敏**：LLM 为主（识别上下文人名/中英文机构名/**楼盘项目名/省市区**/各类号码）+ 正则兜底
-  （身份证/手机/座机/邮编）。每份再跑残留启发式扫描，把可疑 token 写进 `SCAN.txt`。
-- **`--scrub-income`**：对 doc_type=证明 把金额整体按随机系数缩放到千万级（保内部关系：月均≈年度/12、
-  合计=各分量之和），同时清掉 summary/title/fields 里的真实收入阿拉伯数字——收入/薪资本身敏感，去真值。
-- **脱敏不保证完整**（实测仍可能漏 14 位号码片段、罕见写法）。所以产物是 **DRAFT、只进 gitignored
-  `cases_private/`**，每份带 `REVIEW.md`：人工①通读确认无残留真实 PII、②对照原文**盲标** parties/
-  amounts/issues（破 champion 盲区），确认后才手动复制到可提交的 `cases/extraction/`。
-- `--crosscheck <异家族模型>` 在脱敏文本上再抽一遍产 `crosscheck.json`，供人工对比补 champion 漏抽。
+- **数据源**：复用 `load_document_text`（= 生产喂 extract 的同一文本），免重新 OCR/LLM；有 source.pdf
+  则一并复制进 case，供整条链路评测。
+- **不脱敏**：私有数据集，真实金标准原样落盘。产物仍是 **DRAFT**，每份带 `REVIEW.md`：对照原文
+  **盲标** parties/amounts/保险高价值字段/issues（破 champion 盲区），核对后才定为金标准。
+- `--crosscheck <异家族模型>` 在真实文本上再抽一遍产 `crosscheck.json`，供人工对比补 champion 漏抽。
+
+## 质量门禁：改 prompt/模型/流水线 → 跑评测过 gate 才提交
+
+改动抽取 prompt、模型、或流水线（页级分流/融合等）后，**必须**指向私有数据集跑一遍评测、过四重 gate，
+确认无回归再提交：
+
+```bash
+CONTRACT_ARCHIVE_EVALSET_DIR=~/project/contract-archive-evalset/dataset \
+  uv run --no-sync python -m evals.run --models qwen3.7-max --out evals/results/gate
+CONTRACT_ARCHIVE_EVALSET_DIR=~/project/contract-archive-evalset/dataset \
+  uv run --no-sync python -m evals.report evals/results/gate
+```
 
 ## 增强路线（Phase 3，按需建）
 

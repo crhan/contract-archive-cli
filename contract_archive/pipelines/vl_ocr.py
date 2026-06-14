@@ -10,13 +10,13 @@ OCR 模型，也消除了"页数超上限就回退 mineru"的硬限制。
 """
 from __future__ import annotations
 
-import base64
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from ..config import get_timeout_s, load_settings
+from ..utils import encode_image_data_uri, map_concurrent
 from ..utils.http_env import sanitized_httpx_proxy_env
 
 logger = logging.getLogger(__name__)
@@ -59,22 +59,74 @@ def _ocr_max_retries() -> int:
     return val if val >= 0 else 4
 
 
-def ocr_pdf_images_with_vl(
+class _PageResult(NamedTuple):
+    """单页 OCR 结果：正文 + 三态统计标志。
+
+    并发执行下不再在循环里 mutate 计数器（会 race），改为每页返回结构化结果，
+    全部跑完后聚合计数——用数据结构消除竞态，而非加锁。
+    """
+
+    body: str
+    ok: bool
+    failed: bool
+    truncated: bool
+
+
+def _ocr_one_page(client, model: str, idx: int, path: Path, total: int) -> _PageResult:
+    """转写单页。请求/编码异常隔离到本页（标 _MARK_FAILED），绝不拖垮整份。
+
+    编码（_encode_image）也纳入 try：单张图损坏只标失败页，不再像旧实现那样
+    在循环外抛出、崩掉整份 OCR。
+    """
+    try:
+        content = [
+            {"type": "image_url", "image_url": {"url": encode_image_data_uri(path)}},
+            {"type": "text", "text": VL_OCR_PAGE_PROMPT},
+        ]
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            temperature=0.0,
+        )
+        choice = resp.choices[0]
+        page_text = (choice.message.content or "").strip()
+        truncated = choice.finish_reason == "length"
+    except Exception as e:  # noqa: BLE001 - 单页失败不能拖垮整份；全失败才回退 MinerU
+        logger.warning("[vl-ocr] page %s/%s failed after retries: %s", idx, total, e)
+        return _PageResult(_MARK_FAILED, ok=False, failed=True, truncated=False)
+
+    if truncated:
+        # qwen-vl-ocr 单页输出硬上限 8192 token，超了会被静默截断。
+        # 保留已得内容（残页也有价值），但显式标记，避免下游把残页当完整页。
+        logger.warning(
+            "[vl-ocr] page %s/%s truncated at output cap (maxOutputTokens=8192)", idx, total
+        )
+        page_text = f"{page_text}\n\n{_MARK_TRUNCATED}".strip()
+
+    if page_text:
+        return _PageResult(page_text, ok=True, failed=False, truncated=truncated)
+    return _PageResult(_MARK_ILLEGIBLE, ok=False, failed=False, truncated=False)
+
+
+def ocr_pages(
     image_paths: list[Path],
     *,
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
-) -> Optional[str]:
-    """
-    用 DashScope 专用 OCR 模型（OpenAI 兼容口）逐页转写渲染好的 PDF 页图片。
+    page_labels: list[int] | None = None,
+) -> Optional[list[_PageResult]]:
+    """逐页并发 OCR，返回 **与 image_paths 同序** 的 per-page 结果（_PageResult 列表）。
 
-    每页一次请求，拼成 `## 第 X 页` 分隔的 Markdown。单页异常不中断整份，三种异常态各记
-    独立标记（调用失败 / 输出截断 / 看不清），只有无任何可用页时才返回 None 让调用方回退到
-    原 MinerU 路径。429/超时/5xx 由 SDK 自动重试（见 _ocr_max_retries）。无凭证时返回 None。
+    无凭证 → None（让调用方回退）。空输入 → []。page_labels 仅用于日志页号（缺省 1..N），
+    不影响返回顺序——页级混合提取据此把"只 OCR 扫描页"的结果按真实页号拼回全文。
+
+    并发要点：openai SDK 同步阻塞、GIL 在网络等待时释放，线程池即可；client 与 proxy-env
+    上下文在并发块外层一次性构造，worker 只复用 client（sanitized_httpx_proxy_env 改的是
+    进程级 os.environ，多线程各自进退会竞态）。单页失败已在 _ocr_one_page 内隔离、不返回 None。
     """
     if not image_paths:
-        return ""
+        return []
 
     settings = load_settings()
     model = model or settings.dashscope_ocr_model
@@ -88,12 +140,9 @@ def ocr_pdf_images_with_vl(
 
     compat_url = base_url.replace("/api/v1", "/compatible-mode/v1")
     total = len(image_paths)
+    labels = page_labels if page_labels is not None else list(range(1, total + 1))
     logger.info("[vl-ocr] %s page(s) via %s (逐页)", total, model)
 
-    parts: list[str] = []
-    ok_pages = 0
-    failed_pages = 0
-    truncated_pages = 0
     with sanitized_httpx_proxy_env():
         client = OpenAI(
             api_key=api_key,
@@ -101,42 +150,38 @@ def ocr_pdf_images_with_vl(
             timeout=get_timeout_s("DASHSCOPE_TIMEOUT_S", 300.0),
             max_retries=_ocr_max_retries(),
         )
-        for idx, path in enumerate(image_paths, 1):
-            content = [
-                {"type": "image_url", "image_url": {"url": _encode_image(path)}},
-                {"type": "text", "text": VL_OCR_PAGE_PROMPT},
-            ]
-            try:
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": content}],
-                    temperature=0.0,
-                )
-                choice = resp.choices[0]
-                page_text = (choice.message.content or "").strip()
-                truncated = choice.finish_reason == "length"
-            except Exception as e:  # noqa: BLE001 - 单页失败不能拖垮整份；全失败才回退 MinerU
-                logger.warning("[vl-ocr] page %s/%s failed after retries: %s", idx, total, e)
-                failed_pages += 1
-                parts.append(f"## 第 {idx} 页\n\n{_MARK_FAILED}")
-                continue
+        return map_concurrent(
+            lambda item: _ocr_one_page(client, model, item[0], item[1], total),
+            list(zip(labels, image_paths)),
+        )
 
-            if truncated:
-                # qwen-vl-ocr 单页输出硬上限 8192 token，超了会被静默截断。
-                # 保留已得内容（残页也有价值），但显式标记，避免下游把残页当完整页。
-                truncated_pages += 1
-                logger.warning(
-                    "[vl-ocr] page %s/%s truncated at output cap (maxOutputTokens=8192)",
-                    idx,
-                    total,
-                )
-                page_text = f"{page_text}\n\n{_MARK_TRUNCATED}".strip()
 
-            if page_text:
-                ok_pages += 1
-                parts.append(f"## 第 {idx} 页\n\n{page_text}")
-            else:
-                parts.append(f"## 第 {idx} 页\n\n{_MARK_ILLEGIBLE}")
+def ocr_pdf_images_with_vl(
+    image_paths: list[Path],
+    *,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> Optional[str]:
+    """
+    用 DashScope 专用 OCR 模型（OpenAI 兼容口）逐页转写渲染好的 PDF 页图片。
+
+    每页一次请求，拼成 `## 第 X 页` 分隔的 Markdown（整份页号 1..N）。单页异常不中断整份，
+    三种异常态各记独立标记（调用失败 / 输出截断 / 看不清），只有无任何可用页时才返回 None 让
+    调用方回退到原 MinerU 路径。429/超时/5xx 由 SDK 自动重试（见 _ocr_max_retries）。
+    无凭证时返回 None。整份 OCR 路径用本函数；页级混合提取用 ocr_pages 拿 per-page 结果。
+    """
+    if not image_paths:
+        return ""
+    results = ocr_pages(image_paths, model=model, api_key=api_key, base_url=base_url)
+    if results is None:
+        return None  # 无凭证
+
+    total = len(results)
+    parts = [f"## 第 {i} 页\n\n{r.body}" for i, r in enumerate(results, 1)]
+    ok_pages = sum(1 for r in results if r.ok)
+    failed_pages = sum(1 for r in results if r.failed)
+    truncated_pages = sum(1 for r in results if r.truncated)
 
     if ok_pages == 0:
         logger.warning(
@@ -153,8 +198,3 @@ def ocr_pdf_images_with_vl(
         truncated_pages,
     )
     return "\n\n".join(parts).strip() or None
-
-
-def _encode_image(path: Path) -> str:
-    data = base64.b64encode(path.read_bytes()).decode("ascii")
-    return f"data:image/png;base64,{data}"

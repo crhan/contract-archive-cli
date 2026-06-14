@@ -7,7 +7,7 @@
   python -m evals.review <case_id> --diff     # 填完 blind.json 后，与 gold.json 列差异
 
 只针对高风险三件套：parties / amounts(数值+是否计入合计/是否分期) / completeness.issues。
-case 先在 cases_private/extraction/ 下找（draft），找不到再去 cases/extraction/。
+case 先在私有数据集（CONTRACT_ARCHIVE_EVALSET_DIR）下找，找不到再去主仓库内合成 cases/。
 """
 from __future__ import annotations
 
@@ -16,11 +16,10 @@ import json
 from pathlib import Path
 from typing import Optional
 
+from .run import DEFAULT_CASES, evalset_dir
 from .score import normalize_str
-from .run import DEFAULT_CASES
 
 EVALS_DIR = Path(__file__).resolve().parent
-CASES_PRIVATE = EVALS_DIR / "cases_private" / "extraction"
 BLIND_TEMPLATE = {
     "_说明": "只看 input.txt 填下面三类，别开 gold.json！填完跑：python -m evals.review <case_id> --diff",
     "_format": {
@@ -36,7 +35,8 @@ BLIND_TEMPLATE = {
 
 
 def find_case(case_id: str) -> Optional[Path]:
-    for base in (CASES_PRIVATE, DEFAULT_CASES / "extraction"):
+    # 私有数据集优先（evalset_dir 已含"未设 env 则回退主仓库 cases"），再兜底主仓库合成 cases。
+    for base in (evalset_dir() / "extraction", DEFAULT_CASES / "extraction"):
         d = base / case_id
         if (d / "input.txt").exists():
             return d
