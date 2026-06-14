@@ -48,6 +48,7 @@ from ..schemas import (
 )
 from ..utils import classify_pages
 from ..utils.page_router import MODE_OCR
+from ..utils.pdf import render_pdf_to_images
 from .party_registry import PartyRegistry
 from .paths import ArchivePaths, SHA_SHORT_LEN, link_or_copy, safe_rmtree, sha256_of_file
 from .repository import (
@@ -172,7 +173,7 @@ def _select_fusion_images(mineru_dir: Path) -> dict[int, Path]:
     """
     source_pdf = mineru_dir.parent / "source.pdf"
     preview_dir = mineru_dir / PREVIEW_DIR
-    if not source_pdf.exists() or not preview_dir.exists():
+    if not source_pdf.exists():
         return {}
     try:
         routes = classify_pages(source_pdf)
@@ -193,11 +194,24 @@ def _select_fusion_images(mineru_dir: Path) -> dict[int, Path]:
             len(ordered),
             cap,
         )
+    selected = ordered[:cap]
     out: dict[int, Path] = {}
-    for idx in ordered[:cap]:
+    missing: list[int] = []
+    for idx in selected:
         img = preview_dir / f"page_{idx + 1:03d}.png"
         if img.exists():
             out[idx + 1] = img  # render_pdf_to_images 用 1-based page_NNN 命名
+        else:
+            missing.append(idx)
+    # native-text 快路（ocr_pages==0）下 MinerU 在渲染 preview 前就返回，preview 为空——
+    # 纯文本保险单的封面/选中页拿不到图。按需只补渲这几页（不重渲整份），让 vision 融合照常工作。
+    if missing:
+        try:
+            for pg in render_pdf_to_images(source_pdf, preview_dir, pages=missing):
+                if pg.page_index in selected:
+                    out[pg.page_index + 1] = Path(pg.image_path)
+        except Exception as e:  # noqa: BLE001 — 补渲失败不能中断入库，退已有页
+            logger.warning("[fusion] 按需补渲 preview 失败，跳过缺页: %s", e)
     return out
 
 

@@ -101,6 +101,7 @@ def render_pdf_to_images(
     out_dir: str | Path,
     dpi: int = 200,
     prefix: str = "page",
+    pages: list[int] | None = None,
 ) -> list[PageImage]:
     """
     将 PDF 每页渲染成 PNG，返回元数据列表。
@@ -110,6 +111,8 @@ def render_pdf_to_images(
     :param dpi: 渲染 DPI；200 是 OCR 通用甜点（精度足够、文件不大）。
                  原扫描件 400 DPI 时建议 dpi >= 300，否则会丢字。
     :param prefix: 输出文件名前缀，最终形如 page_001.png
+    :param pages: 只渲这些 0-based 页索引（None=全部）。供 vision 融合按需补渲选中页，
+                  不必为了几页重渲整份（native-text 快路下 MinerU 跳过 preview 渲染）。
     """
     pdf_path = Path(pdf_path)
     out_dir = Path(out_dir)
@@ -120,10 +123,13 @@ def render_pdf_to_images(
 
     scale = dpi / 72.0  # PyMuPDF 默认 72 DPI
     matrix = fitz.Matrix(scale, scale)
+    want = set(pages) if pages is not None else None
 
     results: list[PageImage] = []
     with fitz.open(pdf_path) as doc:
         for idx, page in enumerate(doc):
+            if want is not None and idx not in want:
+                continue
             pix = page.get_pixmap(matrix=matrix, alpha=False)
             img_path = out_dir / f"{prefix}_{idx + 1:03d}.png"
             pix.save(img_path)
