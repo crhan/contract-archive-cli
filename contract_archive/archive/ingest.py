@@ -48,6 +48,7 @@ from ..schemas import (
 )
 from ..utils import classify_pages
 from ..utils.page_router import MODE_OCR
+from ..utils.pdf import render_pdf_to_images
 from .party_registry import PartyRegistry
 from .paths import ArchivePaths, SHA_SHORT_LEN, link_or_copy, safe_rmtree, sha256_of_file
 from .repository import (
@@ -172,7 +173,7 @@ def _select_fusion_images(mineru_dir: Path) -> dict[int, Path]:
     """
     source_pdf = mineru_dir.parent / "source.pdf"
     preview_dir = mineru_dir / PREVIEW_DIR
-    if not source_pdf.exists() or not preview_dir.exists():
+    if not source_pdf.exists():
         return {}
     try:
         routes = classify_pages(source_pdf)
@@ -181,7 +182,11 @@ def _select_fusion_images(mineru_dir: Path) -> dict[int, Path]:
         return {}
     table_pages = [r.page_index for r in routes if r.has_tables]
     other_ocr = [r.page_index for r in routes if r.mode == MODE_OCR and not r.has_tables]
-    ordered = table_pages + other_ocr  # 表格优先
+    # 封面页（第1页）几乎总含保单号/投保被保人/日期/保额摘要等保单级高价值字段——无论是否判为
+    # 表格/扫描页，优先纳入 vision。大文档表格页多时，table-first + 截断会把封面挤出窗口
+    # （实测 doc33：61 个表格页排在前，封面被截掉，保单号只能退文本单源）。
+    cover = [0] if routes else []
+    ordered = cover + [p for p in table_pages + other_ocr if p != 0]  # 封面 → 表格 → 其余扫描
     cap = _vision_fusion_max_pages()
     if len(ordered) > cap:
         logger.info(
@@ -189,11 +194,24 @@ def _select_fusion_images(mineru_dir: Path) -> dict[int, Path]:
             len(ordered),
             cap,
         )
+    selected = ordered[:cap]
     out: dict[int, Path] = {}
-    for idx in ordered[:cap]:
+    missing: list[int] = []
+    for idx in selected:
         img = preview_dir / f"page_{idx + 1:03d}.png"
         if img.exists():
             out[idx + 1] = img  # render_pdf_to_images 用 1-based page_NNN 命名
+        else:
+            missing.append(idx)
+    # native-text 快路（ocr_pages==0）下 MinerU 在渲染 preview 前就返回，preview 为空——
+    # 纯文本保险单的封面/选中页拿不到图。按需只补渲这几页（不重渲整份），让 vision 融合照常工作。
+    if missing:
+        try:
+            for pg in render_pdf_to_images(source_pdf, preview_dir, pages=missing):
+                if pg.page_index in selected:
+                    out[pg.page_index + 1] = Path(pg.image_path)
+        except Exception as e:  # noqa: BLE001 — 补渲失败不能中断入库，退已有页
+            logger.warning("[fusion] 按需补渲 preview 失败，跳过缺页: %s", e)
     return out
 
 

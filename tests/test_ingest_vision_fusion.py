@@ -65,6 +65,35 @@ def test_select_respects_cap(tmp_path, monkeypatch):
     assert len(out) == 1  # 上限封顶
 
 
+def test_select_includes_text_cover(tmp_path):
+    """封面页（第1页）即便是纯文本（非表格/扫描）也优先纳入 vision——保单号/投保被保人等
+    保单级高价值字段在封面，旧 table-first 逻辑会把文本封面漏掉。"""
+    mineru_dir = _build_doc(tmp_path, ["text", "table", "scan"])
+    out = ingest._select_fusion_images(mineru_dir)
+    assert 1 in out  # 文本封面入选（旧逻辑漏）
+    assert set(out) == {1, 2, 3}
+
+
+def test_select_cover_survives_cap(tmp_path, monkeypatch):
+    """大文档表格页多 + 额度紧时，封面不被 table-first + 截断挤出窗口（doc33 实证回归）。"""
+    monkeypatch.setenv("CONTRACT_ARCHIVE_VISION_FUSION_MAX_PAGES", "1")
+    mineru_dir = _build_doc(tmp_path, ["text", "table", "table"])
+    out = ingest._select_fusion_images(mineru_dir)
+    assert set(out) == {1}  # 仅 1 页额度 → 封面优先，而非表格页 2/3
+
+
+def test_select_renders_missing_preview_on_demand(tmp_path):
+    """native-text 快路下 MinerU 跳过 preview 渲染（preview 目录空）→ 按需补渲选中页，
+    vision 融合不致因纯文本封面拿不到图而退化（codex P2 回归）。"""
+    mineru_dir = _build_doc(tmp_path, ["table", "text", "scan"])
+    for p in (mineru_dir / "preview_images").glob("*.png"):
+        p.unlink()  # 模拟 native-text 快路：preview 目录存在但为空
+    out = ingest._select_fusion_images(mineru_dir)
+    assert 1 in out  # 封面（第1页）按需渲出
+    # 补渲的是真 PNG（render_pdf_to_images 产物），非 _build_doc 的占位假图
+    assert all(p.exists() and p.stat().st_size > 0 for p in out.values())
+
+
 # ---------- _maybe_run_vision_fusion ----------
 
 
