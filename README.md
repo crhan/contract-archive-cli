@@ -16,14 +16,19 @@
 ## ✦ 数据流
 
 ```
-PDF ─► sha256 去重 ─► MinerU 解析 ─► LLM 判类型 + 抽字段（合同走专属 prompt，纯 LLM）
+PDF ─► sha256 去重 ─► MinerU 解析（页级分流：文本页原生 / 扫描·表格页 VL OCR 混合提取）
+                          │
+                          ▼
+              LLM 判类型 ─► doc_type → handler 特化抽取
+                          ├─ 合同：专属 prompt + 看落款页签章核查
+                          └─ 保险：多源融合（A 文本 / C 看图两路评判 → field_verdicts sidecar）
                                           │
               ┌───────────────────────────┴──┐
               ▼                              ▼
    db.sqlite (通用信封 + 索引)     documents/<sha-12>/
                                     ├── source.pdf  (硬链接)
                                     ├── mineru/markdown.md ...
-                                    ├── extraction_result.json  (通用信封)
+                                    ├── extraction_result.json  (通用信封 + 融合 sidecar)
                                     └── ingest.log
 
 档案库默认在 XDG 数据目录：~/.local/share/contract-archive/
@@ -121,12 +126,17 @@ $EDITOR .env   # 填入 DASHSCOPE_API_KEY
 | `DASHSCOPE_LLM_MODEL` | `dashscope.model` | 默认 `qwen3.7-max`（用户百炼账户的特定别名；若 404 换 `qwen-max` / `qwen3-max`） |
 | `DASHSCOPE_BASE_URL` | `dashscope.base_url` | 默认 `https://dashscope.aliyuncs.com/api/v1`；海外换 `https://dashscope-intl.aliyuncs.com/api/v1` |
 | `DASHSCOPE_VL_MODEL` | `dashscope.vl_model` | 签章核查视觉模型，默认 `qwen3.6-flash` |
+| `DASHSCOPE_VL_EXTRACT_MODEL` | `dashscope.vl_extract_model` | 多源融合"看图抽字段"视觉模型，默认 `qwen3.6-flash` |
 | `CONTRACT_ARCHIVE_DIR` | `archive.dir` | 档案库根目录，默认 XDG `~/.local/share/contract-archive`；CLI `--archive` 优先 |
 | `COMPUTE_DEVICE` | — | `auto` / `mps` / `cuda` / `cpu`（MinerU 走子进程，主要影响其内部 backend 选择） |
 | `LOG_LEVEL` | — | `DEBUG`/`INFO`/`WARNING`/...，默认 `INFO`；`--verbose`/`--quiet` 覆盖之 |
 | `DASHSCOPE_TIMEOUT_S` | — | LLM/VL 调用超时秒数，默认 `300` |
 | `CONTRACT_ARCHIVE_MINERU_TIMEOUT_S` | — | MinerU 子进程解析超时秒数，默认 `1800` |
 | `MINERU_MODEL_SOURCE` | — | MinerU 模型源，默认 `modelscope`（国内快）；海外可 export `huggingface` |
+| `CONTRACT_ARCHIVE_LLM_CONCURRENCY` | — | LLM 调用并发度（OCR/看图/评判共用线程池），默认 `4` |
+| `CONTRACT_ARCHIVE_VISION_FUSION_MAX_PAGES` | — | 融合看图单文档最多看几页（优先表格/扫描页），默认 `20` |
+| `CONTRACT_ARCHIVE_FUSION_THRESHOLD` | — | 融合低置信阈值 `[0,1]`，低于触发 agent 兜底，默认 `0.6` |
+| `CONTRACT_ARCHIVE_EVALSET_DIR` | — | 评测私有数据集根目录（仅开发/质量门禁用）；不设回退主仓库内合成 cases |
 
 > 标 `—` 的是运行时旋钮，保持 env-only、不进 config 文件层。
 
