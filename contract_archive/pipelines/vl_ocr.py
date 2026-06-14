@@ -14,9 +14,10 @@ import base64
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from ..config import get_timeout_s, load_settings
+from ..utils import map_concurrent
 from ..utils.http_env import sanitized_httpx_proxy_env
 
 logger = logging.getLogger(__name__)
@@ -59,6 +60,55 @@ def _ocr_max_retries() -> int:
     return val if val >= 0 else 4
 
 
+class _PageResult(NamedTuple):
+    """单页 OCR 结果：正文 + 三态统计标志。
+
+    并发执行下不再在循环里 mutate 计数器（会 race），改为每页返回结构化结果，
+    全部跑完后聚合计数——用数据结构消除竞态，而非加锁。
+    """
+
+    body: str
+    ok: bool
+    failed: bool
+    truncated: bool
+
+
+def _ocr_one_page(client, model: str, idx: int, path: Path, total: int) -> _PageResult:
+    """转写单页。请求/编码异常隔离到本页（标 _MARK_FAILED），绝不拖垮整份。
+
+    编码（_encode_image）也纳入 try：单张图损坏只标失败页，不再像旧实现那样
+    在循环外抛出、崩掉整份 OCR。
+    """
+    try:
+        content = [
+            {"type": "image_url", "image_url": {"url": _encode_image(path)}},
+            {"type": "text", "text": VL_OCR_PAGE_PROMPT},
+        ]
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            temperature=0.0,
+        )
+        choice = resp.choices[0]
+        page_text = (choice.message.content or "").strip()
+        truncated = choice.finish_reason == "length"
+    except Exception as e:  # noqa: BLE001 - 单页失败不能拖垮整份；全失败才回退 MinerU
+        logger.warning("[vl-ocr] page %s/%s failed after retries: %s", idx, total, e)
+        return _PageResult(_MARK_FAILED, ok=False, failed=True, truncated=False)
+
+    if truncated:
+        # qwen-vl-ocr 单页输出硬上限 8192 token，超了会被静默截断。
+        # 保留已得内容（残页也有价值），但显式标记，避免下游把残页当完整页。
+        logger.warning(
+            "[vl-ocr] page %s/%s truncated at output cap (maxOutputTokens=8192)", idx, total
+        )
+        page_text = f"{page_text}\n\n{_MARK_TRUNCATED}".strip()
+
+    if page_text:
+        return _PageResult(page_text, ok=True, failed=False, truncated=truncated)
+    return _PageResult(_MARK_ILLEGIBLE, ok=False, failed=False, truncated=False)
+
+
 def ocr_pdf_images_with_vl(
     image_paths: list[Path],
     *,
@@ -90,10 +140,10 @@ def ocr_pdf_images_with_vl(
     total = len(image_paths)
     logger.info("[vl-ocr] %s page(s) via %s (逐页)", total, model)
 
-    parts: list[str] = []
-    ok_pages = 0
-    failed_pages = 0
-    truncated_pages = 0
+    # 逐页并发：openai SDK 同步阻塞，GIL 在网络等待时释放，线程池即可。client 与
+    # proxy-env 上下文在并发块外层一次性构造，worker 只复用 client（sanitized_httpx_proxy_env
+    # 改的是进程级 os.environ，多线程各自进退会竞态）。map_concurrent 保序：结果按页序拼接，
+    # 不随完成先后变化；单页失败已在 _ocr_one_page 内隔离，不返回 None。
     with sanitized_httpx_proxy_env():
         client = OpenAI(
             api_key=api_key,
@@ -101,42 +151,15 @@ def ocr_pdf_images_with_vl(
             timeout=get_timeout_s("DASHSCOPE_TIMEOUT_S", 300.0),
             max_retries=_ocr_max_retries(),
         )
-        for idx, path in enumerate(image_paths, 1):
-            content = [
-                {"type": "image_url", "image_url": {"url": _encode_image(path)}},
-                {"type": "text", "text": VL_OCR_PAGE_PROMPT},
-            ]
-            try:
-                resp = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": content}],
-                    temperature=0.0,
-                )
-                choice = resp.choices[0]
-                page_text = (choice.message.content or "").strip()
-                truncated = choice.finish_reason == "length"
-            except Exception as e:  # noqa: BLE001 - 单页失败不能拖垮整份；全失败才回退 MinerU
-                logger.warning("[vl-ocr] page %s/%s failed after retries: %s", idx, total, e)
-                failed_pages += 1
-                parts.append(f"## 第 {idx} 页\n\n{_MARK_FAILED}")
-                continue
+        results = map_concurrent(
+            lambda item: _ocr_one_page(client, model, item[0], item[1], total),
+            list(enumerate(image_paths, 1)),
+        )
 
-            if truncated:
-                # qwen-vl-ocr 单页输出硬上限 8192 token，超了会被静默截断。
-                # 保留已得内容（残页也有价值），但显式标记，避免下游把残页当完整页。
-                truncated_pages += 1
-                logger.warning(
-                    "[vl-ocr] page %s/%s truncated at output cap (maxOutputTokens=8192)",
-                    idx,
-                    total,
-                )
-                page_text = f"{page_text}\n\n{_MARK_TRUNCATED}".strip()
-
-            if page_text:
-                ok_pages += 1
-                parts.append(f"## 第 {idx} 页\n\n{page_text}")
-            else:
-                parts.append(f"## 第 {idx} 页\n\n{_MARK_ILLEGIBLE}")
+    parts = [f"## 第 {i} 页\n\n{r.body}" for i, r in enumerate(results, 1)]
+    ok_pages = sum(1 for r in results if r.ok)
+    failed_pages = sum(1 for r in results if r.failed)
+    truncated_pages = sum(1 for r in results if r.truncated)
 
     if ok_pages == 0:
         logger.warning(

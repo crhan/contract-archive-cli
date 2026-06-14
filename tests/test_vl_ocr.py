@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import types
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,6 +73,9 @@ def _isolate(monkeypatch):
     monkeypatch.setattr(vl_ocr, "load_settings", lambda: _settings())
     monkeypatch.setattr(vl_ocr, "_encode_image", lambda p: "data:image/png;base64,FAKE")
     monkeypatch.delenv("CONTRACT_ARCHIVE_VL_OCR_RETRIES", raising=False)
+    # _FakeClient 按 self.calls 自增索引消费 behaviors，非线程安全；强制 CONCURRENCY=1
+    # 让逐页 OCR 退化为串行、确定性消费 behaviors 序列。真并发保序另有专测（用线程安全 fake）。
+    monkeypatch.setenv("CONTRACT_ARCHIVE_LLM_CONCURRENCY", "1")
 
 
 # ---------- 用例 ----------
@@ -149,3 +153,38 @@ def test_retries_knob_bad_value_falls_back(monkeypatch):
     monkeypatch.setenv("CONTRACT_ARCHIVE_VL_OCR_RETRIES", "not-an-int")
     vl_ocr.ocr_pdf_images_with_vl([Path("a")])
     assert holder["client"].init_kwargs["max_retries"] == 4
+
+
+def test_concurrent_preserves_page_order(monkeypatch):
+    """真并发（CONCURRENCY=4）下输出仍按页序拼接：让靠后的页先返回，顺序也不能乱。
+
+    其余用例靠 _isolate 强制 CONCURRENCY=1 串行消费 index-based fake；这里要验真并发，
+    改用线程安全 fake——据 image_url 里编进的页号回对应内容，不依赖调用计数器。
+    """
+    monkeypatch.setenv("CONTRACT_ARCHIVE_LLM_CONCURRENCY", "4")
+    # 把页号编进 image_url（p1..p4），让 fake 据此识别是哪一页
+    monkeypatch.setattr(vl_ocr, "_encode_image", lambda p: f"data:image/png;base64,{p.stem}")
+
+    class _OrderFake:
+        def __init__(self, **kwargs):
+            self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create))
+
+        def _create(self, **kwargs):
+            url = kwargs["messages"][0]["content"][0]["image_url"]["url"]
+            n = int(url.rsplit(",", 1)[1][1:])  # "p3" -> 3
+            time.sleep((5 - n) * 0.02)  # p4 最先完成、p1 最后——完成序与页序相反
+            return _FakeResp(f"第{n}页正文", "stop")
+
+    fake_mod = types.ModuleType("openai")
+    fake_mod.OpenAI = _OrderFake
+    monkeypatch.setitem(sys.modules, "openai", fake_mod)
+
+    paths = [Path(f"p{i}.png") for i in range(1, 5)]
+    out = vl_ocr.ocr_pdf_images_with_vl(paths)
+    assert out is not None
+    # 即便 p4 先返回、p1 后返回，正文必须按页序 1→2→3→4
+    assert out.index("第1页正文") < out.index("第2页正文") < out.index("第3页正文") < out.index(
+        "第4页正文"
+    )
+    # 页标题也保序
+    assert out.index("## 第 1 页") < out.index("## 第 4 页")
