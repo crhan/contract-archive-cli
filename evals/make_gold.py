@@ -125,13 +125,14 @@ def main(argv: list[str] | None = None) -> int:
         )
     dataset_dir = args.dataset_dir or evalset_dir()
     # 安全闸：make_gold 写的是**不脱敏**真实数据。绝不能落进主仓库公开的 evals/cases/
-    # （会把真实 PII 推上 github）。未显式指向私有数据集就拒绝——必须 --dataset-dir 或
-    # 设 CONTRACT_ARCHIVE_EVALSET_DIR 指向私有仓库的 dataset/。
-    if dataset_dir.resolve() == DEFAULT_CASES.resolve():
+    # （会把真实 PII 推上 github）。拒绝 evals/cases **本身及其任何子目录**——
+    # 必须 --dataset-dir 或 CONTRACT_ARCHIVE_EVALSET_DIR 指向私有仓库的 dataset/（在公开树之外）。
+    resolved, public = dataset_dir.resolve(), DEFAULT_CASES.resolve()
+    if resolved == public or public in resolved.parents:
         print(
-            "❌ 拒绝把真实（不脱敏）数据写入主仓库公开的 evals/cases/。\n"
+            "❌ 拒绝把真实（不脱敏）数据写入主仓库公开的 evals/cases/（含其子目录）。\n"
             "   请设 CONTRACT_ARCHIVE_EVALSET_DIR 或传 --dataset-dir 指向**私有**评测数据集目录\n"
-            "   （如 ~/project/contract-archive-evalset/dataset）。"
+            "   （如 ~/project/contract-archive-evalset/dataset，须在主仓库公开树之外）。"
         )
         return 2
     docs = iter_archive_docs(archive_dir, args.doc_id)

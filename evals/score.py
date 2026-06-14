@@ -21,6 +21,7 @@ from dataclasses import dataclass, field as dc_field
 from difflib import SequenceMatcher
 from typing import Callable, Optional
 
+from contract_archive.extraction.fusion import _normalize_value as normalize_fusion_value
 from contract_archive.extraction.normalize import normalize_date
 from contract_archive.schemas import (
     DOC_TYPES,
@@ -46,12 +47,14 @@ FIELD_WEIGHTS: dict[str, float] = {
     "seals": 1.0,
     "obligations": 1.0,
     "sub_agreements": 1.5,
+    "field_verdicts": 2.0,     # 多源融合高价值评判（保额/免赔/被保险人…）——融合的权威产出
     "title": 0.5,              # 主观，弱信号
     "summary": 0.5,            # 主观，弱信号
 }
 
 # 关键字段：候选模型在这些字段上必须逐项非劣，任一塌方一票否决（不进加权总分平均）。
-CRITICAL_FIELDS = ("doc_type", "parties", "primary_amount", "completeness_issues")
+# field_verdicts 入列：融合把保额/免赔/被保险人放进 verdict（不进 amounts），是融合改动的门禁要害。
+CRITICAL_FIELDS = ("doc_type", "parties", "primary_amount", "completeness_issues", "field_verdicts")
 
 ISSUE_FBETA = 2.0          # 完整性 issues 偏召回
 STR_SIM_THRESHOLD = 0.6    # 文本相似度匹配阈值
@@ -386,6 +389,30 @@ def score_completeness_issues(gold: list, pred: list) -> FieldScore:
     return fs
 
 
+def score_field_verdicts(gold: list, pred: list) -> FieldScore:
+    """多源融合高价值评判（保额各档/免赔/赔付比例/被保险人…）：按 key 对齐，key 相同且值
+    归一化相等才算命中（critical）。
+
+    为什么必须单独评：pred 把这些值放进 field_verdicts sidecar（**不进** amounts/fields，那是
+    fusion 铁律），envelope 级评分看不到。不评则融合回归（verdict 漏/错）从 gate 溜过，门禁对
+    新特性失明。gold 未标 verdict（field_verdicts 空）→ 该维度真空、不失分（fbeta 真空=1.0）；
+    待人工按 REVIEW 把 §保额/免赔 等真值标进 gold.field_verdicts，gate 即开始守它。
+    """
+
+    def sim(g, p):
+        # 值用 fusion 同一把归一尺（数字闸币种归一："200万元"=="200万"），门禁认定与融合一致。
+        gv = normalize_fusion_value(g.value or "")
+        pv = normalize_fusion_value(p.value or "")
+        return 1.0 if g.key and g.key == p.key and gv == pv else 0.0
+
+    tp, fp, fn, _ = _align(gold, pred, sim, threshold=1.0)
+    return FieldScore(
+        "field_verdicts", "fbeta", tp=tp, fp=fp, fn=fn,
+        weight=FIELD_WEIGHTS["field_verdicts"], beta=1.0, critical=True,
+        detail=f"verdicts gold={len(gold)} pred={len(pred)} matched={tp}",
+    )
+
+
 # ============================================================================
 # 信封级聚合
 # ============================================================================
@@ -438,6 +465,8 @@ def score_envelope(case_id: str, gold: DocumentExtraction, pred: DocumentExtract
     es.fields.append(score_seals(gold.seals, pred.seals))
     es.fields.append(score_obligations(gold.obligations, pred.obligations))
     es.fields.append(score_sub_agreements(gold.sub_agreements, pred.sub_agreements))
+
+    es.fields.append(score_field_verdicts(gold.field_verdicts, pred.field_verdicts))
 
     gold_issues = gold.completeness.issues if gold.completeness else []
     pred_issues = pred.completeness.issues if pred.completeness else []
