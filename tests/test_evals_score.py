@@ -241,5 +241,17 @@ def test_field_verdicts_empty_is_neutral():
     assert score_field_verdicts([], []).fbeta() == 1.0
 
 
+def test_field_verdicts_empty_gold_neutral_even_with_pred():
+    """gold 未标 verdict 但 pred 产出 verdict → 中性、**不罚**（否则现有未标注 case 全假性失败）。"""
+    fs = score_field_verdicts([], [FieldVerdict(key="保额_重疾", value="400万")])
+    assert fs.fp == 0 and fs.fn == 0 and fs.fbeta() == 1.0
+
+
+def test_field_verdicts_missing_pred_penalized_when_gold_annotated():
+    """gold 已标 verdict 但 pred 漏抽 → FN，被门禁逮住（标注后即生效）。"""
+    fs = score_field_verdicts([FieldVerdict(key="保额_重疾", value="400万")], [])
+    assert fs.fn == 1 and fs.fbeta() == 0.0
+
+
 def test_field_verdicts_is_critical_field():
     assert "field_verdicts" in CRITICAL_FIELDS

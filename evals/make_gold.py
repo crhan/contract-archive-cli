@@ -27,9 +27,13 @@ from contract_archive.archive import load_document_text
 from contract_archive.config import load_settings
 from contract_archive.schemas import DocumentExtraction
 
-from .run import DEFAULT_CASES, evalset_dir
+from .run import evalset_dir
 
 logger = logging.getLogger(__name__)
+
+# 主仓库工作树根（evals/ 的上一级）。make_gold 写不脱敏真实数据，绝不能落进**工作树内任何位置**
+# （会被提交上公开 github）。私有数据集须是工作树之外的独立仓库。
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 REVIEW_TEMPLATE = """# DRAFT case 人工核对清单（{doc_id}）
@@ -124,15 +128,17 @@ def main(argv: list[str] | None = None) -> int:
             else Path.home() / ".local/share/contract-archive"
         )
     dataset_dir = args.dataset_dir or evalset_dir()
-    # 安全闸：make_gold 写的是**不脱敏**真实数据。绝不能落进主仓库公开的 evals/cases/
-    # （会把真实 PII 推上 github）。拒绝 evals/cases **本身及其任何子目录**——
-    # 必须 --dataset-dir 或 CONTRACT_ARCHIVE_EVALSET_DIR 指向私有仓库的 dataset/（在公开树之外）。
-    resolved, public = dataset_dir.resolve(), DEFAULT_CASES.resolve()
-    if resolved == public or public in resolved.parents:
+    # 安全闸：make_gold 写的是**不脱敏**真实数据。绝不能落进主仓库工作树**内任何位置**
+    # （evals/cases、evals/private_real、./real_dataset… 都不行——只要在工作树内就可能被提交上
+    # 公开 github）。必须 --dataset-dir 或 CONTRACT_ARCHIVE_EVALSET_DIR 指向**工作树之外**的私有
+    # 数据集目录（独立仓库，如 ~/project/contract-archive-evalset/dataset）。
+    resolved = dataset_dir.resolve()
+    if resolved == REPO_ROOT or REPO_ROOT in resolved.parents:
         print(
-            "❌ 拒绝把真实（不脱敏）数据写入主仓库公开的 evals/cases/（含其子目录）。\n"
-            "   请设 CONTRACT_ARCHIVE_EVALSET_DIR 或传 --dataset-dir 指向**私有**评测数据集目录\n"
-            "   （如 ~/project/contract-archive-evalset/dataset，须在主仓库公开树之外）。"
+            "❌ 拒绝把真实（不脱敏）数据写入主仓库工作树内（含任何子目录）。\n"
+            f"   工作树根：{REPO_ROOT}\n"
+            "   请设 CONTRACT_ARCHIVE_EVALSET_DIR 或传 --dataset-dir 指向**工作树之外**的私有数据集\n"
+            "   （独立仓库，如 ~/project/contract-archive-evalset/dataset）。"
         )
         return 2
     docs = iter_archive_docs(archive_dir, args.doc_id)

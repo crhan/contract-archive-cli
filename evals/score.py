@@ -395,9 +395,19 @@ def score_field_verdicts(gold: list, pred: list) -> FieldScore:
 
     为什么必须单独评：pred 把这些值放进 field_verdicts sidecar（**不进** amounts/fields，那是
     fusion 铁律），envelope 级评分看不到。不评则融合回归（verdict 漏/错）从 gate 溜过，门禁对
-    新特性失明。gold 未标 verdict（field_verdicts 空）→ 该维度真空、不失分（fbeta 真空=1.0）；
-    待人工按 REVIEW 把 §保额/免赔 等真值标进 gold.field_verdicts，gate 即开始守它。
+    新特性失明。
+
+    **gold 未标 verdict（field_verdicts 空）→ 整维度中性**（tp=fp=fn=0 → fbeta=1.0），
+    **不拿 pred 的 verdict 当 FP 罚**：现有 case 的 verdict 真值多半还没人工标，pred 一产出 verdict
+    就判全错会让所有融合 case 假性失败。该维度对每个 case **按需启用**——人工按 REVIEW 把
+    §保额/免赔/被保险人 等真值标进 gold.field_verdicts 后，gate 才对该 case 守 verdict。
     """
+    fs = FieldScore(
+        "field_verdicts", "fbeta", weight=FIELD_WEIGHTS["field_verdicts"], beta=1.0, critical=True
+    )
+    if not gold:
+        fs.detail = "gold 未标 verdict，中性（不罚 pred 产出）"
+        return fs
 
     def sim(g, p):
         # 值用 fusion 同一把归一尺（数字闸币种归一："200万元"=="200万"），门禁认定与融合一致。
@@ -405,12 +415,9 @@ def score_field_verdicts(gold: list, pred: list) -> FieldScore:
         pv = normalize_fusion_value(p.value or "")
         return 1.0 if g.key and g.key == p.key and gv == pv else 0.0
 
-    tp, fp, fn, _ = _align(gold, pred, sim, threshold=1.0)
-    return FieldScore(
-        "field_verdicts", "fbeta", tp=tp, fp=fp, fn=fn,
-        weight=FIELD_WEIGHTS["field_verdicts"], beta=1.0, critical=True,
-        detail=f"verdicts gold={len(gold)} pred={len(pred)} matched={tp}",
-    )
+    fs.tp, fs.fp, fs.fn, _ = _align(gold, pred, sim, threshold=1.0)
+    fs.detail = f"verdicts gold={len(gold)} pred={len(pred)} matched={fs.tp:.0f}"
+    return fs
 
 
 # ============================================================================

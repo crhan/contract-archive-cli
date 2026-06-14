@@ -85,6 +85,19 @@ def test_make_gold_refuses_public_cases_dir(tmp_path, monkeypatch):
     assert not (DEFAULT_CASES / "extraction" / "doc_a").exists()
 
 
+def test_make_gold_refuses_any_in_repo_path(tmp_path):
+    """守卫扩到整个工作树：仓库内任何位置（非 cases）也拒绝，防真实数据落进公开树被提交。"""
+    from evals.make_gold import REPO_ROOT
+
+    _make_archive_doc(tmp_path, "doc_a")
+    for sub in ("real_dataset", "evals/private_real"):
+        rc = make_gold_main(
+            ["--archive-dir", str(tmp_path), "--dataset-dir", str(REPO_ROOT / sub)]
+        )
+        assert rc == 2, f"工作树内 {sub} 应被拒绝"
+        assert not (REPO_ROOT / sub).exists()  # 拒绝即不创建
+
+
 def test_make_gold_allows_explicit_private_dir(tmp_path):
     """显式 --dataset-dir 指向私有目录 → 放行，真实数据落私有目录。"""
     _make_archive_doc(tmp_path, "doc_a")
