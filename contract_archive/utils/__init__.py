@@ -1,3 +1,4 @@
+from .concurrency import llm_concurrency, map_concurrent, merge_usage
 from .device import Device, describe_device, select_device
 from .pdf import (
     PageImage,
@@ -12,6 +13,9 @@ from .pdf import (
 )
 
 __all__ = [
+    "map_concurrent",
+    "merge_usage",
+    "llm_concurrency",
     "Device",
     "select_device",
     "describe_device",
