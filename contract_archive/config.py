@@ -11,8 +11,7 @@
 - secret（api_key）落盘是明文，靠目录 0700 + 文件 0600 + 展示掩码保护；
   不上 keyring（对单用户本地 CLI 过重，边际收益低）。
 - 故意不收：XDG_DATA_HOME（由 archive/paths.py 决定 data 位置，收进来是循环依赖）、
-  MinerU 子进程 environ（基础设施，非配置项）；COMPUTE_DEVICE/LOG_LEVEL 是运行时旋钮，
-  保持 env-only，不做持久配置。
+  COMPUTE_DEVICE/LOG_LEVEL 是运行时旋钮，保持 env-only，不做持久配置。
 """
 from __future__ import annotations
 
@@ -200,7 +199,7 @@ def _validate_key(key: str) -> str:
 
 def get_timeout_s(env_name: str, default: float) -> float:
     """
-    读一个"秒数"类运行时旋钮（如 DASHSCOPE_TIMEOUT_S / CONTRACT_ARCHIVE_MINERU_TIMEOUT_S）。
+    读一个"秒数"类运行时旋钮（如 DASHSCOPE_TIMEOUT_S）。
 
     超时是运行时旋钮而非持久配置（同 LOG_LEVEL/COMPUTE_DEVICE），保持 env-only、不进 CONFIG_KEYS。
     坏值（非数字/非正数/缺失）一律回退 default 并 warning——坏配置不该让命令崩，

@@ -20,7 +20,6 @@ input/*.pdf
 !input/.gitkeep
 models/
 *.onnx
-.mineru_cache/
 huggingface_cache/
 modelscope_cache/
 

@@ -1,7 +1,7 @@
 """
 结构化错误模型——给机器（Agent / 自动化编排）一个可据以决策的错误信号。
 
-为什么存在：历史上错误是自由文本（`f"mineru: {e}"`），退出码只有 0/1，
+为什么存在：历史上错误是自由文本，退出码只有 0/1，
 Agent 无法区分「限流（该退避重试）」与「缺 API key（重试无用，该停下改配置）」，
 只能正则匹配错误串——供应商一改措辞就崩。这里把错误归一成
 `code / category / retryable`，让上层（尤其 ingest 的 JSON 输出）携带可判定信号。
@@ -29,7 +29,7 @@ class ErrorCategory(str, Enum):
     config = "config"          # 配置缺失或无效（缺 API key、key 失效）
     permission = "permission"  # 鉴权通过但无权限（403）
     transient = "transient"    # 瞬时故障，重试可能成功（限流/超时/网络/5xx）
-    infra = "infra"            # 基础设施/外部工具故障（MinerU 崩、DB 锁）
+    infra = "infra"            # 基础设施/外部工具故障（OCR 崩、DB 锁）
     unknown = "unknown"        # 未能归类
 
 
@@ -155,9 +155,9 @@ def extract_empty(detail: str) -> ErrorInfo:
     )
 
 
-def mineru_failed(detail: str) -> ErrorInfo:
-    """MinerU 解析失败（subprocess 非零/崩溃）。归基础设施类。"""
+def ocr_failed(detail: str) -> ErrorInfo:
+    """OCR 解析失败。归基础设施类。"""
     return ErrorInfo(
-        code="MINERU_FAILED", category=ErrorCategory.infra.value,
+        code="OCR_FAILED", category=ErrorCategory.infra.value,
         message=_short(detail), retryable=False,
     )

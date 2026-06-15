@@ -41,7 +41,7 @@ class DocumentRow:
     source_path: str
     output_dir: str
     ingested_at: str
-    mineru_duration_s: Optional[float]
+    ocr_duration_s: Optional[float]
     llm_duration_s: Optional[float]
     status: str
     error_message: Optional[str]
@@ -146,7 +146,7 @@ def _row_to_document(
         source_path=row["source_path"],
         output_dir=row["output_dir"],
         ingested_at=row["ingested_at"],
-        mineru_duration_s=row["mineru_duration_s"],
+        ocr_duration_s=row["ocr_duration_s"],
         llm_duration_s=row["llm_duration_s"],
         status=row["status"],
         error_message=row["error_message"],
@@ -554,7 +554,7 @@ def insert_document(
     source_path: str,
     output_dir: str,
     status: str,
-    mineru_duration_s: Optional[float],
+    ocr_duration_s: Optional[float],
     llm_duration_s: Optional[float],
     error_message: Optional[str],
     extraction: Optional[ContractExtraction],
@@ -577,7 +577,7 @@ def insert_document(
             """
             INSERT INTO documents (
               sha256, source_path, output_dir, ingested_at,
-              mineru_duration_s, llm_duration_s, status, error_message,
+              ocr_duration_s, llm_duration_s, status, error_message,
               doc_type, title, summary, details_json,
               primary_date, primary_amount_cents,
               contract_name, party_a, party_b,
@@ -592,7 +592,7 @@ def insert_document(
                 source_path,
                 output_dir,
                 utc_now_iso(),
-                mineru_duration_s,
+                ocr_duration_s,
                 llm_duration_s,
                 status,
                 error_message,
@@ -636,7 +636,7 @@ def update_extraction(
     envelope: Optional[DocumentExtraction] = None,
 ) -> None:
     """
-    复跑抽取（mineru 产物已存在）后更新字段。同一事务：
+    复跑抽取（OCR 产物已存在）后更新字段。同一事务：
     risk_clauses / obligations 显式 DELETE 再 INSERT，避免重复堆积。
     """
     ext = extraction
@@ -696,7 +696,7 @@ def replace_document(
     source_path: str,
     output_dir: str,
     status: str,
-    mineru_duration_s: Optional[float],
+    ocr_duration_s: Optional[float],
     llm_duration_s: Optional[float],
     error_message: Optional[str],
     extraction: ContractExtraction,
@@ -704,7 +704,7 @@ def replace_document(
     envelope: Optional[DocumentExtraction] = None,
 ) -> None:
     """
-    reingest：mineru + 抽取都重跑。比 update_extraction 多更新 source_path/output_dir/mineru_duration。
+    reingest：OCR + 抽取都重跑。比 update_extraction 多更新 source_path/output_dir/ocr_duration。
     sha256 / id / ingested_at 不变。
     """
     ext = extraction
@@ -714,7 +714,7 @@ def replace_document(
             """
             UPDATE documents SET
               source_path = ?, output_dir = ?,
-              mineru_duration_s = ?, llm_duration_s = ?,
+              ocr_duration_s = ?, llm_duration_s = ?,
               status = ?, error_message = ?,
               doc_type = ?, title = ?, summary = ?, details_json = ?,
               primary_date = ?, primary_amount_cents = ?,
@@ -727,7 +727,7 @@ def replace_document(
             (
                 source_path,
                 output_dir,
-                mineru_duration_s,
+                ocr_duration_s,
                 llm_duration_s,
                 status,
                 error_message,

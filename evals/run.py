@@ -93,16 +93,16 @@ def run_pdf_case(pdf_path: Path) -> dict[str, Any]:
 
     from contract_archive.archive import load_document_text
     from contract_archive.archive.ingest import run_full_extraction
-    from contract_archive.pipelines import MinerUPipeline
+    from contract_archive.pipelines import OCRPipeline
 
     start = time.perf_counter()
     with tempfile.TemporaryDirectory() as td:
         work = Path(td)
-        shutil.copy(pdf_path, work / "source.pdf")  # _select_fusion_images 读 mineru_dir.parent/source.pdf
-        mineru_dir = work / "mineru"
-        MinerUPipeline().run(pdf_path, mineru_dir)
-        text = load_document_text(mineru_dir)
-        envelope = run_full_extraction(text, mineru_dir)
+        shutil.copy(pdf_path, work / "source.pdf")  # _select_fusion_images 读 ocr_dir.parent/source.pdf
+        ocr_dir = work / "ocr"
+        OCRPipeline().run(pdf_path, ocr_dir)
+        text = load_document_text(ocr_dir)
+        envelope = run_full_extraction(text, ocr_dir)
     latency = time.perf_counter() - start
     return {
         "pred": envelope.model_dump(mode="json"),

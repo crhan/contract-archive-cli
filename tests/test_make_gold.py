@@ -14,7 +14,7 @@ from evals.run import DEFAULT_CASES
 
 def _make_archive_doc(archive_dir, doc_id, with_pdf=True):
     doc = archive_dir / "documents" / doc_id
-    (doc / "mineru").mkdir(parents=True)
+    (doc / "ocr").mkdir(parents=True)
     (doc / "extraction_result.json").write_text(
         json.dumps({"doc_type": "保险凭证", "title": "某保单"}, ensure_ascii=False),
         encoding="utf-8",
@@ -28,10 +28,10 @@ def test_iter_archive_docs_lists_valid(tmp_path):
     _make_archive_doc(tmp_path, "doc_a")
     _make_archive_doc(tmp_path, "doc_b")
     # 缺 extraction_result.json 的不算
-    (tmp_path / "documents" / "doc_c" / "mineru").mkdir(parents=True)
+    (tmp_path / "documents" / "doc_c" / "ocr").mkdir(parents=True)
     docs = iter_archive_docs(tmp_path, only=None)
     assert [d[0] for d in docs] == ["doc_a", "doc_b"]
-    assert all(len(d) == 4 for d in docs)  # (doc_id, doc_dir, mineru_dir, result_path)
+    assert all(len(d) == 4 for d in docs)  # (doc_id, doc_dir, ocr_dir, result_path)
 
 
 def test_iter_archive_docs_only_filter(tmp_path):
@@ -101,8 +101,8 @@ def test_make_gold_refuses_any_in_repo_path(tmp_path):
 def test_make_gold_allows_explicit_private_dir(tmp_path):
     """显式 --dataset-dir 指向私有目录 → 放行，真实数据落私有目录。"""
     _make_archive_doc(tmp_path, "doc_a")
-    # mineru 文本非空（load_document_text 读 mineru 产物）
-    (tmp_path / "documents" / "doc_a" / "mineru" / "raw_text.txt").write_text(
+    # OCR 文本非空（load_document_text 读 OCR 产物）
+    (tmp_path / "documents" / "doc_a" / "ocr" / "raw_text.txt").write_text(
         "保单全文 被保险人：陈意", encoding="utf-8"
     )
     private = tmp_path / "private_dataset"

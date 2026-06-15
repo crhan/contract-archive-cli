@@ -81,8 +81,8 @@ def test_constructors():
     assert E.config_missing("no key").code == "CONFIG_MISSING"
     assert E.config_missing("no key").retryable is False
     assert E.extract_empty("empty").code == "EXTRACT_EMPTY"
-    assert E.mineru_failed("crash").code == "MINERU_FAILED"
-    assert E.mineru_failed("crash").category == "infra"
+    assert E.ocr_failed("crash").code == "OCR_FAILED"
+    assert E.ocr_failed("crash").category == "infra"
 
 
 def test_ingest_result_to_dict_carries_structured_error():

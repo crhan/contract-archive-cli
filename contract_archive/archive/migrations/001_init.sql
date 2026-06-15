@@ -22,7 +22,7 @@ CREATE TABLE documents (
   source_path         TEXT NOT NULL,            -- 原始 PDF 绝对路径（用户引用）
   output_dir          TEXT NOT NULL,            -- archive/documents/<sha-short>/ 绝对路径
   ingested_at         TEXT NOT NULL,            -- ISO8601 UTC 'YYYY-MM-DDTHH:MM:SSZ'
-  mineru_duration_s   REAL,
+  ocr_duration_s      REAL,
   llm_duration_s      REAL,
   status              TEXT NOT NULL,            -- 'ok' | 'partial' | 'failed'
   error_message       TEXT,

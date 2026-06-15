@@ -3,7 +3,7 @@
 为什么逐页：qwen-vl-ocr 是专用 OCR 模型，maxInputTokens 仅 30000，一次塞不下多页
 高分辨率图（旧实现把整份 PDF 全部页塞进一个请求，只有上下文极大的通用 VL 模型
 qwen3.6-flash 才扛得住，且慢、易超时）。这里改为每页一次调用、拼接结果，既用上专用
-OCR 模型，也消除了"页数超上限就回退 mineru"的硬限制。
+OCR 模型，也消除了整份请求的页数硬限制。
 
 模型取 settings.dashscope_ocr_model（默认 qwen-vl-ocr-latest）；签章核查仍用 vl_model，
 互不影响。
@@ -91,7 +91,7 @@ def _ocr_one_page(client, model: str, idx: int, path: Path, total: int) -> _Page
         choice = resp.choices[0]
         page_text = (choice.message.content or "").strip()
         truncated = choice.finish_reason == "length"
-    except Exception as e:  # noqa: BLE001 - 单页失败不能拖垮整份；全失败才回退 MinerU
+    except Exception as e:  # noqa: BLE001 - 单页失败不能拖垮整份
         logger.warning("[vl-ocr] page %s/%s failed after retries: %s", idx, total, e)
         return _PageResult(_MARK_FAILED, ok=False, failed=True, truncated=False)
 
@@ -118,7 +118,7 @@ def ocr_pages(
 ) -> Optional[list[_PageResult]]:
     """逐页并发 OCR，返回 **与 image_paths 同序** 的 per-page 结果（_PageResult 列表）。
 
-    无凭证 → None（让调用方回退）。空输入 → []。page_labels 仅用于日志页号（缺省 1..N），
+    无凭证 → None（让调用方决定失败处理）。空输入 → []。page_labels 仅用于日志页号（缺省 1..N），
     不影响返回顺序——页级混合提取据此把"只 OCR 扫描页"的结果按真实页号拼回全文。
 
     并发要点：openai SDK 同步阻塞、GIL 在网络等待时释放，线程池即可；client 与 proxy-env
@@ -167,8 +167,8 @@ def ocr_pdf_images_with_vl(
     用 DashScope 专用 OCR 模型（OpenAI 兼容口）逐页转写渲染好的 PDF 页图片。
 
     每页一次请求，拼成 `## 第 X 页` 分隔的 Markdown（整份页号 1..N）。单页异常不中断整份，
-    三种异常态各记独立标记（调用失败 / 输出截断 / 看不清），只有无任何可用页时才返回 None 让
-    调用方回退到原 MinerU 路径。429/超时/5xx 由 SDK 自动重试（见 _ocr_max_retries）。
+    三种异常态各记独立标记（调用失败 / 输出截断 / 看不清），只有无任何可用页时才返回 None。
+    429/超时/5xx 由 SDK 自动重试（见 _ocr_max_retries）。
     无凭证时返回 None。整份 OCR 路径用本函数；页级混合提取用 ocr_pages 拿 per-page 结果。
     """
     if not image_paths:

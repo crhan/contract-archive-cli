@@ -1,8 +1,8 @@
 """
 档案库 happy-path smoke test。
 
-不真跑 OCR（subprocess 可能需要 GB 级模型加载几分钟），用 stub pipeline
-直接写出 mineru/ 目录下的产物。验证：
+不真跑 OCR（可能触发外部 API 调用），用 stub pipeline
+直接写出 ocr/ 目录下的产物。验证：
   - 建表 + migrate
   - ingest 单 PDF → DB 写入 + 文件落盘
   - 重复 ingest → skipped
@@ -40,13 +40,13 @@ from contract_archive.schemas import (
 )
 
 
-# ---------- 假 MinerU pipeline ----------
+# ---------- 假 OCR pipeline ----------
 
 
-class StubMineruPipeline:
-    """模拟 MinerU 行为：写出 markdown.md + raw_text.txt + pipeline_meta.json。"""
+class StubOCRPipeline:
+    """模拟 OCR 行为：写出 markdown.md + raw_text.txt + pipeline_meta.json。"""
 
-    name = "mineru"
+    name = "ocr"
 
     def __init__(self, markdown_text: str, raw_text: str | None = None):
         self.markdown_text = markdown_text
@@ -64,7 +64,7 @@ class StubMineruPipeline:
         )
         (out_dir / "layout.json").write_text("[]", encoding="utf-8")
         meta = PipelineMeta(
-            pipeline_name="mineru",
+            pipeline_name="ocr",
             source_pdf=str(pdf_path),
             started_at=datetime.now(),
             finished_at=datetime.now(),
@@ -117,9 +117,9 @@ def sample_markdown() -> str:
 """
 
 
-def _patch_pipeline(stub: StubMineruPipeline):
-    """把 ingest.ingest_pdf 内部的 MinerUPipeline() 替换为 stub。"""
-    return patch("contract_archive.archive.ingest.MinerUPipeline", lambda *a, **kw: stub)
+def _patch_pipeline(stub: StubOCRPipeline):
+    """把 ingest.ingest_pdf 内部的 OCRPipeline() 替换为 stub。"""
+    return patch("contract_archive.archive.ingest.OCRPipeline", lambda *a, **kw: stub)
 
 
 def _patch_llm_disabled():
@@ -131,7 +131,7 @@ def _patch_llm_disabled():
 
 
 def test_ingest_happy_path(archive_root, conn, sample_pdf, sample_markdown):
-    stub = StubMineruPipeline(markdown_text=sample_markdown)
+    stub = StubOCRPipeline(markdown_text=sample_markdown)
     with _patch_pipeline(stub):
         result = ingest_pdf(
             sample_pdf, archive_root, conn,
@@ -140,14 +140,14 @@ def test_ingest_happy_path(archive_root, conn, sample_pdf, sample_markdown):
     assert result.status == "ok"
     assert result.doc_id == 1
     assert result.sha256
-    assert result.mineru_duration_s is not None
+    assert result.ocr_duration_s is not None
 
     # 文件落盘检查（rename 事务边界后所有 archive 内文件都应到位）
     doc_dir = archive_root.doc_dir(result.sha256)
     assert (doc_dir / "source.pdf").exists()
     assert (doc_dir / "source.pdf").read_bytes() == sample_pdf.read_bytes()
-    assert (doc_dir / "mineru" / "markdown.md").exists()
-    assert (doc_dir / "mineru" / "raw_text.txt").exists()
+    assert (doc_dir / "ocr" / "markdown.md").exists()
+    assert (doc_dir / "ocr" / "raw_text.txt").exists()
     assert (doc_dir / "extraction_result.json").exists()
     assert (doc_dir / "extraction_confidence.json").exists()
     assert (doc_dir / "ingest.log").exists()
@@ -170,7 +170,7 @@ def test_ingest_happy_path(archive_root, conn, sample_pdf, sample_markdown):
 
 
 def test_ingest_duplicate_skipped(archive_root, conn, sample_pdf, sample_markdown):
-    stub = StubMineruPipeline(markdown_text=sample_markdown)
+    stub = StubOCRPipeline(markdown_text=sample_markdown)
     with _patch_pipeline(stub):
         r1 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
         r2 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
@@ -183,12 +183,12 @@ def test_ingest_duplicate_skipped(archive_root, conn, sample_pdf, sample_markdow
 def test_ingest_reingest_replaces(archive_root, conn, sample_pdf, sample_markdown):
     """reingest 应保留 id + sha + ingested_at（archive 流水线契约），不验证
     具体抽取字段值（那由 extraction 模块的测试覆盖）。"""
-    stub1 = StubMineruPipeline(markdown_text=sample_markdown)
+    stub1 = StubOCRPipeline(markdown_text=sample_markdown)
     with _patch_pipeline(stub1):
         r1 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     orig = get_document(conn, r1.doc_id)
 
-    stub2 = StubMineruPipeline(markdown_text="# 新版合同\n甲方：完全不同的公司")
+    stub2 = StubOCRPipeline(markdown_text="# 新版合同\n甲方：完全不同的公司")
     with _patch_pipeline(stub2):
         r2 = ingest_pdf(
             sample_pdf, archive_root, conn,
@@ -201,24 +201,24 @@ def test_ingest_reingest_replaces(archive_root, conn, sample_pdf, sample_markdow
     after = get_document(conn, r2.doc_id)
     assert after.ingested_at == orig.ingested_at  # ingested_at 不应被覆盖
     # markdown 内容确实换了
-    new_md = (archive_root.doc_dir(r2.sha256) / "mineru" / "markdown.md").read_text(encoding="utf-8")
+    new_md = (archive_root.doc_dir(r2.sha256) / "ocr" / "markdown.md").read_text(encoding="utf-8")
     assert "新版合同" in new_md
 
 
-def test_ingest_mineru_failure_writes_failed_status(
+def test_ingest_ocr_failure_writes_failed_status(
     archive_root, conn, sample_pdf, sample_markdown
 ):
     """OCR 抛异常时应留 status=failed 记录，并保留 archive 内 source.pdf。"""
 
     class FailingPipeline:
-        name = "mineru"
+        name = "ocr"
         def run(self, *_a, **_kw):
-            raise RuntimeError("simulated mineru crash")
+            raise RuntimeError("simulated OCR crash")
 
-    with patch("contract_archive.archive.ingest.MinerUPipeline", lambda *a, **kw: FailingPipeline()):
+    with patch("contract_archive.archive.ingest.OCRPipeline", lambda *a, **kw: FailingPipeline()):
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     assert r.status == "failed"
-    assert "simulated mineru crash" in r.error_message
+    assert "simulated OCR crash" in r.error_message
     # 失败时 tmp 应该被清理，但 documents/<sha>/source.pdf 要保留供 show/人工核对。
     doc_dir = archive_root.doc_dir(r.sha256)
     assert not (archive_root.tmp_dir / r.sha256[:12]).exists()
@@ -237,20 +237,20 @@ def test_ingest_failed_then_retry_not_skipped(
     """上次 failed 的文档，再次 ingest（不加 --reingest）应自动重试而非 skip。"""
 
     class FailingPipeline:
-        name = "mineru"
+        name = "ocr"
 
         def run(self, *_a, **_kw):
             raise RuntimeError("boom")
 
     with patch(
-        "contract_archive.archive.ingest.MinerUPipeline",
+        "contract_archive.archive.ingest.OCRPipeline",
         lambda *a, **kw: FailingPipeline(),
     ):
         r1 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     assert r1.status == "failed"
 
     # 不加 reingest 再跑——pipeline 这次正常，应自动重试成功，而不是 skip
-    stub = StubMineruPipeline(markdown_text=sample_markdown)
+    stub = StubOCRPipeline(markdown_text=sample_markdown)
     with _patch_pipeline(stub):
         r2 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     assert r2.status == "ok", f"failed 文档应自动重试，却得到 {r2.status}"
@@ -261,7 +261,7 @@ def test_duplicate_ingest_repairs_missing_archived_source(
     archive_root, conn, sample_pdf, sample_markdown
 ):
     """重复 ingest 即使 skip，也要补回 archive 内误删的 source.pdf。"""
-    stub = StubMineruPipeline(markdown_text=sample_markdown)
+    stub = StubOCRPipeline(markdown_text=sample_markdown)
     with _patch_pipeline(stub):
         r1 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     source_pdf = archive_root.doc_dir(r1.sha256) / "source.pdf"
@@ -288,9 +288,9 @@ def test_list_and_search(archive_root, conn, sample_pdf, tmp_path):
     pdf2.parent.mkdir(parents=True, exist_ok=True)
     pdf2.write_bytes(b"%PDF-1.4 other fake\n" + b"y" * 2048)
 
-    with _patch_pipeline(StubMineruPipeline(markdown_text=md_min)):
+    with _patch_pipeline(StubOCRPipeline(markdown_text=md_min)):
         r1 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
-    with _patch_pipeline(StubMineruPipeline(markdown_text=md_min)):
+    with _patch_pipeline(StubOCRPipeline(markdown_text=md_min)):
         r2 = ingest_pdf(pdf2, archive_root, conn, llm_enabled=False)
 
     # 直接灌可控的字段值
@@ -346,7 +346,7 @@ def test_stats(archive_root, conn, sample_pdf):
     from contract_archive.archive import update_extraction
     from contract_archive.schemas import ContractExtraction, ExtractionConfidence
 
-    with _patch_pipeline(StubMineruPipeline(markdown_text="# placeholder")):
+    with _patch_pipeline(StubOCRPipeline(markdown_text="# placeholder")):
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     update_extraction(conn, r.doc_id, status="ok", llm_duration_s=0.1,
         error_message=None,
@@ -359,25 +359,25 @@ def test_stats(archive_root, conn, sample_pdf):
     assert "2025-03" in s.by_sign_month
 
 
-def test_re_extract_does_not_rerun_mineru(
+def test_re_extract_does_not_rerun_ocr(
     archive_root, conn, sample_pdf, sample_markdown
 ):
-    """re_extract 应该只更新抽取字段，mineru_duration_s 保持原值。"""
-    with _patch_pipeline(StubMineruPipeline(markdown_text=sample_markdown)):
+    """re_extract 应该只更新抽取字段，ocr_duration_s 保持原值。"""
+    with _patch_pipeline(StubOCRPipeline(markdown_text=sample_markdown)):
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     orig = get_document(conn, r.doc_id)
 
-    # 即使把 stub 改了，re_extract 不会再调 MinerU
-    with patch("contract_archive.archive.ingest.MinerUPipeline", side_effect=AssertionError("should not be called")):
+    # 即使把 stub 改了，re_extract 不会再调 OCR
+    with patch("contract_archive.archive.ingest.OCRPipeline", side_effect=AssertionError("should not be called")):
         re_extract(r.doc_id, archive_root, conn, llm_enabled=False)
 
     after = get_document(conn, r.doc_id)
-    assert after.mineru_duration_s == orig.mineru_duration_s
+    assert after.ocr_duration_s == orig.ocr_duration_s
     assert after.contract_name == orig.contract_name
 
 
 def test_delete_removes_db_row(archive_root, conn, sample_pdf, sample_markdown):
-    with _patch_pipeline(StubMineruPipeline(markdown_text=sample_markdown)):
+    with _patch_pipeline(StubOCRPipeline(markdown_text=sample_markdown)):
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     output_dir = delete_document(conn, r.doc_id)
     assert output_dir
@@ -403,7 +403,7 @@ def test_show_ident_sha_prefix(archive_root, conn, sample_pdf, sample_markdown):
     from contract_archive.archive import find_by_sha_prefix
     from contract_archive.cli_render import row_to_dict
 
-    with _patch_pipeline(StubMineruPipeline(markdown_text=sample_markdown)):
+    with _patch_pipeline(StubOCRPipeline(markdown_text=sample_markdown)):
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
 
     matches = find_by_sha_prefix(conn, r.sha256[:8])
@@ -433,14 +433,14 @@ def test_show_ident_sha_prefix(archive_root, conn, sample_pdf, sample_markdown):
 
 
 def test_raw_prints_ocr_text(archive_root, conn, sample_pdf, sample_markdown):
-    """raw 命令把 MinerU OCR 原文（raw_text.txt）打到 stdout，与 show 互补。"""
+    """raw 命令把 OCR 原文（raw_text.txt）打到 stdout，与 show 互补。"""
     from typer.testing import CliRunner
 
     from contract_archive.archive import checkpoint
     from contract_archive.cli import app
 
     marker = "原始OCR文本·违约金不超过合同总金额的20%"
-    with _patch_pipeline(StubMineruPipeline(markdown_text=sample_markdown, raw_text=marker)):
+    with _patch_pipeline(StubOCRPipeline(markdown_text=sample_markdown, raw_text=marker)):
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     checkpoint(conn)  # 刷 WAL，让 raw 命令的独立连接能读到刚写入的行
 
@@ -472,7 +472,7 @@ def test_raw_color_modes(archive_root, conn, sample_pdf):
 
     party = "示例置业有限公司"
     raw_text = f"甲方：{party}\n乙方：张三\n签订日期：2025年3月15日"
-    with _patch_pipeline(StubMineruPipeline(markdown_text="# x", raw_text=raw_text)):
+    with _patch_pipeline(StubOCRPipeline(markdown_text="# x", raw_text=raw_text)):
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     # 灌可控字段：party_a 原样在原文出现 → 应青色高亮；sign_date 是 ISO 规范化，
     # 原文写法 '2025年3月15日' 不同 → substring 命不中 → 不该被误标日期色。
@@ -512,7 +512,7 @@ def test_obligations_storage_and_filter(archive_root, conn, sample_pdf):
         ContractExtraction, ExtractionConfidence, ObligationItem
     )
 
-    with _patch_pipeline(StubMineruPipeline(markdown_text="# placeholder")):
+    with _patch_pipeline(StubOCRPipeline(markdown_text="# placeholder")):
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
 
     obls = [
@@ -592,7 +592,7 @@ def test_seals_and_subjects_storage_search_cascade(archive_root, conn, sample_pd
         ContractExtraction, DocumentExtraction, ExtractionConfidence, Seal
     )
 
-    with _patch_pipeline(StubMineruPipeline(markdown_text="# placeholder")):
+    with _patch_pipeline(StubOCRPipeline(markdown_text="# placeholder")):
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
 
     env = DocumentExtraction(
@@ -682,9 +682,9 @@ def test_search_seal_subject_combined_param_order(archive_root, conn, sample_pdf
     pdf2.parent.mkdir(parents=True, exist_ok=True)
     pdf2.write_bytes(b"%PDF-1.4 plain\n" + b"z" * 1500)
 
-    with _patch_pipeline(StubMineruPipeline(markdown_text="# placeholder")):
+    with _patch_pipeline(StubOCRPipeline(markdown_text="# placeholder")):
         r1 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)   # 有章+主体
-    with _patch_pipeline(StubMineruPipeline(markdown_text="# placeholder")):
+    with _patch_pipeline(StubOCRPipeline(markdown_text="# placeholder")):
         r2 = ingest_pdf(pdf2, archive_root, conn, llm_enabled=False)         # 无章
 
     obl = [ObligationItem(actor="party_b", action="支付定金", deadline="2026-06-01")]

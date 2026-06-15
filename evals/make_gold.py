@@ -54,8 +54,8 @@ REVIEW_TEMPLATE = """# DRAFT case 人工核对清单（{doc_id}）
 def iter_archive_docs(
     archive_dir: Path, only: Optional[str]
 ) -> list[tuple[str, Path, Path, Path]]:
-    """列出 archive 里有 mineru/ + extraction_result.json 的文档
-    → (doc_id, doc_dir, mineru_dir, result_json)。"""
+    """列出 archive 里有 ocr/ + extraction_result.json 的文档
+    → (doc_id, doc_dir, ocr_dir, result_json)。"""
     docs_dir = archive_dir / "documents"
     out: list[tuple[str, Path, Path, Path]] = []
     if not docs_dir.is_dir():
@@ -63,9 +63,9 @@ def iter_archive_docs(
     for d in sorted(p for p in docs_dir.iterdir() if p.is_dir()):
         if only and d.name != only:
             continue
-        mineru, result = d / "mineru", d / "extraction_result.json"
-        if mineru.is_dir() and result.exists():
-            out.append((d.name, d, mineru, result))
+        ocr, result = d / "ocr", d / "extraction_result.json"
+        if ocr.is_dir() and result.exists():
+            out.append((d.name, d, ocr, result))
     return out
 
 
@@ -143,14 +143,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     docs = iter_archive_docs(archive_dir, args.doc_id)
     if not docs:
-        print(f"⚠️  {archive_dir}/documents 下没有可用文档（需含 mineru/ + extraction_result.json）")
+        print(f"⚠️  {archive_dir}/documents 下没有可用文档（需含 ocr/ + extraction_result.json）")
         return 1
 
     print(f"archive: {archive_dir}　待处理 {len(docs)} 个文档　→ 输出到 {dataset_dir}/extraction（私有，不脱敏）\n")
-    for doc_id, doc_dir, mineru_dir, result_path in docs:
-        raw_text = load_document_text(mineru_dir)
+    for doc_id, doc_dir, ocr_dir, result_path in docs:
+        raw_text = load_document_text(ocr_dir)
         if not raw_text.strip():
-            print(f"  跳过 {doc_id}：mineru 文本为空")
+            print(f"  跳过 {doc_id}：OCR 文本为空")
             continue
         gold = json.loads(result_path.read_text(encoding="utf-8"))
         gold["llm_model"] = None  # gold 不带抽取来源

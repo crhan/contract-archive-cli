@@ -21,7 +21,7 @@
   cli_query.py    只读命令：list/search/show/raw/stats/todo/seals
   cli.py（本文件）写命令：ingest/extract/delete/vacuum + 组装 sub-app 与 introspection
 
-ingest 留在本模块（而非 cli_query）有硬约束：测试用 monkeypatch.setattr(cli, "MinerUPipeline"/
+ingest 留在本模块（而非 cli_query）有硬约束：测试用 monkeypatch.setattr(cli, "OCRPipeline"/
 "ingest_pdf") 打桩，命令体必须引用本模块全局名才能让桩生效——别图整齐把它挪走。
 """
 from __future__ import annotations
@@ -46,7 +46,7 @@ from .archive import (
 )
 from .archive.paths import sha256_of_file
 from .archive.repository import find_by_sha
-from .pipelines import MinerUPipeline
+from .pipelines import OCRPipeline
 from .cli_config import config_app
 from .cli_introspect import register as register_introspect
 from .cli_party import party_app
@@ -140,8 +140,8 @@ def ingest(
         raise typer.Exit(0)
 
     err_console.print(f"[cyan]found {len(pdfs)} PDF(s); archive={paths.root}[/cyan]")
-    # 复用一个 OCR pipeline 实例（避免每次重新加载模型）
-    pipeline = MinerUPipeline(allow_vl_fallback=not no_llm)
+    # 复用一个 OCR pipeline 实例。
+    pipeline = OCRPipeline()
 
     results: list[dict] = []
     try:
@@ -162,7 +162,7 @@ def ingest(
                 summary["failed"] += 1
                 fail_dict = {
                     "pdf_path": str(pdf), "sha256": None, "status": "failed",
-                    "doc_id": None, "mineru_duration_s": None, "llm_duration_s": None,
+                    "doc_id": None, "ocr_duration_s": None, "llm_duration_s": None,
                     "error_message": str(e),
                     "error": classify_exception(e).model_dump(),
                     "skipped_reason": None,
@@ -216,7 +216,7 @@ def _print_ingest_result(r) -> None:
     color = {"ok": "green", "partial": "yellow", "failed": "red", "skipped": "blue"}.get(
         r.status, "white"
     )
-    ocr_s = f"{r.mineru_duration_s:.1f}s" if r.mineru_duration_s is not None else "-"
+    ocr_s = f"{r.ocr_duration_s:.1f}s" if r.ocr_duration_s is not None else "-"
     llm_s = f"{r.llm_duration_s:.1f}s" if r.llm_duration_s is not None else "-"
     msg = (
         f"[{color}]{r.status:8s}[/{color}] id={r.doc_id} "

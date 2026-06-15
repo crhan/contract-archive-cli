@@ -1,7 +1,7 @@
 """
 ingest 的 Agent-Ready 选项单测：--dry-run / --max-files / --progress ndjson。
 
-dry-run 与 max-files 真跑（不调 MinerU/LLM）；ndjson 模式 mock ingest_pdf 验证事件流格式。
+dry-run 与 max-files 真跑（不调 OCR/LLM）；ndjson 模式 mock ingest_pdf 验证事件流格式。
 """
 import json
 from pathlib import Path
@@ -55,13 +55,13 @@ def test_progress_ndjson_emits_stream(tmp_path, monkeypatch):
     _make_pdfs(src, 2)
     arch = tmp_path / "arch"
 
-    # 不真加载 MinerU 模型、不真跑解析。
-    monkeypatch.setattr(climod, "MinerUPipeline", lambda **kw: object())
+    # 不真加载 OCR 模型、不真跑解析。
+    monkeypatch.setattr(climod, "OCRPipeline", lambda **kw: object())
 
     def fake_ingest(pdf, paths, conn, **kw):
         return IngestResult(
             pdf_path=pdf, sha256="sha_" + pdf.stem, status="ok", doc_id=1,
-            mineru_duration_s=0.1, llm_duration_s=0.1,
+            ocr_duration_s=0.1, llm_duration_s=0.1,
         )
 
     monkeypatch.setattr(climod, "ingest_pdf", fake_ingest)

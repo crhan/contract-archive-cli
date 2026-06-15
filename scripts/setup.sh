@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 一键安装脚本（macOS / Linux 通用）
-# uv 管理 venv + 依赖；MinerU 走 optional extras（体积大 >1GB）
+# uv 管理 venv + 依赖
 
 set -euo pipefail
 
@@ -25,19 +25,8 @@ if [[ ! -f .env ]]; then
 fi
 
 # 3) 安装依赖
-# base = 只装核心（pydantic/typer/dashscope SDK），可跑 extract / list / search / show；
-# mineru = 加装 MinerU（>1GB，首次跑 ingest 时还会下模型）
-EXTRAS="${1:-mineru}"
-echo "[setup] uv sync --extra $EXTRAS"
-case "$EXTRAS" in
-    base)        uv sync ;;
-    mineru)      uv sync --extra mineru ;;
-    *)
-        echo "unknown extras: $EXTRAS"
-        echo "可选：base (DB+抽取，无 OCR) / mineru (含 MinerU OCR)"
-        exit 2
-        ;;
-esac
+echo "[setup] uv sync"
+uv sync
 
 echo "[setup] done. venv at .venv"
 echo "[setup] 试运行：uv run contract-archive --help"

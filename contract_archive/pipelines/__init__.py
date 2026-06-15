@@ -1,9 +1,8 @@
 """
 OCR Pipelines.
 
-历史：原本有 dashscope/paddleocr/mineru 三路 + 简单工厂 get_pipeline。
-重构后只保留 MinerU 一路，工厂消失，使用方直接 import MinerUPipeline。
+当前只保留一个归一化入口：native PDF text layer + DashScope VL OCR。
 """
-from .mineru_pipeline import MinerUPipeline
+from .ocr_pipeline import OCRPipeline
 
-__all__ = ["MinerUPipeline"]
+__all__ = ["OCRPipeline"]

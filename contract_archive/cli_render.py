@@ -87,7 +87,7 @@ def ingest_result_to_dict(r) -> dict:
         "sha256": r.sha256,
         "status": r.status,
         "doc_id": r.doc_id,
-        "mineru_duration_s": r.mineru_duration_s,
+        "ocr_duration_s": r.ocr_duration_s,
         "llm_duration_s": r.llm_duration_s,
         "error_message": r.error_message,
         # 结构化错误（code/category/retryable）；成功/跳过为 None。供 Agent 判可否重试。
@@ -224,7 +224,7 @@ def _show_header_rows(
         table.add_row("[red]source_pdf[/red]", f"{source['path']} [red](留档文件丢失)[/red]")
     table.add_row("archive_dir", str(archived_doc_dir(row, archive_root)))
     table.add_row("ingested_at", local_time(row.ingested_at))
-    # mineru_s/llm_s（执行耗时）是运维遥测，不属于档案内容——不在 show 展示。
+    # ocr_s/llm_s（执行耗时）是运维遥测，不属于档案内容——不在 show 展示。
     if row.error_message:
         table.add_row("[red]error[/red]", row.error_message)
 

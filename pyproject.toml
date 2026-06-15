@@ -8,8 +8,7 @@ license = { text = "MIT" }
 authors = [{ name = "crhan" }]
 
 # ===== 基础依赖 =====
-# dashscope 是合同字段抽取（qwen3.7-max LLM）的强依赖，纯 HTTP SDK ~200KB，放进 base
-# mineru 体积大（含模型），仍走 optional-dependencies，按需 `uv sync --extra mineru`
+# dashscope 是字段抽取与 VL OCR 的强依赖，纯 HTTP SDK ~200KB，放进 base
 dependencies = [
     "pydantic>=2.6",
     "python-dotenv>=1.0",
@@ -30,14 +29,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# MinerU 3.x —— 体积大（>1GB 模型），按需 `uv sync --extra mineru` 安装
-mineru = [
-    "mineru[core]>=3.1,<4.0",
-    # mineru 自身漏声明：pipeline backend 的 unet 表格识别 import scipy.spatial.distance
-    # （mineru/model/table/rec/unet_table/utils_table_line_rec.py），缺则 mineru 子进程直接退出
-    "scipy>=1.10",
-]
-
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",

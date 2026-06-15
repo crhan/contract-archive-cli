@@ -104,7 +104,7 @@ def test_single_page_failure_is_isolated_and_marked(monkeypatch):
 
 
 def test_all_pages_fail_returns_none(monkeypatch):
-    """全部页失败 -> None，让调用方回退 MinerU。"""
+    """全部页失败 -> None，让调用方决定失败处理。"""
     _install_fake_openai(monkeypatch, [RuntimeError("x"), RuntimeError("y")])
     assert vl_ocr.ocr_pdf_images_with_vl([Path("a"), Path("b")]) is None
 

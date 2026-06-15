@@ -4,7 +4,7 @@
 模块结构：
 - db.py         连接 / PRAGMA / migrations 引擎
 - repository.py DAO（CRUD + search + stats）
-- ingest.py     单 PDF 入库流水线（hash → MinerU → extract → rename → DB）
+- ingest.py     单 PDF 入库流水线（hash → OCR → extract → rename → DB）
 - paths.py      档案库路径约定 + 硬链接/拷贝工具
 """
 from .db import checkpoint, open_archive_db, transaction, utc_now_iso

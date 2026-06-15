@@ -1,6 +1,6 @@
 """
-出处页码校正的纯逻辑测试：用 content_list 的 page_idx 覆盖 LLM 猜的页码。
-不联网——构造 blocks / 临时 content_list.json 验证反查与重写。
+出处页码校正的纯逻辑测试：用 layout 的 page_idx 覆盖 LLM 猜的页码。
+不联网——构造 blocks / 临时 layout.json 验证反查与重写。
 """
 from __future__ import annotations
 
@@ -64,17 +64,18 @@ def test_unmatched_fragment_keeps_original_page():
     assert _correct_evidence(ev, _BLOCKS) == ev
 
 
-def test_correct_evidence_pages_no_content_list_returns_false(tmp_path):
+def test_correct_evidence_pages_no_layout_returns_false(tmp_path):
     env = DocumentExtraction(amounts=[LabeledAmount(label="x", text="1", evidence="第1页 + y")])
     assert correct_evidence_pages(env, tmp_path) is False
 
 
 def test_correct_evidence_pages_end_to_end(tmp_path):
-    """端到端：造 content_list.json，校正 amounts 与 completeness issue 的页码。"""
-    auto = tmp_path / "_mineru_raw" / "doc" / "auto"
-    auto.mkdir(parents=True)
-    (auto / "doc_content_list.json").write_text(
-        json.dumps([{"text": t, "page_idx": p} for t, p in _BLOCKS], ensure_ascii=False),
+    """端到端：造 layout.json，校正 amounts 与 completeness issue 的页码。"""
+    (tmp_path / "layout.json").write_text(
+        json.dumps(
+            [{"text": t, "bbox": {"page": p, "x0": 0, "y0": 0, "x1": 1, "y1": 1}} for t, p in _BLOCKS],
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     env = DocumentExtraction(

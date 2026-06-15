@@ -79,7 +79,7 @@ class Table(BaseModel):
 
     page: int
     bbox: Optional[BBox] = None
-    html: Optional[str] = None  # PP-StructureV3/MinerU 都能直接给
+    html: Optional[str] = None
     cells: list[TableCell] = Field(default_factory=list)
     n_rows: int = 0
     n_cols: int = 0
@@ -120,7 +120,7 @@ class StructuredDocument(BaseModel):
 
 
 class PipelineMeta(BaseModel):
-    pipeline_name: Literal["mineru"]
+    pipeline_name: Literal["ocr"]
     pipeline_version: str = ""
     model: str = ""
     device: str = "cpu"
@@ -129,8 +129,8 @@ class PipelineMeta(BaseModel):
     finished_at: datetime
     duration_seconds: float
     notes: str = ""
-    # 页级分流摘要：{"total","text_pages","ocr_pages","table_pages"}。混合提取/原生快路径
-    # 才填；MinerU CLI 整份路径留空（其内部分流不归我们统计）。供评测/调试看一份文档怎么被分流。
+    # 页级分流摘要：{"total","text_pages","ocr_pages","table_pages"}。
+    # 供评测/调试看一份文档怎么被分流。
     page_routing: dict[str, int] = Field(default_factory=dict)
 
 
@@ -253,7 +253,7 @@ class LabeledDate(BaseModel):
 
 class Seal(BaseModel):
     """
-    印章（红章）。来源是 MinerU 检测+OCR 的盖章文字，质量参差：
+    印章（红章）。来源是 OCR/视觉核查的盖章文字，质量参差：
     清晰的能给出主体+章类型（"XX有限公司 合同专用章"），残缺的可能只剩单字。
     不强求拆出编号——OCR 残字硬塞编号是幻觉，宁可只留 raw_text。
     """

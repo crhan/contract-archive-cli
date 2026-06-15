@@ -1,15 +1,13 @@
 """
 多模态签章核查：对落款页图像调 qwen-vl，确证每个落款区甲/乙方的盖章/签字有无。
 
-为什么要看图：MinerU 把落款签章区当 image 抠出，手写签字和红章都没被 OCR 成文字
-（layout 也无 signature/stamp 类型）——纯文本判签章既会误报（签了但读不到）又会漏判。
-只有看图才能确证。文本抽取负责要素核查，签章核查交这里。
+为什么要看图：手写签字和红章经常不会出现在 OCR 文本里。纯文本判签章既会误报
+（签了但读不到）又会漏判。文本抽取负责要素核查，签章核查交这里。
 
-降级：无落款页图 / 无 key / VL 调用失败时，调用方保留原文本签章判断（不破坏 --no-llm）。
+降级：无落款页图 / 无 key / VL 调用失败时，调用方保留原文本签章判断。
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 from pathlib import Path
@@ -20,10 +18,12 @@ from ..schemas import (
     Completeness,
     CompletenessIssue,
     DocumentExtraction,
+    FILE_RAW_TEXT,
     LabeledValue,
     PersonIdentity,
+    PREVIEW_DIR,
 )
-from ..utils import encode_image_data_uri
+from ..utils import encode_image_data_uri, inspect_pdf_pages, render_pdf_to_images
 from .llm_extractor import _parse_json_loose
 
 logger = logging.getLogger(__name__)
@@ -66,34 +66,57 @@ VL_PROMPT = """你是严谨的合同签章核查员。下面是合同的落款/�
 # 落款页标志词：只在签署区出现、正文罕见。不用"盖章"——正文常提"加盖公章"会误判整页。
 # "签章"覆盖"甲方(签章)"式落款；"委托代理人/经办人"覆盖认购等用"买受人/出卖人"的落款。
 _SIGN_PAGE_MARKERS = ("签章", "委托代理人", "经办人")
+_PAGE_HEADING_RE = re.compile(r"^##\s*第\s*(\d+)\s*页", re.MULTILINE)
 
 
-def locate_signature_pages(mineru_dir: Path, max_pages: int = 4) -> list[Path]:
-    """从 MinerU content_list 找落款页（含签章/委托代理人等标志词），映射到 preview_images/page_NNN.png。"""
-    preview = mineru_dir / "preview_images"
-    if not preview.is_dir():
-        return []
-    content_lists = list(mineru_dir.glob("_mineru_raw/*/auto/*_content_list.json"))
-    if not content_lists:
-        return []
-    try:
-        items = json.loads(content_lists[0].read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning("读取 content_list 失败: %s", e)
-        return []
-    page_idxs = sorted({
-        it["page_idx"]
-        for it in items
-        if isinstance(it, dict)
-        and it.get("page_idx") is not None
-        and any(m in str(it.get("text", "")) for m in _SIGN_PAGE_MARKERS)
-    })
+def locate_signature_pages(ocr_dir: Path, max_pages: int = 4) -> list[Path]:
+    """定位落款页预览图：优先文本页标题标记，退到文档尾页。"""
+    preview = ocr_dir / PREVIEW_DIR
+    preview.mkdir(parents=True, exist_ok=True)
+    _ensure_tail_previews(ocr_dir, preview, max_pages)
+
+    page_idxs = _signature_page_idxs_from_text(ocr_dir)
     out: list[Path] = []
-    for idx in page_idxs[:max_pages]:
+    for idx in page_idxs:
         img = preview / f"page_{idx + 1:03d}.png"
         if img.exists():
             out.append(img)
-    return out
+    if out:
+        return out[:max_pages]
+    return sorted(preview.glob("page_*.png"))[-max_pages:]
+
+
+def _ensure_tail_previews(ocr_dir: Path, preview: Path, max_pages: int) -> None:
+    if any(preview.glob("page_*.png")):
+        return
+    source_pdf = ocr_dir.parent / "source.pdf"
+    if not source_pdf.exists():
+        return
+    try:
+        page_infos = inspect_pdf_pages(source_pdf)
+        start = max(0, len(page_infos) - max_pages)
+        render_pdf_to_images(source_pdf, preview, dpi=160, pages=list(range(start, len(page_infos))))
+    except Exception as e:  # noqa: BLE001 - 签章预览是可选增强，失败即降级
+        logger.warning("渲染落款候选页失败: %s", e)
+
+
+def _signature_page_idxs_from_text(ocr_dir: Path) -> list[int]:
+    raw = ocr_dir / FILE_RAW_TEXT
+    if not raw.exists():
+        return []
+    try:
+        text = raw.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    matches = list(_PAGE_HEADING_RE.finditer(text))
+    page_idxs: list[int] = []
+    for i, match in enumerate(matches):
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        body = text[start:end]
+        if any(marker in body for marker in _SIGN_PAGE_MARKERS):
+            page_idxs.append(int(match.group(1)) - 1)
+    return sorted(set(idx for idx in page_idxs if idx >= 0))
 
 
 def _call_vl(
@@ -352,7 +375,7 @@ def _signatory_mismatch_issues(env: DocumentExtraction, parsed: dict) -> list[Co
     return issues
 
 
-def augment_completeness_with_vision(env: DocumentExtraction, mineru_dir: Path) -> bool:
+def augment_completeness_with_vision(env: DocumentExtraction, ocr_dir: Path) -> bool:
     """
     用 VL 看落款页重判签章：替换 env.completeness 的 signature 类 issues（保留 field/amount），
     并把读出的印章绑定到头部主体（供 known_parties 跨合同核对章号一致性）。
@@ -362,7 +385,7 @@ def augment_completeness_with_vision(env: DocumentExtraction, mineru_dir: Path) 
     """
     if env.doc_type != "合同协议":
         return False
-    images = locate_signature_pages(mineru_dir)
+    images = locate_signature_pages(ocr_dir)
     if not images:
         logger.info("未定位到落款页图，跳过 VL 签章核查")
         return False

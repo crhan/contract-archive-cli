@@ -29,13 +29,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from ..errors import ErrorInfo, classify_exception, extract_empty, mineru_failed
+from ..errors import ErrorInfo, classify_exception, extract_empty, ocr_failed
 from ..extraction import extract_contract, extract_document
 from ..extraction.agent_fallback import escalate_low_confidence
 from ..extraction.doc_type_handlers import get_handler
 from ..extraction.evidence_page_fix import correct_evidence_pages
 from ..extraction.fusion import DEFAULT_FUSION_THRESHOLD, run_vision_fusion
-from ..pipelines import MinerUPipeline
+from ..pipelines import OCRPipeline
 from ..schemas import (
     FILE_EXTRACTION,
     FILE_EXTRACTION_CONF,
@@ -74,7 +74,7 @@ class IngestResult:
     sha256: str
     status: str               # ok | partial | failed | skipped
     doc_id: Optional[int]     # 写入/已存在的 documents.id
-    mineru_duration_s: Optional[float] = None
+    ocr_duration_s: Optional[float] = None
     llm_duration_s: Optional[float] = None
     error_message: Optional[str] = None        # 人类可读错误（同时写入 DB documents.error_message）
     error: Optional[ErrorInfo] = None          # 结构化错误（仅 CLI --format json 输出，不入库）
@@ -104,7 +104,7 @@ def _run_extraction(
     """
     if not llm_enabled:
         # 无 LLM：rule 抽取自 Phase 2 已退役，extract_contract(llm_enabled=False) 返回空对象——
-        # 即 --no-llm 下抽取字段留空（仅 MinerU 产物入库），可后续 `extract <id>` 补抽。
+        # 即 --no-llm 下抽取字段留空（仅 OCR 产物入库），可后续 `extract <id>` 补抽。
         ext, conf = extract_contract(document_text, llm_enabled=False)
         return ext, conf, contract_to_envelope(ext)
 
@@ -120,7 +120,7 @@ def _run_extraction(
     return ContractExtraction(), conf, envelope
 
 
-def run_full_extraction(document_text: str, mineru_dir: Path) -> DocumentExtraction:
+def run_full_extraction(document_text: str, ocr_dir: Path) -> DocumentExtraction:
     """跑完整抽取链路（类型路由 + 特化 + 通用后处理 + 多源融合），**不落库**——供评测/复用。
 
     与 ingest 的抽取段同源：_run_extraction（类型路由+特化）→ 类型专属后处理（签章等）
@@ -130,14 +130,14 @@ def run_full_extraction(document_text: str, mineru_dir: Path) -> DocumentExtract
     _, _, envelope = _run_extraction(document_text, llm_enabled=True)
     for pp in get_handler(envelope.doc_type).post_processors:
         try:
-            pp(envelope, mineru_dir)
+            pp(envelope, ocr_dir)
         except Exception as e:  # noqa: BLE001 — 专属后处理失败不影响其余
             logger.warning("post:%s 跳过（异常）: %s", getattr(pp, "__name__", pp), e)
     try:
-        correct_evidence_pages(envelope, mineru_dir)
+        correct_evidence_pages(envelope, ocr_dir)
     except Exception as e:  # noqa: BLE001
         logger.warning("page-fix 跳过（异常）: %s", e)
-    _maybe_run_vision_fusion(envelope, document_text, mineru_dir, logger.info)
+    _maybe_run_vision_fusion(envelope, document_text, ocr_dir, logger.info)
     return envelope
 
 
@@ -164,15 +164,15 @@ def _fusion_threshold() -> float:
         return DEFAULT_FUSION_THRESHOLD
 
 
-def _select_fusion_images(mineru_dir: Path) -> dict[int, Path]:
+def _select_fusion_images(ocr_dir: Path) -> dict[int, Path]:
     """选 vision 融合要看的页图：优先表格页、其次扫描页（高价值表格/扫描所在），映射到 preview 图。
 
     据 source.pdf 的 classify_pages 复用页级分流选页；上限 _vision_fusion_max_pages 防超大文档
     烧太多看图调用（截断记日志，不静默）。无 source.pdf / 无 preview 图 / 无表格扫描页 → 空（退文本路）。
     返回 {1-based 页号: 页图路径}。
     """
-    source_pdf = mineru_dir.parent / "source.pdf"
-    preview_dir = mineru_dir / PREVIEW_DIR
+    source_pdf = ocr_dir.parent / "source.pdf"
+    preview_dir = ocr_dir / PREVIEW_DIR
     if not source_pdf.exists():
         return {}
     try:
@@ -203,8 +203,8 @@ def _select_fusion_images(mineru_dir: Path) -> dict[int, Path]:
             out[idx + 1] = img  # render_pdf_to_images 用 1-based page_NNN 命名
         else:
             missing.append(idx)
-    # native-text 快路（ocr_pages==0）下 MinerU 在渲染 preview 前就返回，preview 为空——
-    # 纯文本保险单的封面/选中页拿不到图。按需只补渲这几页（不重渲整份），让 vision 融合照常工作。
+    # native-text 快路不会主动渲染 preview。按需只补渲选中页（不重渲整份），
+    # 让 vision 融合照常工作。
     if missing:
         try:
             for pg in render_pdf_to_images(source_pdf, preview_dir, pages=missing):
@@ -218,7 +218,7 @@ def _select_fusion_images(mineru_dir: Path) -> dict[int, Path]:
 def _maybe_run_vision_fusion(
     envelope: DocumentExtraction,
     document_text: str,
-    mineru_dir: Path,
+    ocr_dir: Path,
     log: Callable[[str], None],
     confidence: Optional[ExtractionConfidence] = None,
 ) -> None:
@@ -234,7 +234,7 @@ def _maybe_run_vision_fusion(
         return
     threshold = _fusion_threshold()
     try:
-        images = _select_fusion_images(mineru_dir)
+        images = _select_fusion_images(ocr_dir)
         if run_vision_fusion(
             envelope,
             document_text,
@@ -256,7 +256,7 @@ def _maybe_run_vision_fusion(
     if confidence is not None:
         confidence.overall = conf
     if conf < threshold:
-        escalate_low_confidence(envelope, source_pdf=str(mineru_dir.parent / "source.pdf"))
+        escalate_low_confidence(envelope, source_pdf=str(ocr_dir.parent / "source.pdf"))
 
 
 def _ensure_archived_source(paths: ArchivePaths, sha: str, pdf_path: Path) -> Path:
@@ -282,7 +282,7 @@ def ingest_pdf(
     *,
     reingest: bool = False,
     llm_enabled: bool = True,
-    pipeline: Optional[MinerUPipeline] = None,
+    pipeline: Optional[OCRPipeline] = None,
 ) -> IngestResult:
     """
     单 PDF 入库。
@@ -292,7 +292,7 @@ def ingest_pdf(
     :param conn: 已打开 + 已 migrate 的 sqlite3 连接
     :param reingest: True 时即使 sha256 已存在也强制重跑
     :param llm_enabled: False 时只跑 rule 抽取
-    :param pipeline: 可注入的 MinerUPipeline 实例（复用模型加载，批量场景必传）
+    :param pipeline: 可注入的 OCRPipeline 实例（复用模型加载，批量场景必传）
     """
     pdf_path = pdf_path.resolve()
     if not pdf_path.is_file():
@@ -332,7 +332,7 @@ def ingest_pdf(
     tmp_doc_dir = paths.tmp_dir / sha_short
     safe_rmtree(tmp_doc_dir)
     tmp_doc_dir.mkdir(parents=True, exist_ok=True)
-    mineru_dir = tmp_doc_dir / "mineru"
+    ocr_dir = tmp_doc_dir / "ocr"
 
     # 单合同 stderr 日志（plain text），与档案库总 jsonl 互补
     log_path = tmp_doc_dir / "ingest.log"
@@ -341,7 +341,7 @@ def ingest_pdf(
     link_strategy = link_or_copy(pdf_path, tmp_doc_dir / "source.pdf")
     log_handle.write(f"[source.pdf] {link_strategy}ed from {pdf_path}\n")
 
-    mineru_duration: Optional[float] = None
+    ocr_duration: Optional[float] = None
     llm_duration: Optional[float] = None
     extraction: Optional[ContractExtraction] = None
     confidence: Optional[ExtractionConfidence] = None
@@ -352,14 +352,14 @@ def ingest_pdf(
 
     try:
         # ---- 1. OCR 解析 ----
-        pl = pipeline or MinerUPipeline(allow_vl_fallback=llm_enabled)
+        pl = pipeline or OCRPipeline()
         t0 = time.perf_counter()
         try:
-            pl.run(pdf_path, mineru_dir)
-            mineru_duration = time.perf_counter() - t0
-            log_handle.write(f"\n[ocr] OK in {mineru_duration:.2f}s\n")
+            pl.run(pdf_path, ocr_dir)
+            ocr_duration = time.perf_counter() - t0
+            log_handle.write(f"\n[ocr] OK in {ocr_duration:.2f}s\n")
         except Exception as e:
-            mineru_duration = time.perf_counter() - t0
+            ocr_duration = time.perf_counter() - t0
             status = "failed"
             error_message = f"ocr: {e}"
             log_handle.write(f"\n[ocr] FAILED: {error_message}\n")
@@ -372,15 +372,15 @@ def ingest_pdf(
                 tmp_doc_dir=tmp_doc_dir,
                 log_handle=log_handle,
                 existing_id=existing_id,
-                mineru_duration=mineru_duration,
+                ocr_duration=ocr_duration,
                 error_message=error_message,
-                error=mineru_failed(str(e)),
+                error=ocr_failed(str(e)),
             )
 
-        # ---- 2. 抽取（基于 mineru 产物的 raw_text.txt 优先） ----
-        document_text = load_document_text(mineru_dir)
+        # ---- 2. 抽取（基于 OCR 产物的 raw_text.txt 优先） ----
+        document_text = load_document_text(ocr_dir)
         if not document_text:
-            log_handle.write("\n[extract] WARNING: no text found in mineru output\n")
+            log_handle.write("\n[extract] WARNING: no text found in OCR output\n")
         t1 = time.perf_counter()
         try:
             extraction, confidence, envelope = _run_extraction(
@@ -424,15 +424,15 @@ def ingest_pdf(
         if status != "failed" and llm_enabled:
             for pp in get_handler(envelope.doc_type).post_processors:
                 try:
-                    if pp(envelope, mineru_dir):
+                    if pp(envelope, ocr_dir):
                         log_handle.write(f"[post:{pp.__name__}] 完成\n")
                 except Exception as e:  # noqa: BLE001 — 专属后处理失败不能中断入库
                     log_handle.write(f"[post:{pp.__name__}] 跳过（异常）: {e}\n")
 
-            # ---- 2.6 出处页码校正（通用，类型无关）：用 content_list 的 page_idx 覆盖 LLM 猜的页码 ----
+            # ---- 2.6 出处页码校正（通用，类型无关）：用 layout 页码覆盖 LLM 猜的页码 ----
             try:
-                if correct_evidence_pages(envelope, mineru_dir):
-                    log_handle.write("[page-fix] 出处页码已据 content_list 校正\n")
+                if correct_evidence_pages(envelope, ocr_dir):
+                    log_handle.write("[page-fix] 出处页码已据 layout 校正\n")
             except Exception as e:  # noqa: BLE001 — 页码校正失败不能中断入库
                 log_handle.write(f"[page-fix] 跳过（异常）: {e}\n")
 
@@ -454,7 +454,7 @@ def ingest_pdf(
 
             # ---- 2.8 多源融合（仅 enable_vision_fusion 的类型，如保险）：A文本/C看图评判 → sidecar ----
             _maybe_run_vision_fusion(
-                envelope, document_text, mineru_dir,
+                envelope, document_text, ocr_dir,
                 lambda m: log_handle.write(m + "\n"), confidence,
             )
 
@@ -484,7 +484,7 @@ def ingest_pdf(
                 source_path=str(pdf_path),
                 output_dir=str(final_doc_dir),
                 status=status,
-                mineru_duration_s=mineru_duration,
+                ocr_duration_s=ocr_duration,
                 llm_duration_s=llm_duration,
                 error_message=error_message,
                 extraction=extraction,
@@ -500,7 +500,7 @@ def ingest_pdf(
                 source_path=str(pdf_path),
                 output_dir=str(final_doc_dir),
                 status=status,
-                mineru_duration_s=mineru_duration,
+                ocr_duration_s=ocr_duration,
                 llm_duration_s=llm_duration,
                 error_message=error_message,
                 extraction=extraction,
@@ -524,7 +524,7 @@ def ingest_pdf(
                 "sha": sha,
                 "doc_id": doc_id,
                 "status": status,
-                "mineru_s": mineru_duration,
+                "ocr_s": ocr_duration,
                 "llm_s": llm_duration,
                 "error": error_message,
             },
@@ -535,7 +535,7 @@ def ingest_pdf(
             sha256=sha,
             status=status,
             doc_id=doc_id,
-            mineru_duration_s=mineru_duration,
+            ocr_duration_s=ocr_duration,
             llm_duration_s=llm_duration,
             error_message=error_message,
             error=error_info,
@@ -556,7 +556,7 @@ def _commit_failed(
     tmp_doc_dir: Path,
     log_handle,
     existing_id: Optional[int],
-    mineru_duration: Optional[float],
+    ocr_duration: Optional[float],
     error_message: str,
     error: Optional[ErrorInfo] = None,
 ) -> IngestResult:
@@ -604,7 +604,7 @@ def _commit_failed(
             source_path=str(pdf_path),
             output_dir=output_dir,
             status="failed",
-            mineru_duration_s=mineru_duration,
+            ocr_duration_s=ocr_duration,
             llm_duration_s=None,
             error_message=error_message,
             extraction=ContractExtraction(),
@@ -618,7 +618,7 @@ def _commit_failed(
             source_path=str(pdf_path),
             output_dir=output_dir,
             status="failed",
-            mineru_duration_s=mineru_duration,
+            ocr_duration_s=ocr_duration,
             llm_duration_s=None,
             error_message=error_message,
             extraction=ContractExtraction(),
@@ -633,7 +633,7 @@ def _commit_failed(
             "sha": sha,
             "doc_id": doc_id,
             "status": "failed",
-            "mineru_s": mineru_duration,
+            "ocr_s": ocr_duration,
             "llm_s": None,
             "error": error_message,
             "log_path": str(failed_log) if failed_log else None,
@@ -645,7 +645,7 @@ def _commit_failed(
         sha256=sha,
         status="failed",
         doc_id=doc_id,
-        mineru_duration_s=mineru_duration,
+        ocr_duration_s=ocr_duration,
         error_message=error_message,
         error=error,
     )
@@ -662,19 +662,19 @@ def re_extract(
     llm_enabled: bool = True,
 ) -> IngestResult:
     """
-    基于已有 mineru 产物重跑抽取。用于 partial 状态修复或调 prompt 后批量再抽取。
-    不动 MinerU 产物，不动 sha256/source_path/ingested_at。
+    基于已有 OCR 产物重跑抽取。用于 partial 状态修复或调 prompt 后批量再抽取。
+    不动 OCR 产物，不动 sha256/source_path/ingested_at。
     """
     doc = get_document(conn, doc_id)
     if not doc:
         raise ValueError(f"document id={doc_id} not found")
-    mineru_dir = Path(doc.output_dir) / "mineru"
-    if not mineru_dir.exists():
+    ocr_dir = Path(doc.output_dir) / "ocr"
+    if not ocr_dir.exists():
         raise FileNotFoundError(
-            f"mineru output missing for id={doc_id}: {mineru_dir}"
+            f"OCR output missing for id={doc_id}: {ocr_dir}"
         )
 
-    document_text = load_document_text(mineru_dir)
+    document_text = load_document_text(ocr_dir)
     t0 = time.perf_counter()
     error_message: Optional[str] = None
     error_info: Optional[ErrorInfo] = None
@@ -713,11 +713,11 @@ def re_extract(
     if llm_enabled and status == "ok":
         for pp in get_handler(envelope.doc_type).post_processors:
             try:
-                pp(envelope, mineru_dir)
+                pp(envelope, ocr_dir)
             except Exception as e:  # noqa: BLE001 — 专属后处理失败不能中断重抽
                 logger.warning("post:%s 跳过（异常）: %s", pp.__name__, e)
         try:
-            correct_evidence_pages(envelope, mineru_dir)
+            correct_evidence_pages(envelope, ocr_dir)
         except Exception as e:  # noqa: BLE001 — 页码校正失败不能中断重抽
             logger.warning("page-fix 跳过（异常）: %s", e)
 
@@ -733,7 +733,7 @@ def re_extract(
             logger.warning("identity 跳过（异常）: %s", e)
 
         # 多源融合（仅 enable_vision_fusion 的类型，如保险）：A文本/C看图评判 → sidecar。
-        _maybe_run_vision_fusion(envelope, document_text, mineru_dir, logger.info, confidence)
+        _maybe_run_vision_fusion(envelope, document_text, ocr_dir, logger.info, confidence)
 
     # 落盘新 extracted.json（通用信封）
     (Path(doc.output_dir) / FILE_EXTRACTION).write_text(
@@ -781,10 +781,10 @@ def re_extract(
 # ---------- 工具 ----------
 
 
-def load_document_text(mineru_dir: Path) -> str:
+def load_document_text(ocr_dir: Path) -> str:
     """优先 raw_text.txt（已清洗），fallback markdown.md。"""
-    raw = mineru_dir / FILE_RAW_TEXT
-    md = mineru_dir / FILE_MARKDOWN
+    raw = ocr_dir / FILE_RAW_TEXT
+    md = ocr_dir / FILE_MARKDOWN
     if raw.exists():
         return raw.read_text(encoding="utf-8")
     if md.exists():

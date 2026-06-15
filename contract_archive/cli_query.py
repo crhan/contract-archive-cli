@@ -247,7 +247,7 @@ def raw(
     ),
 ) -> None:
     """
-    打印文档原文（MinerU OCR 输出的纯文本）到 stdout。
+    打印文档原文（OCR 输出的纯文本）到 stdout。
 
     与 show 互补：show 看 LLM 抽出的结构化字段，raw 看抽取所依据的原始文本——
     这正是抽取时喂给 LLM 的同一份内容（raw_text.txt，缺失则退回 markdown.md），
@@ -269,13 +269,13 @@ def raw(
         err_console.print(f"[red]not found: {ident}[/red]")
         raise typer.Exit(1)
 
-    # output_dir 可能为空串（失败入库的记录），Path("")/"mineru" 会落到不存在目录，
+    # output_dir 可能为空串（失败入库的记录），Path("")/"ocr" 会落到不存在目录，
     # load_document_text 返回 ""，统一走下面的"无原文"分支，无需单独判空。
-    mineru_dir = Path(row.output_dir) / "mineru"
-    text = load_document_text(mineru_dir)
+    ocr_dir = Path(row.output_dir) / "ocr"
+    text = load_document_text(ocr_dir)
     if not text:
         err_console.print(
-            f"[red]no OCR text for id={row.id} sha={row.short_sha}: {mineru_dir}[/red]"
+            f"[red]no OCR text for id={row.id} sha={row.short_sha}: {ocr_dir}[/red]"
         )
         raise typer.Exit(1)
 

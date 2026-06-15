@@ -15,9 +15,9 @@ _TEXT_BODY = "This insurance policy certificate page carries plenty of readable 
 
 
 def _build_doc(tmp_path, page_specs) -> Path:
-    """造 doc_dir/{source.pdf, mineru/preview_images/page_NNN.png}。page_specs: 每页 'table'|'scan'|'text'。"""
+    """造 doc_dir/{source.pdf, ocr/preview_images/page_NNN.png}。page_specs: 每页 'table'|'scan'|'text'。"""
     doc_dir = tmp_path / "doc"
-    preview = doc_dir / "mineru" / "preview_images"
+    preview = doc_dir / "ocr" / "preview_images"
     preview.mkdir(parents=True)
     doc = fitz.open()
     for i, spec in enumerate(page_specs):
@@ -38,15 +38,15 @@ def _build_doc(tmp_path, page_specs) -> Path:
         (preview / f"page_{i + 1:03d}.png").write_bytes(b"\x89PNG\r\nFAKE")
     doc.save(str(doc_dir / "source.pdf"))
     doc.close()
-    return doc_dir / "mineru"
+    return doc_dir / "ocr"
 
 
 # ---------- _select_fusion_images ----------
 
 
 def test_select_prefers_table_and_ocr_skips_text(tmp_path):
-    mineru_dir = _build_doc(tmp_path, ["table", "scan", "text"])
-    out = ingest._select_fusion_images(mineru_dir)
+    ocr_dir = _build_doc(tmp_path, ["table", "scan", "text"])
+    out = ingest._select_fusion_images(ocr_dir)
     # 表格页(0→1-based 1) + 扫描页(1→2) 入选；文本页(2→3) 不选
     assert set(out) == {1, 2}
     assert all(p.exists() for p in out.values())
@@ -60,16 +60,16 @@ def test_select_empty_without_source_or_preview(tmp_path):
 
 def test_select_respects_cap(tmp_path, monkeypatch):
     monkeypatch.setenv("CONTRACT_ARCHIVE_VISION_FUSION_MAX_PAGES", "1")
-    mineru_dir = _build_doc(tmp_path, ["scan", "scan", "scan"])
-    out = ingest._select_fusion_images(mineru_dir)
+    ocr_dir = _build_doc(tmp_path, ["scan", "scan", "scan"])
+    out = ingest._select_fusion_images(ocr_dir)
     assert len(out) == 1  # 上限封顶
 
 
 def test_select_includes_text_cover(tmp_path):
     """封面页（第1页）即便是纯文本（非表格/扫描）也优先纳入 vision——保单号/投保被保人等
     保单级高价值字段在封面，旧 table-first 逻辑会把文本封面漏掉。"""
-    mineru_dir = _build_doc(tmp_path, ["text", "table", "scan"])
-    out = ingest._select_fusion_images(mineru_dir)
+    ocr_dir = _build_doc(tmp_path, ["text", "table", "scan"])
+    out = ingest._select_fusion_images(ocr_dir)
     assert 1 in out  # 文本封面入选（旧逻辑漏）
     assert set(out) == {1, 2, 3}
 
@@ -77,18 +77,18 @@ def test_select_includes_text_cover(tmp_path):
 def test_select_cover_survives_cap(tmp_path, monkeypatch):
     """大文档表格页多 + 额度紧时，封面不被 table-first + 截断挤出窗口（doc33 实证回归）。"""
     monkeypatch.setenv("CONTRACT_ARCHIVE_VISION_FUSION_MAX_PAGES", "1")
-    mineru_dir = _build_doc(tmp_path, ["text", "table", "table"])
-    out = ingest._select_fusion_images(mineru_dir)
+    ocr_dir = _build_doc(tmp_path, ["text", "table", "table"])
+    out = ingest._select_fusion_images(ocr_dir)
     assert set(out) == {1}  # 仅 1 页额度 → 封面优先，而非表格页 2/3
 
 
 def test_select_renders_missing_preview_on_demand(tmp_path):
-    """native-text 快路下 MinerU 跳过 preview 渲染（preview 目录空）→ 按需补渲选中页，
+    """native-text 快路下 OCR 跳过 preview 渲染（preview 目录空）→ 按需补渲选中页，
     vision 融合不致因纯文本封面拿不到图而退化（codex P2 回归）。"""
-    mineru_dir = _build_doc(tmp_path, ["table", "text", "scan"])
-    for p in (mineru_dir / "preview_images").glob("*.png"):
+    ocr_dir = _build_doc(tmp_path, ["table", "text", "scan"])
+    for p in (ocr_dir / "preview_images").glob("*.png"):
         p.unlink()  # 模拟 native-text 快路：preview 目录存在但为空
-    out = ingest._select_fusion_images(mineru_dir)
+    out = ingest._select_fusion_images(ocr_dir)
     assert 1 in out  # 封面（第1页）按需渲出
     # 补渲的是真 PNG（render_pdf_to_images 产物），非 _build_doc 的占位假图
     assert all(p.exists() and p.stat().st_size > 0 for p in out.values())
@@ -101,7 +101,7 @@ def test_maybe_fusion_skips_non_fusion_type(monkeypatch):
     calls = {"n": 0}
     monkeypatch.setattr(ingest, "run_vision_fusion", lambda *a, **k: calls.__setitem__("n", 1) or True)
     env = DocumentExtraction(doc_type="合同协议")  # 无 enable_vision_fusion
-    ingest._maybe_run_vision_fusion(env, "text", Path("/nope/mineru"), lambda m: None)
+    ingest._maybe_run_vision_fusion(env, "text", Path("/nope/ocr"), lambda m: None)
     assert calls["n"] == 0
 
 
@@ -120,7 +120,7 @@ def test_maybe_fusion_runs_and_escalates_low(monkeypatch, tmp_path):
         lambda env, source_pdf=None: escalated.__setitem__("pdf", source_pdf),
     )
     env = DocumentExtraction(doc_type="保险凭证")
-    ingest._maybe_run_vision_fusion(env, "text", tmp_path / "mineru", lambda m: None)
+    ingest._maybe_run_vision_fusion(env, "text", tmp_path / "ocr", lambda m: None)
     assert env.fusion_overall_confidence == 0.3
     assert "pdf" in escalated  # 低置信 → 触发 agent 兜底
 
@@ -140,7 +140,7 @@ def test_maybe_fusion_no_escalate_when_high(monkeypatch, tmp_path):
         lambda env, source_pdf=None: escalated.__setitem__("yes", True),
     )
     env = DocumentExtraction(doc_type="保险凭证")
-    ingest._maybe_run_vision_fusion(env, "text", tmp_path / "mineru", lambda m: None)
+    ingest._maybe_run_vision_fusion(env, "text", tmp_path / "ocr", lambda m: None)
     assert escalated == {}  # 高置信不兜底
 
 

@@ -112,7 +112,7 @@ def render_pdf_to_images(
                  原扫描件 400 DPI 时建议 dpi >= 300，否则会丢字。
     :param prefix: 输出文件名前缀，最终形如 page_001.png
     :param pages: 只渲这些 0-based 页索引（None=全部）。供 vision 融合按需补渲选中页，
-                  不必为了几页重渲整份（native-text 快路下 MinerU 跳过 preview 渲染）。
+                  不必为了几页重渲整份。
     """
     pdf_path = Path(pdf_path)
     out_dir = Path(out_dir)

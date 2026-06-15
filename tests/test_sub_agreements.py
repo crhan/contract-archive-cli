@@ -78,7 +78,7 @@ def test_sub_agreements_roundtrip(tmp_path):
         source_path="/x.pdf",
         output_dir="/o",
         status="ok",
-        mineru_duration_s=1.0,
+        ocr_duration_s=1.0,
         llm_duration_s=1.0,
         error_message=None,
         extraction=None,

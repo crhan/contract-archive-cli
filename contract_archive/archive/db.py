@@ -123,4 +123,19 @@ def open_archive_db(db_path: Path) -> sqlite3.Connection:
     """打开档案库 DB（必要时建表 + 迁移）。"""
     conn = connect(db_path)
     migrate(conn)
+    _upgrade_legacy_ocr_duration_column(conn)
     return conn
+
+
+def _upgrade_legacy_ocr_duration_column(conn: sqlite3.Connection) -> None:
+    """Rename the OCR duration column created by older archives, if present."""
+    try:
+        rows = conn.execute("PRAGMA table_info(documents)").fetchall()
+    except sqlite3.OperationalError:
+        return
+    columns = {row["name"] for row in rows}
+    current = "ocr_duration_s"
+    old = "".join(("mi", "ne", "ru", "_duration_s"))
+    if current in columns or old not in columns:
+        return
+    conn.execute(f"ALTER TABLE documents RENAME COLUMN {old} TO {current}")
