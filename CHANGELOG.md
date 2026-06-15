@@ -3,6 +3,14 @@
 本项目变更记录。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，
 版本号语义化（单用户本地工具，破坏性变更会在此显著标注）。
 
+## [0.3.2] — 2026-06-15
+
+### 变更
+- **OCR pipeline 迁移发版号**：移除旧本地 OCR optional extra 与旧 pipeline，统一为
+  `OCRPipeline`（native text layer + DashScope VL OCR 混合提取）。同步更新 Docker、setup、
+  README、GitHub about/topics 与评测文档，避免安装快照仍显示旧 OCR 引擎说明。
+- 旧档案库 OCR 耗时字段首次打开时自动重命名为 `ocr_duration_s`，已有本地库可继续使用。
+
 ## [0.3.1] — 2026-06-14
 
 ### 修复
