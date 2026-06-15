@@ -110,7 +110,7 @@ contract-archive show <doc_id>                                          # 肉眼
 
 ## 用 make_gold 从真实文档批量起草（省人工，不脱敏）
 
-`evals.make_gold` 把**已入库**的真实文档（archive 的 mineru 文本 + extraction_result.json
+`evals.make_gold` 把**已入库**的真实文档（archive 的 OCR 文本 + extraction_result.json
 + 原始 source.pdf）转成 **draft gold**，落到 `CONTRACT_ARCHIVE_EVALSET_DIR/extraction/<id>/`：
 
 ```bash

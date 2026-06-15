@@ -18,7 +18,7 @@
 含若干**破坏性变更**（抽取流水线行为变化），单用户本地工具，升级后建议对关键文档重抽一遍核对。
 
 ### 破坏性变更
-- **页级分流取代整份"二选一"**：mineru 改**混合提取**——逐页判 text/ocr（主判据=单页文本层质量，
+- **页级分流取代整份"二选一"**：OCR 改**混合提取**——逐页判 text/ocr（主判据=单页文本层质量，
   含表格的文本页也走 VL），文本页原生抽取、扫描/表格页 VL OCR，按页序拼回。取代旧的"整份 native
   OR 整份 OCR"，混合版式（夹扫描页/夹表格页）不再系统性丢数据。
 - **文档类型路由泛化**：`doc_type → handler` 映射（`extraction/doc_type_handlers.py`）取代散落各处的
@@ -63,7 +63,7 @@
     `qwen-vl-ocr` maxInput 仅 30000，必须逐页。实测 91 页保单：572s（旧 923s，快 38%）、
     91/91 页成功、输出更完整（91984 vs 85157 字符）、单价更低（0.3/0.5 元每百万 token）。
   - `vl_ocr_max_pages` 默认从 10 放宽到 500：逐页后它不再是单请求页数上限，退化为"防超大 PDF
-    烧太多次调用"的安全阀；保单条款全文普遍 90+ 页，旧默认 10 会让前置 VL 跳过、回退 mineru。
+    烧太多次调用"的安全阀；保单条款全文普遍 90+ 页，旧默认 10 会让前置 VL 跳过、回退 OCR。
 - **逐页 OCR 健壮性加固**（逐页后单份要发几十上百个请求，失败点随页数累积）：
   - 单页异常态分标，不再都塞 `[看不清]`——`[本页 OCR 调用失败]`（请求级失败）/
     `[本页输出达模型上限被截断]`（`finish_reason==length`，单页输出硬上限 8192 token）/
@@ -86,10 +86,10 @@
 - 无参数运行 `contract-archive` / `config` / `party` 展示帮助（含命令清单），不再报 `Missing command`。
 - `seals` 增 `--seal-owner` / `--seal-type` 别名（与 `search` 词汇统一；旧 `--owner`/`--type` 保留）。
 - `party rm` 删整个主体时增 `--yes` + 非交互守卫（比照 `delete`）。
-- 超时旋钮：`DASHSCOPE_TIMEOUT_S`（默认 300s）、`CONTRACT_ARCHIVE_MINERU_TIMEOUT_S`（默认 1800s）。
+- 超时旋钮：`DASHSCOPE_TIMEOUT_S`（默认 300s）。
 
 ### 修复
-- **MinerU 子进程 / LLM / VL 调用此前全无 timeout**：畸形/超大 PDF 可永久挂死整条 ingest，
+- **LLM / VL 调用此前全无 timeout**：畸形/超大 PDF 可永久挂死整条 ingest，
   上游 hang 时静默等近 10 分钟。现均有显式上限。
 - `LOG_LEVEL` 非法值（如 `bogus`）此前让所有命令崩 traceback；现降级 INFO + warning。
 - `extract` 失败（空抽取/LLM 异常）此前一律 exit 0，shell 无法靠 `$?` 发现失败；现 exit 1。
@@ -110,4 +110,4 @@
 - **Phase 1**（agent-ready 加固）：结构化错误模型（`code`/`category`/`retryable`）；
   `capabilities`/`describe`/`schema` 机器发现命令；`ingest --progress ndjson` 流式进度；
   `ingest --dry-run` + `--max-files` 成本闸；XDG 配置 + `config` 子命令组。
-- 初始：MinerU 解析 + qwen3.7-max 字段抽取 + SQLite 索引 + list/search/show/raw/stats/todo/seals。
+- 初始：OCR pipeline 解析 + qwen3.7-max 字段抽取 + SQLite 索引 + list/search/show/raw/stats/todo/seals。

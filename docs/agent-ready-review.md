@@ -376,7 +376,7 @@ Agent 调用时**拿不到据以决策的信号**（该重试？该改配置？�
 ### 🔴 Critical
 
 #### C1 — 无结构化错误模型，退出码只有 0/1（维度 7）
-- **问题**：错误靠 `f"mineru: {e}"`（`contract_archive/archive/ingest.py:199`）、
+- **问题**：错误靠 `f"OCR: {e}"`（`contract_archive/archive/ingest.py:199`）、
   `f"extract: {e}"`（`ingest.py:249`）拼字符串；退出码仅 `Exit(0)/Exit(1)`，
   所有失败场景同为 `1`（`cli.py:318/542/769/845/854`）。
 - **原因**：错误处理是「打印给人看」思路（`cli.py:292`），降级藏在 `status` 字符串
@@ -405,7 +405,7 @@ Agent 调用时**拿不到据以决策的信号**（该重试？该改配置？�
   `side_effects/destructive/idempotent`）+ `describe <cmd> --json` + `schema <type> --json`。
 
 #### H2 — ingest 长任务全阻塞，进度只给人看（维度 8）
-- **问题**：`ingest` 对目录全同步串行（`cli.py:280-303`），单文件 MinerU 5–60s + LLM 2–10s；
+- **问题**：`ingest` 对目录全同步串行（`cli.py:280-303`），单文件 OCR pipeline 5–60s + LLM 2–10s；
   进度是 `err_console.rule(...)`（`cli.py:281`，stderr 彩色，给人看）；机器可读 JSON 要等
   整批跑完才一次性吐（`cli.py:312-316`）。无 task id / status / cancel。
 - **Agent 影响**：发起可能跑 1 小时的调用，期间无法 poll 进度、无法判断卡在第几个、
@@ -428,8 +428,8 @@ Agent 调用时**拿不到据以决策的信号**（该重试？该改配置？�
 
 #### M2 — 输入仅校验后缀，无大小 / 超时护栏（维度 4）
 - **问题**：`ingest` 校验 `exists/readable`（`cli.py:240`）+ `.pdf`（`ingest.py:565`），
-  但不查文件大小；畸形/超大 PDF 可能让 MinerU OOM 或挂死。
-- **方案**：`--max-file-mb` + MinerU subprocess `--timeout-s` 透出，超时归类 `INFRA/TRANSIENT`。
+  但不查文件大小；畸形/超大 PDF 可能让 OCR pipeline OOM 或挂死。
+- **方案**：`--max-file-mb` + 外部 OCR/VL 调用超时透出，超时归类 `INFRA/TRANSIENT`。
 
 #### M3 — evals 是另一套接口（argparse `python -m`），且无去重（维度 1 / 5）
 - **问题**：主 CLI 是 typer，评测线是 `python -m evals.run`（argparse）。`evals.run` 无
@@ -477,7 +477,7 @@ contract-archive schema <document|ingest_result> --json
 | 4 | CONFIG（缺 API key） | 否 |
 | 5 | PARTIAL（批量部分失败） | 看情况 |
 | 7 | TRANSIENT（限流/网络） | 是 |
-| 8 | INFRA（MinerU 崩/DB 锁） | 看情况 |
+| 8 | INFRA（OCR pipeline 崩/DB 锁） | 看情况 |
 
 退出码粗判，JSON 里 `retryable` 细判（批量可能混合多种结果）。
 
@@ -519,5 +519,5 @@ contract-archive schema <document|ingest_result> --json
 ## B.5 MCP 兼容结论
 读命令（list/search/show/stats/todo/seals）**现在就接近可封装**（有 `--json` + stdout 纯净 +
 空库合法）。四个封装阻塞，全在 Phase 1 解决：① 无 schema（H1）② 错误裸文本无法判重试（C1）
-③ ingest 长阻塞进度不可解析（H2）④ 输出无版本（L2）。**做完 Phase 1，即从「subprocess 硬包」
+③ ingest 长阻塞进度不可解析（H2）④ 输出无版本（L2）。**做完 Phase 1，即从「外部调用黑盒」
 升级到「可自动生成 MCP/OpenAI tool 定义」**。

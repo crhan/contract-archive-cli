@@ -1,7 +1,7 @@
 # 本地文档档案库 CLI
 
 > 把各类文档 PDF 批量入库、归档、可追溯——合同、协议、证明、发票、报告……
-> MinerU 解析版面文本，qwen3.7-max LLM 判类型 + 抽字段，索引到本地 SQLite，
+> OCR 提取版面文本，qwen3.7-max LLM 判类型 + 抽字段，索引到本地 SQLite，
 > 支持按类型/字段过滤检索。
 
 **LLM-first**：文档类型与字段抽取都交给 LLM，统一归一化到一个「通用信封」
@@ -10,13 +10,13 @@
 （中文大写金额→数值、日期→ISO）。合同另有一份调校过的专属 prompt（同样纯 LLM），
 仍保留全部合同字段与查询（甲乙方/到期日/自动续约/风险条款/义务清单）。
 
-历史：本项目最初是 DashScope / PaddleOCR / MinerU 三路 OCR 对比 playground，
-选定 MinerU 后重构为档案库 CLI；再从「合同专用」扩展为「通用文档档案库」。
+历史：本项目最初是多路 OCR 对比 playground，后重构为档案库 CLI；
+再从「合同专用」扩展为「通用文档档案库」。
 
 ## ✦ 数据流
 
 ```
-PDF ─► sha256 去重 ─► MinerU 解析（页级分流：文本页原生 / 扫描·表格页 VL OCR 混合提取）
+PDF ─► sha256 去重 ─► OCR 提取（页级分流：文本页原生 / 扫描·表格页 VL OCR 混合提取）
                           │
                           ▼
               LLM 判类型 ─► doc_type → handler 特化抽取
@@ -27,7 +27,7 @@ PDF ─► sha256 去重 ─► MinerU 解析（页级分流：文本页原生 /
               ▼                              ▼
    db.sqlite (通用信封 + 索引)     documents/<sha-12>/
                                     ├── source.pdf  (硬链接)
-                                    ├── mineru/markdown.md ...
+                                    ├── ocr/markdown.md ...
                                     ├── extraction_result.json  (通用信封 + 融合 sidecar)
                                     └── ingest.log
 
@@ -40,8 +40,8 @@ PDF ─► sha256 去重 ─► MinerU 解析（页级分流：文本页原生 /
 # 1) 装 uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# 2) 装依赖（mineru extras 会拉 MinerU 包，首次跑 ingest 还会从 modelscope 下模型 >1GB）
-./scripts/setup.sh mineru
+# 2) 装依赖
+./scripts/setup.sh
 ```
 
 > **uv hardlink 坑**：uv 默认 `UV_LINK_MODE=hardlink` 偶发只装包的一部分文件
@@ -50,24 +50,14 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 > 显式 `export UV_LINK_MODE=copy` 规避。手动 `uv sync` 时建议也带上。
 > 已损坏的包可以 `uv pip install --force-reinstall --no-deps <包名>` 修。
 
-如果只想用 list/search/show 查已有的档案库（机器上有别的人 ingest 好的 db.sqlite），
-跳过 mineru extras 也可以：
-
-```bash
-./scripts/setup.sh base
-```
-
 ## ✦ 全局安装（可选）
 
 如果想在任意目录用 `contract-archive`（不必 `cd` 项目目录或 `uv run`），用 `uv tool install`：
 
 ```bash
-# 注意是 ".[mineru]"（项目的 mineru extra = mineru[core]，含 torch 等模型依赖）。
-# 不要用 `--with mineru`——裸 mineru 不带 [core]，装出来的工具跑 ingest 会
-# ModuleNotFoundError: No module named 'torch'。
 # 用 --reinstall 而非 --force：版本号没变时 --force 会命中 uv 缓存里的旧 wheel，
 # 把过时代码装进去（实测会停在旧版本）；--reinstall 强制重建，更新才可靠。
-UV_LINK_MODE=copy uv tool install --reinstall "/path/to/contract-archive-cli[mineru]"
+UV_LINK_MODE=copy uv tool install --reinstall "/path/to/contract-archive-cli"
 ```
 
 `uv tool install` 会在 `~/.local/bin/contract-archive` 装独立 venv（与项目 venv 隔离）。
@@ -82,13 +72,14 @@ contract-archive list --archive ~/contracts
 contract-archive ingest ~/Documents/new_contract.pdf --archive ~/contracts
 ```
 
-`DASHSCOPE_API_KEY` 需通过 shell env 提供（建议放进 `~/.zshrc` 或专用 shell wrapper）。
+`DASHSCOPE_API_KEY` 建议用 `contract-archive config set dashscope.api_key ...` 配置；
+也可以通过 shell env / `.env` 提供。
 
 **开发者（改了源码要即时生效）**：加 `--editable`，全局命令指向本仓库源码而非快照——
 改完 `.py` 直接生效，不必每次重装：
 
 ```bash
-UV_LINK_MODE=copy uv tool install --editable --reinstall "/path/to/contract-archive-cli[mineru]"
+UV_LINK_MODE=copy uv tool install --editable --reinstall "/path/to/contract-archive-cli"
 ```
 
 > 不加 `--editable` 装的是「当下代码的快照」：之后改了源码、或仓库升了版本，都得
@@ -106,7 +97,9 @@ uv tool uninstall contract-archive-cli
 
 ## ✦ 配置
 
-两种方式，优先级 **环境变量(含 .env) > config 文件 > 默认值**：
+两种方式，优先级 **环境变量(含 .env) > config 文件 > 默认值**。
+日常使用推荐 `config` 命令；`.env.example` 仍保留，用于项目内开发、Docker、临时覆盖模型，
+以及 env-only 的运行时旋钮。
 
 ```bash
 # 方式一：config 命令（落 ~/.config/contract-archive/config.json，权限 0600，比项目 .env 更安全）
@@ -115,7 +108,7 @@ contract-archive config show              # 看各项当前生效值与来源（
 contract-archive config show --format json   # 机读：含 key/env/secret/default/value/source
 contract-archive config unset dashscope.api_key
 
-# 方式二：项目 .env（老方式，仍支持）
+# 方式二：项目 .env（开发 / Docker / 临时覆盖用，仍支持）
 cp .env.example .env
 $EDITOR .env   # 填入 DASHSCOPE_API_KEY
 ```
@@ -125,15 +118,17 @@ $EDITOR .env   # 填入 DASHSCOPE_API_KEY
 | `DASHSCOPE_API_KEY` | `dashscope.api_key` | 必填。[百炼控制台](https://dashscope.console.aliyun.com/) 申请 |
 | `DASHSCOPE_LLM_MODEL` | `dashscope.model` | 默认 `qwen3.7-max`（用户百炼账户的特定别名；若 404 换 `qwen-max` / `qwen3-max`） |
 | `DASHSCOPE_BASE_URL` | `dashscope.base_url` | 默认 `https://dashscope.aliyuncs.com/api/v1`；海外换 `https://dashscope-intl.aliyuncs.com/api/v1` |
+| `DASHSCOPE_OCR_MODEL` | `dashscope.ocr_model` | 逐页 VL OCR 模型，默认 `qwen-vl-ocr-latest` |
 | `DASHSCOPE_VL_MODEL` | `dashscope.vl_model` | 签章核查视觉模型，默认 `qwen3.6-flash` |
 | `DASHSCOPE_VL_EXTRACT_MODEL` | `dashscope.vl_extract_model` | 多源融合"看图抽字段"视觉模型，默认 `qwen3.6-flash` |
 | `CONTRACT_ARCHIVE_DIR` | `archive.dir` | 档案库根目录，默认 XDG `~/.local/share/contract-archive`；CLI `--archive` 优先 |
-| `COMPUTE_DEVICE` | — | `auto` / `mps` / `cuda` / `cpu`（MinerU 走子进程，主要影响其内部 backend 选择） |
+| `COMPUTE_DEVICE` | — | `auto` / `mps` / `cuda` / `cpu`（记录运行环境，默认自动选择） |
 | `LOG_LEVEL` | — | `DEBUG`/`INFO`/`WARNING`/...，默认 `INFO`；`--verbose`/`--quiet` 覆盖之 |
 | `DASHSCOPE_TIMEOUT_S` | — | LLM/VL 调用超时秒数，默认 `300` |
-| `CONTRACT_ARCHIVE_MINERU_TIMEOUT_S` | — | MinerU 子进程解析超时秒数，默认 `1800` |
-| `MINERU_MODEL_SOURCE` | — | MinerU 模型源，默认 `modelscope`（国内快）；海外可 export `huggingface` |
 | `CONTRACT_ARCHIVE_LLM_CONCURRENCY` | — | LLM 调用并发度（OCR/看图/评判共用线程池），默认 `4` |
+| `CONTRACT_ARCHIVE_VL_OCR_MAX_PAGES` | — | 单文档允许走 VL OCR 的最大页数，默认 `500` |
+| `CONTRACT_ARCHIVE_VL_OCR_DPI` | — | VL OCR 渲染页图 DPI，默认 `160` |
+| `CONTRACT_ARCHIVE_VL_OCR_RETRIES` | — | 逐页 VL OCR SDK 重试次数，默认 `4` |
 | `CONTRACT_ARCHIVE_VISION_FUSION_MAX_PAGES` | — | 融合看图单文档最多看几页（优先表格/扫描页），默认 `20` |
 | `CONTRACT_ARCHIVE_FUSION_THRESHOLD` | — | 融合低置信阈值 `[0,1]`，低于触发 agent 兜底，默认 `0.6` |
 | `CONTRACT_ARCHIVE_EVALSET_DIR` | — | 评测私有数据集根目录（仅开发/质量门禁用）；不设回退主仓库内合成 cases |
@@ -149,7 +144,7 @@ uv run contract-archive ingest path/to/合同.pdf
 # 批量入库整个目录（递归扫 *.pdf，sha256 去重）
 uv run contract-archive ingest ~/Documents/contracts/
 
-# 跳过 LLM（无 API key 时也用）：仅入库 MinerU 产物，抽取字段留空，可后续 extract 补抽
+# 跳过字段抽取：仅入库 OCR 产物，抽取字段留空，可后续 extract 补抽
 uv run contract-archive ingest path/to/合同.pdf --no-llm
 
 # 强制重跑（已 ingest 过的也再跑一遍，覆盖旧记录）
@@ -239,7 +234,7 @@ contract-archive party rm 张三 电话                # 删除某标识；省�
 
 ### 抽取层管理
 
-LLM 跑挂或想升级 prompt 后批量再抽取——不重跑 MinerU：
+LLM 跑挂或想升级 prompt 后批量再抽取——不重跑 OCR：
 
 ```bash
 uv run contract-archive extract 5            # 复跑 id=5 的抽取
@@ -289,7 +284,7 @@ archive/
 └── documents/
     └── a3f9c2b1/                 # sha256 前 12 位
         ├── source.pdf            # 硬链接源 PDF（跨盘 fallback copy）
-        ├── mineru/
+        ├── ocr/
         │   ├── markdown.md
         │   ├── layout.json       # bbox 已归一到 PDF point
         │   ├── structured.json
@@ -308,18 +303,15 @@ docker build -t contract-archive -f docker/Dockerfile .
 docker run --rm -it \
   -v $PWD/archive:/app/archive \
   -v $PWD/input:/app/input \
-  -v ~/.cache/modelscope:/root/.cache/modelscope \
   --env-file .env \
   contract-archive uv run contract-archive ingest /app/input
 ```
-
-挂载 modelscope 缓存复用本机 MinerU 模型。Mac 容器不直通 GPU，强烈推荐 native venv 跑。
 
 ## ✦ 项目结构
 
 ```
 contract-archive-cli/
-├── pyproject.toml          # uv 依赖管理（extras: mineru）
+├── pyproject.toml          # uv 依赖管理
 ├── docker/Dockerfile
 ├── .env.example
 ├── scripts/
@@ -334,34 +326,43 @@ contract-archive-cli/
 │   ├── cli_render.py       # 纯渲染层（Table / JSON dict / raw 高亮）
 │   ├── schemas/            # pydantic schema（BBox/LayoutBlock/DocumentExtraction 等）
 │   ├── pipelines/
-│   │   └── mineru_pipeline.py   # MinerU subprocess 调用 + 坐标归一化 + markdown 清洗
+│   │   ├── ocr_pipeline.py   # native text + VL OCR 混合提取 + markdown 清洗
+│   │   └── vl_ocr.py         # qwen-vl-ocr 逐页 OCR 调用
+│   ├── utils/
+│   │   ├── pdf.py            # PyMuPDF 文本层分析 / 渲染
+│   │   └── page_router.py    # 页级 text/ocr 分流
 │   ├── extraction/              # 纯 LLM 抽取（rule/hybrid 自 Phase 2 退役）
 │   │   ├── document_extractor.py  # 通用文档判类型 + 抽信封
 │   │   ├── contract_extractor.py  # 合同专属字段（专属 prompt）
 │   │   ├── llm_extractor.py        # DashScope OpenAI 兼容口调用
 │   │   ├── vision_seal.py          # 落款页 VL 签章核查
+│   │   ├── doc_type_handlers.py    # doc_type → 特化/后处理/融合配置
+│   │   ├── fusion.py               # 多源候选评判 → field_verdicts sidecar
+│   │   ├── text_fields.py / vl_extract.py / insurance_extractor.py
 │   │   ├── normalize.py / amount_check.py / evidence_page_fix.py / property_fee.py
 │   ├── archive/
 │   │   ├── db.py                # SQLite 连接 + migrations 引擎
 │   │   ├── repository.py        # DAO + 搜索查询构造
-│   │   ├── ingest.py            # 入库流水线（hash → MinerU → extract → rename → DB）
+│   │   ├── ingest.py            # 入库流水线（hash → OCR → extract → rename → DB）
 │   │   ├── party_registry.py    # known_parties 身份基准库
 │   │   ├── paths.py             # 档案库路径约定 + 硬链接工具
 │   │   └── migrations/          # 001_init … 005_completeness（5 个）
 │   ├── errors.py               # 结构化错误模型（code/category/retryable）
 │   ├── config.py               # XDG 配置 + env>file>default
-│   └── utils/                   # 设备选择 / PyMuPDF PDF 渲染
 ├── archive/                # 档案库数据（gitignored）
+├── docs/
+├── evals/                  # 评测框架；真实数据在私有 evalset 仓库
 ├── input/                  # 用户放待处理 PDF
-└── output.legacy/          # 旧 pipeline 历史产物（重构前的对比数据，可删）
+└── tests/
 ```
 
 ## ✦ 设计纪律
 
-- **统一 schema**：MinerU 的 0-1000 归一化坐标全部反算成 PDF point；markdown 反斜杠转义在喂给抽取层前清洗
-- **纯 LLM 抽取**：自 Phase 2 退役 rule/hybrid，字段全由 LLM 抽取；每字段附 `value_source`（仅 `llm`/`missing`）+ 置信度。死代码 rule 仅保留为确定性数值归一化（中文大写金额→数值、日期→ISO）
+- **统一 schema**：OCR 产物统一写入 raw_text/markdown/structured/layout/meta；markdown 反斜杠转义在喂给抽取层前清洗
+- **纯 LLM 抽取**：自 Phase 2 退役 rule/hybrid，字段全由 LLM 抽取；旧合同置信度列只保留 `llm`/`missing` 语义。死代码 rule 仅保留为确定性数值归一化（中文大写金额→数值、日期→ISO）
+- **类型路由集中化**：先抽通用信封的 `doc_type`，再经 `doc_type_handlers.py` 决定特化抽取、类型专属后处理和是否启用融合。
+- **融合只写 sidecar**：保险等高价值字段的多源融合结果只进入 `field_verdicts` / `fusion_overall_confidence`，不回写 `amounts` / `fields`。
 - **API key 不出包**：仅从 env 读，日志不打印响应体
-- **sha256 去重**：流式 hash 后查 UNIQUE 索引；命中即 skip 避免 MinerU 跑一次几分钟才发现重复
+- **sha256 去重**：流式 hash 后查 UNIQUE 索引；命中即 skip 避免重复 OCR 后才发现重复
 - **事务边界**：tmp 目录跑全 → `os.rename` 到 documents/ → DB INSERT；任一阶段失败回滚干净，DB 不留半成品
-- **partial 状态可修复**：MinerU OK 但 LLM 挂时 markdown 仍可用，`extract <id>` 命令只重跑抽取层
-- **不并发 MinerU**：每个 subprocess 会加载 GB 级模型，并发反而 OOM；默认 workers=1
+- **partial 状态可修复**：OCR OK 但 LLM 挂时 markdown 仍可用，`extract <id>` 命令只重跑抽取层

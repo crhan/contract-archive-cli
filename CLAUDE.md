@@ -32,7 +32,7 @@
 
 加新类型 = 注册一条 `DocTypeHandler`：
 - `specialized_extractor`：第二层特化抽取（合同→`extract_contract`，就地 enrich 信封）。
-- `post_processors`：类型专属后处理（合同=看落款页签章核查）。签名 `(envelope, mineru_dir)->bool`。
+- `post_processors`：类型专属后处理（合同=看落款页签章核查）。签名 `(envelope, OCR_dir)->bool`。
 - `enable_vision_fusion` + `vision_fusion_fields`：是否开多源融合 + 高价值概念键定义（保险开）。
 
 通用后处理（页码校正 `correct_evidence_pages` / 身份核对 `PartyRegistry`）**类型无关**，留在
@@ -67,7 +67,7 @@ openai SDK 同步阻塞、GIL 在网络等待时释放，线程池足够（不�
 ## 页级分流：混合提取取代整份"二选一"
 
 `utils.page_router.classify_pages` 逐页判 text/ocr（主判据=单页文本层质量；加分项=含表格的文本页
-也走 VL）。mineru 据此做**混合提取**：文本页原生抽取、扫描/表格页 VL OCR，按页序拼回——取代旧的
+也走 VL）。OCR 据此做**混合提取**：文本页原生抽取、扫描/表格页 VL OCR，按页序拼回——取代旧的
 "整份 native OR 整份 OCR"，混合版式不再丢数据。
 
 ## 评测：换模型/改 prompt/改流水线 → 跑评测过 gate 才提交

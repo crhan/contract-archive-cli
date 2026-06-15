@@ -1,104 +1,124 @@
-# 需求：把文档提取/字段抽取改造成「多源融合 + LLM 评判 + 置信度驱动 + 低置信 agent 兜底」
+# 多源融合提取改进：实现状态与验收清单
 
-> 这是一份交给 contract-archive 维护 agent 的改进需求。问题、证据、当前架构、建议改法、回归用例、验收标准都在下面。先读代码再动手，改动要带回归测试，遵守仓库提交纪律。
+> 本文档原本是一份“待实现需求 prompt”。截至当前代码状态，核心问题是真实的，改造也大部分已经落地。
+> 后续不要按旧需求从头重做；应按本文的剩余验收项收尾。
 
-## 一、一句话问题
+## 结论
 
-当前「PDF → 结构化字段」是**单源二选一**（文本层 OR OCR）+ **纯文本喂 LLM 抽取（抽取阶段完全不看原图）**。这对**混合版式 PDF**（扫描页夹电子页、或反之）和**复杂表格**会系统性丢数据 / 抽错。需要改成：**文本层 + OCR + VL 视觉理解 三源并行 → LLM 评判融合 → 输出置信度 → 低置信文档交 agent 兜底**。
+这项需求不是伪需求。原始问题成立：
 
-## 二、当前架构（先读这些）
+- 单源文本层 / OCR 二选一会在混合版式 PDF 中丢页或丢表格结构。
+- 纯文本抽取对保险计划表等复杂版式不稳。
+- VL 看图能补表格，但也会混淆投保人 / 被保险人等字段。
+- 高价值字段需要多源候选、冲突评判、置信度和低置信兜底。
 
-- **提取层** `contract_archive/pipelines/mineru_pipeline.py::MinerUPipeline._process`：**整份二选一**——`is_text_layer_usable()` 为真就用文本层（`extract_text_layer`），否则走 VL OCR（`pipelines/vl_ocr.py`，逐页 `qwen-vl-ocr-latest`）/ mineru。
-- **判据** `contract_archive/utils/pdf.py::is_text_layer_usable`：最近刚加了 per-page 覆盖率门槛（`text_coverage`、`count_text_pages`），修了"扫描件夹几页文本页被误判为电子文档、整份跳过 OCR"的 bug。但它仍是**整份级**决策。
-- **抽取层** `contract_archive/extraction/document_extractor.py` / `llm_extractor.py`：把提取到的**纯文本** `document_text` 喂 `qwen3.7-max` 抽字段（`call_llm_document(document_text, ...)`）。**抽取阶段不看任何原图**。
-- **唯一已用视觉的地方** `contract_archive/extraction/vision_seal.py`：只对落款页调 `qwen-vl` 核查签章有无——已有"渲染页 → base64 → DashScope VL（OpenAI 兼容口）"的成熟调用范式，可直接复用扩展。
+但当前仓库已经完成阶段 1-3 的主要实现。剩余工作不是继续扩功能，而是完成真实数据验收：
 
-## 二点五、这些文档都已入库，直接用 doc id 复现
+1. 私有 evalset 的 6 个真实 PDF case 仍标为 DRAFT，需要人工核对定稿 gold。
+2. 定稿后跑端到端 PDF eval gate，并保存结果。
+3. runtime agent 兜底目前只有 no-op 接口，是否继续做要等低置信比例评估后再决定。
 
-下面所有证据 / 回归用例的 PDF **都已经在 contract-archive 库里**，你可以直接取来复现，不用找需求方要文件：
+## 当前实现状态
 
-| doc id | sha(前12) | 文档 | 角色 |
+| 项 | 状态 | 代码位置 | 说明 |
 | --- | --- | --- | --- |
-| **33** | `92ea0c803d6c` | 平安互联网长期(B)医疗（夏双，电子，93页，含复杂表格） | 缺陷① OCR 丢表 |
-| **34** | `b78258551633` | 安盛卓越优选意外·计划一（夏双，电子，2页凭证） | 凭证字段 |
-| **35** | `d0abccde2524` | 平安小玩童7号（陈意被保/陈若涵投保，电子，2页凭证） | 缺陷② VL 混被保人 |
-| **36** | `a6d60676d17c` | 安盛卓越优选意外·计划四（若涵，电子，2页凭证） | 凭证字段 |
-| **31** | `eeb92d6e8ecf` | 瑞众常青树两全+附加重疾（扫描，184页） | 扫描件夹文本页 |
-| **32** | `7504cdcdd4f7` | 瑞众护身福两全（扫描，50页） | 扫描件夹文本页 |
+| 页级分流 | 已完成 | `contract_archive/utils/page_router.py`, `contract_archive/pipelines/ocr_pipeline.py` | 逐页判 text / ocr；文本页用原生文本，扫描或表格页走 VL OCR，再按页序拼回。 |
+| VL 看图抽字段 | 已完成 | `contract_archive/extraction/vl_extract.py` | 对关键页图按高价值字段定义抽候选，产出 `FieldCandidate(source="vision")`。 |
+| 文本路抽字段 | 已完成 | `contract_archive/extraction/text_fields.py` | 从全文按同一组字段定义抽候选，产出 `FieldCandidate(source="text")`。 |
+| 多源融合与评判 | 已完成 | `contract_archive/extraction/fusion.py` | A 文本 / C 看图两路候选一致则直接采信；冲突时据原图 LLM 评判。 |
+| sidecar 输出 | 已完成 | `contract_archive/schemas/document.py` | 融合结果只写 `field_verdicts` / `fusion_overall_confidence`，不回写 `amounts` / `fields`。 |
+| 保险类型接线 | 已完成 | `contract_archive/extraction/doc_type_handlers.py`, `contract_archive/extraction/insurance_extractor.py` | `保险凭证` 启用 vision fusion，并用独立概念键区分一般医疗、特定医疗、重疾、身故、被保险人等。 |
+| ingest 编排 | 已完成 | `contract_archive/archive/ingest.py` | 入库和 `run_full_extraction` 都会按 doc_type handler 决定是否运行融合。 |
+| 低置信 agent 兜底 | 延后 | `contract_archive/extraction/agent_fallback.py` | 当前是 no-op 标记接口；未来如果低置信长尾值得处理，再在这里接 runtime agent。 |
+| 私有真实 PDF gate | 未完成 | `~/project/contract-archive-evalset/dataset` | 6 个真实 case 已存在，但 `meta.json` 仍标 DRAFT，未看到最终 gate 结果。 |
 
-取数方式：
-- 当前抽取结果（字段）：`contract-archive show <id>`
-- 入库时的 OCR/文本层文本：`contract-archive raw <id>`
-- 原始 PDF：`~/.local/share/contract-archive/documents/<sha前12>/source.pdf`
-- 复现三方对比：A=`utils.pdf.extract_text_layer(pdf)`；B=`MinerUPipeline(prefer_text_layer=False).run()` 后 `load_document_text()`；C=用 `fitz` 渲染目标页 PNG → base64 → DashScope 兼容口调 `qwen3.7-plus`（看 `vision_seal.py` 的调用范式）。
+## 已覆盖的自动化测试
 
-## 三、实证缺陷（真实保单复现，ground truth 已知）
+当前主仓库已有单测覆盖核心实现：
 
-用上表 6 份真实保险 PDF 做了「文本层(A) vs 专用OCR qwen-vl-ocr(B) vs VL理解 qwen3.7-plus 看图(C)」三方对比，结论：**没有任何单一数据源全对，且不同内容类型的最优源不同**。
+- `tests/test_page_router.py`
+- `tests/test_ocr_pipeline.py`
+- `tests/test_vl_extract.py`
+- `tests/test_fusion.py`
+- `tests/test_vision_fusion_integration.py`
+- `tests/test_ingest_vision_fusion.py`
+- `tests/test_evals_score.py`
 
-| 缺陷 | 证据（可用 doc id 复现） | 影响 |
+最近一次本地完整测试：
+
+```bash
+uv run --no-sync python -m pytest
+```
+
+结果：`327 passed`。
+
+## 真实样本与剩余验收
+
+私有 evalset 中已有 6 个真实 PDF case：
+
+| sha 前 12 | 原 doc id | 角色 |
 | --- | --- | --- |
-| **① OCR 对复杂表格失效** | **doc 33**（平安医疗）的「保险计划表」：A 文本层完整（一般医疗/特定各 200万、重疾 400万、年限额 400万、20年总 800万）；**B（qwen-vl-ocr）把整张表的数字全丢了**（`contract-archive raw 33` 里只剩"赔付限额"字样、无任何金额）；C（qwen3.7-plus 看表格页图，物理页索引 12）读得完全正确。 | 若只信 OCR，会缺被保人的**全部医疗保额**。 |
-| **② VL 理解会混淆字段** | **doc 35**（小玩童7号）：C（qwen3-vl-plus）把**被保人**读成了投保人"陈若涵"（实际被保人是其子"陈意"）；A/B 正确。 | 若只信 VL，会错被保人——保险场景里这是致命错误。 |
-| **③ 纯文本抽取丢表格结构** | 抽取层只拿到「文本层/OCR 转出的纯文本」，doc 33 的计划表在文本层里是"标签和数字分行散落"（表格结构丢失），纯文本 LLM 从散文本拼"哪个计划对应哪个限额"极易串行；而 VL 模型直接看图，表格一目了然。 | 即使提取到文本，抽取阶段不看图 → 表格类字段抽取不可靠。 |
+| `92ea0c803d6c` | 33 | 平安互联网长期(B)医疗，复杂表格，验证医疗保额 / 年度限额 / 免赔 / 赔付比例。 |
+| `b78258551633` | 34 | 安盛卓越优选意外计划一，验证身故保额与凭证字段。 |
+| `d0abccde2524` | 35 | 平安小玩童7号，验证被保险人是陈意而不是投保人陈若涵。 |
+| `a6d60676d17c` | 36 | 安盛卓越优选意外计划四，验证身故保额与凭证字段。 |
+| `eeb92d6e8ecf` | 31 | 瑞众常青树两全 + 附加重疾，扫描件夹文本页。 |
+| `7504cdcdd4f7` | 32 | 瑞众护身福两全，扫描件夹文本页。 |
 
-补充证据：扫描件（**doc 31/32**，瑞众纸质合同扫描件，184页/50页）必须走 OCR（文本层只有夹进去的保单信息页、覆盖率分别约 8%/26%）；而电子保单（doc 33–36）文本层质量最好、尤其表格，反而 qwen-vl-ocr 对其表格更差。**即"该不该 OCR"不能整份一刀切，要看页/区块的类型。**
+这些 case 的 `source.pdf` / `input.txt` / `gold.json` 已在：
 
-## 四、改进方向（目标）
+```text
+~/project/contract-archive-evalset/dataset/extraction/<sha前12>/
+```
 
-把"单源二选一 + 纯文本抽取"升级为**多模态、可评判、带置信度、可 agent 兜底**的流水线。核心诉求（来自需求方）：
+但当前 `meta.json` 仍写着：
 
-1. 不是所有 PDF 都有文本层 → 要能优雅处理「纯电子 / 纯扫描 / 混合」三种。
-2. **结合 OCR 与 VL 视觉理解共同完成**（两者互补：OCR 擅长正文逐字、VL 擅长表格/版面语义）。
-3. 加 **LLM 评判**：多源结果不一致时，由评判员裁决或融合，并产出**置信度**。
-4. **agent 化**：低置信 / 有分歧的文档，交由 coding/调查 agent 迭代处理（多轮看图、交叉比对、必要时升级人工）。需要时引入 **Pi coding agent**（见 §8）。
+```text
+make_gold champion 抽取 DRAFT；私有数据集不脱敏；需人工核对后定稿
+```
 
-## 五、建议的分层改法（可分阶段落地，非一次到位）
+因此不能把“真实 PDF 全链路 gate 已过”算作完成。
 
-### 阶段 1：页级分类 + 分流（替代整份二选一）
-- 逐页分类：`纯文本页 / 扫描页 / 含表格页`（可用 `count_text_pages` 的 per-page 文本量 + `page.get_images()` 图像占比 + 简单版面启发式）。
-- 分流：纯文本页用文本层；扫描页用 OCR；**含表格页额外标记**进入阶段 2 的视觉抽取。
-- 收益：解决"扫描件夹文本页 / 电子件夹扫描页"，且不浪费——能用文本层的页不花 OCR/VL 钱。
+## 完成定义
 
-### 阶段 2：抽取层引入 VL 视觉理解（关键改动）
-- 当前 `document_extractor` 纯文本抽取 → 增加**多模态抽取路径**：对「含表格页 / 关键信息页（保单信息页、保险计划表、保额/费率表）」把**页图一起喂给 VL 理解模型**（`qwen3.7-plus` 实测对保单表格准，或 `qwen-vl-max`/`qwen3-vl-plus`），让模型直接看图抽结构化字段。
-- 复用 `vision_seal.py` 已有的「渲染页→base64→DashScope 兼容口」范式。
-- 模型 id 走 env 可配（沿用 `DASHSCOPE_*` 配置风格），**不要硬编码**；注意 DashScope 走 compatible-mode（见仓库 CLAUDE.md 既有约定）。
+后续要把这项需求关掉，必须满足下面条件。
 
-### 阶段 3：多源 + LLM 评判融合 + 置信度
-- 对**高价值字段**（保额/保费/被保人/保单号/期间/免赔/赔付比例）或**有分歧的页**，并行取 ≥2 源（文本层、OCR、VL 看图），交 **LLM 评判员**：给定原图 + 各源候选值，裁决最可信值或合并，输出 `value + confidence + 依据源`。
-- 不一致且无法裁决 → 标 `low_confidence` + 记录各源候选，进入阶段 4。
-- 成本控制：评判只对"高价值字段 / 实际有分歧"的触发，不要全字段全页无脑三跑。
+1. 人工核对并定稿私有 evalset 的 6 个 `gold.json`。
+2. 重点核对 `field_verdicts`，不要只看 `amounts` / `fields`：
+   - doc 33：一般医疗 200万、特定医疗 200万、重疾 400万、年度限额 400万、保证续保期总限额 800万、免赔额 1万、等待期 90天、保证续保 20年、社保内 100%、社保外 60%、除外乳腺疾病及并发症。
+   - doc 35：被保险人必须是陈意，不是投保人陈若涵；意外身故 / 残疾 / 医疗 / 住院津贴 / 飞机意外等字段按原文核对。
+   - doc 34 / 36：身故 / 残疾保额、应税薪金门槛、潜水除外等字段按原文核对。
+   - doc 31 / 32：确认扫描件不能只依赖少量文本层，端到端 OCR / 混合提取不丢关键字段。
+3. 跑端到端评测：
 
-### 阶段 4：置信度驱动的 agent 兜底
-- 文档级置信度低于阈值 / 关键字段冲突 → 交 agent 迭代：渲染相关页、换模型重看、交叉比对、必要时**升级人工评判**（把候选值 + 原图截图抛给人）。
-- 这层是可选增强，先把阶段 1–3 的确定性流水线做扎实。
+```bash
+CONTRACT_ARCHIVE_EVALSET_DIR=~/project/contract-archive-evalset/dataset \
+  uv run --no-sync python -m evals.run --models qwen3.7-max --out evals/results/fusion_gate
 
-## 六、Ground-truth 回归用例（必须建成自动化回归）
+uv run --no-sync python -m evals.report evals/results/fusion_gate
+```
 
-这 6 份 PDF 已在库（doc id 见 §2.5），关键字段正确值已人工三方核验，建议纳入回归：
+4. gate 报告通过，并将结果目录保留用于追溯。
+5. 如果仍存在低置信字段，统计低置信占比和类型，再决定是否实现 runtime agent 兜底。
 
-| doc id | 文档 | 类型 | 关键字段正确值（ground truth） | 当前失败点 |
-| --- | --- | --- | --- | --- |
-| **33** | 平安互联网长期(B)医疗（夏双，93页） | 含复杂表格 | 一般医疗/特定各 **200万**、重疾 **400万**、年限额 **400万**、20年总 **800万**、免赔 **1万**(连续未理赔逐年降1000至5000止，本年度8000)、等待期 **90天**、保证续保 **20年**、经社保赔 **100%**/未经 **60%**；个性化除外"**乳腺疾病及并发症**" | qwen-vl-ocr 丢光保险计划表数字 |
-| **34** | 安盛卓越优选意外·计划一（夏双，2页凭证） | 凭证 | 意外身故/残疾 **100万**；理赔门槛"上年度应税薪金 >**10万**、需纳税证明否则拒赔"；**潜水除外** | — |
-| **36** | 安盛卓越优选意外·计划四（若涵，2页凭证） | 凭证 | 意外身故/残疾 **300万**；门槛 >**40万**；**潜水除外** | — |
-| **35** | 平安小玩童7号（陈意被保，2页凭证） | 凭证 | 被保人 **陈意（非投保人陈若涵）**；意外身故 **20万**/残 **40万**/意外医疗 **6.3万**/住院津贴 100元天上限1.8万/飞机意外 **40万** | VL 把被保人误读成投保人 |
-| **31** | 瑞众常青树两全+附加重疾（184页） | 扫描件夹文本页 | 必须走 OCR（文本层仅保单页、覆盖率~8%） | 旧判据曾误判跳过 OCR |
-| **32** | 瑞众护身福两全（50页） | 扫描件夹文本页 | 必须走 OCR（覆盖率~26%） | 同上 |
+## TDD / 回归策略
 
-## 七、验收标准
+改融合逻辑、字段定义、页路由、OCR pipeline 或 prompt 时，优先按这个顺序工作：
 
-1. 上述 6 份的所有 ground-truth 关键字段，新流水线抽取**全部正确**（尤其平安保险计划表保额、小玩童被保人）。
-2. 对"电子件 / 扫描件 / 混合件"三类都不丢内容、不无脑全量 OCR（成本可控，有日志说明每页走了哪条路径）。
-3. 高价值字段带 `confidence` 与 `来源源`；冲突字段有 `low_confidence` 标记而非静默取一个。
-4. 全量现有测试通过 + 新增针对①②③三类缺陷的回归用例。
-5. 模型 id、阈值、是否启用 VL/评判/agent 层都可配（env / 配置），默认行为向后兼容。
+1. 先补或更新单测，复现具体失败：
+   - 分流问题放 `tests/test_page_router.py` / `tests/test_ocr_pipeline.py`。
+   - 候选抽取问题放 `tests/test_vl_extract.py` / `tests/test_vision_fusion_integration.py`。
+   - 融合裁决问题放 `tests/test_fusion.py`。
+   - ingest 接线问题放 `tests/test_ingest_vision_fusion.py`。
+   - gate 失明问题放 `tests/test_evals_score.py`。
+2. 再改实现。
+3. 跑相关单测。
+4. 如果改动影响抽取 prompt、模型、页路由或融合策略，必须跑私有 PDF eval gate。
 
-## 八、关于引入 Pi coding agent
+## 不要做的事
 
-阶段 4 的"agent 兜底"指**运行时**对低置信文档派 agent 迭代（不是开发期）。若仓库内确定性流水线（阶段 1–3）已能覆盖绝大多数文档，agent 层只处理长尾低置信文档时再引入 **Pi coding agent**（需求方的调查 agent，位于 `~/github` 体系）。先评估：阶段 1–3 落地后，低置信文档占比有多少、是否值得上 agent 层；把这个评估结论和数据反馈给需求方再决定，不要一上来就 agent 化。
-
----
-
-**给维护 agent 的提醒**：先读 `mineru_pipeline.py`、`utils/pdf.py`、`extraction/document_extractor.py`、`extraction/vision_seal.py` 摸清现状；改动分阶段提交、每步带回归；DashScope 调用沿用仓库既有 compatible-mode 约定与 `DASHSCOPE_*` 配置；不要硬编码模型 id；保持向后兼容。
+- 不要再把这项需求理解为“当前架构仍是整份二选一 + 纯文本抽取”。这已经过期。
+- 不要把融合结论回写到 `amounts` / `fields`；只写 sidecar。
+- 不要把保险保额合成一个大字段；一般医疗、特定医疗、重疾、身故、年度限额必须独立概念键。
+- 不要把 runtime agent 兜底提前做成复杂系统；先用 gate 和低置信统计证明有必要。
+- 不要把私有 evalset 的真实数据复制进公开主仓库。

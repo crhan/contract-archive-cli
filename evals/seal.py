@@ -5,7 +5,7 @@ VL 签章核查评测线（自包含：gen / run / report / demo）。
 输出签章缺陷 issues。评测对 issues 打分（复用 score.score_completeness_issues），
 gate 同样偏召回（漏报签章缺陷=合同蒙混过关，最致命）。
 
-诚实声明（两位评审都点了）：本模块自带的 PIL **合成**落款页与真实 MinerU 抠出的
+诚实声明（两位评审都点了）：本模块自带的 PIL **合成**落款页与真实扫描页里的
 淡红/模糊红章分布不同——合成图只验"调用链通不通 + 打分逻辑对不对"，**不代表真实
 识别精度**。要测真实精度，把脱敏真实落款页放 cases/seal/<id>/private/（已 gitignore），
 gold 标注哪方缺签章即可。
