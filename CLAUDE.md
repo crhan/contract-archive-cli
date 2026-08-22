@@ -20,6 +20,10 @@
 - `base_url` 由配置的 `/api/v1` 做 `.replace("/api/v1", "/compatible-mode/v1")` 得到。
 - 开 `response_format={"type":"json_object"}`；**别设 max_tokens**（否则 JSON 可能被截断成非法串）；
   prompt 里必须出现 "JSON" 字样；**关思考模式**（思考模型不支持 json_object）。
+- **关思考靠显式传 `extra_body=NO_THINKING`**（`utils.llm.NO_THINKING`），新增任何
+  `chat.completions.create` 都必须带上，别就地写字面量。新一代模型（qwen3.8-max 起）
+  **默认开思考**：实测同份保单 qwen3.7-max 87s，qwen3.8-max 默认态 897s（两次 300s 超时
+  重试）。漏传不会报错，只会静默退化成思考态——评测跑出来的就是退化态，选型结论被污染。
 - usage 从 `resp.usage`（`prompt_tokens`/`completion_tokens`/`total_tokens`）读，归一化成
   `input_tokens`/`output_tokens`/`total_tokens`。
 
