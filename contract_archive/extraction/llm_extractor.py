@@ -19,6 +19,7 @@ from typing import Any, Optional
 from ..config import get_timeout_s, load_settings
 from ..errors import ErrorInfo, classify_exception, config_missing
 from ..utils.http_env import sanitized_httpx_proxy_env
+from ..utils.llm import NO_THINKING
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,7 @@ def _call_openai_compat(
             temperature=0.1,
             top_p=0.5,
             response_format={"type": "json_object"},
+            extra_body=NO_THINKING,
         )
     return (resp.choices[0].message.content or ""), _usage_from_openai(resp)
 

@@ -1,5 +1,6 @@
 from .concurrency import llm_concurrency, map_concurrent, merge_usage
 from .device import Device, describe_device, select_device
+from .llm import NO_THINKING
 from .page_router import PageRoute, classify_pages, routing_summary
 from .pdf import (
     PageImage,
@@ -16,6 +17,7 @@ from .pdf import (
 )
 
 __all__ = [
+    "NO_THINKING",
     "map_concurrent",
     "merge_usage",
     "llm_concurrency",

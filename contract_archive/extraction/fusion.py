@@ -24,7 +24,7 @@ from typing import Optional
 from ..config import get_timeout_s, load_settings
 from ..errors import ErrorInfo, config_missing
 from ..schemas import DocumentExtraction, FieldCandidate, FieldVerdict
-from ..utils import encode_image_data_uri, map_concurrent, merge_usage
+from ..utils import NO_THINKING, encode_image_data_uri, map_concurrent, merge_usage
 from ..utils.http_env import sanitized_httpx_proxy_env
 from .llm_extractor import _parse_json_loose, _usage_from_openai
 
@@ -194,6 +194,7 @@ def adjudicate_field(
         model=model,
         messages=[{"role": "user", "content": content}],
         temperature=0.0,
+        extra_body=NO_THINKING,
     )
     parsed = _parse_json_loose(resp.choices[0].message.content or "")
     value = parsed.get("value")

@@ -23,7 +23,12 @@ from ..schemas import (
     PersonIdentity,
     PREVIEW_DIR,
 )
-from ..utils import encode_image_data_uri, inspect_pdf_pages, render_pdf_to_images
+from ..utils import (
+    NO_THINKING,
+    encode_image_data_uri,
+    inspect_pdf_pages,
+    render_pdf_to_images,
+)
 from .llm_extractor import _parse_json_loose
 
 logger = logging.getLogger(__name__)
@@ -147,6 +152,7 @@ def _call_vl(
             model=model,
             messages=[{"role": "user", "content": content}],
             temperature=0.1,
+            extra_body=NO_THINKING,
         )
     except Exception as e:  # noqa: BLE001 — 外部调用，任何异常都降级，不让它中断入库
         logger.exception("VL 签章核查调用失败: %s", e)

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import NamedTuple, Optional
 
 from ..config import get_timeout_s, load_settings
-from ..utils import encode_image_data_uri, map_concurrent
+from ..utils import NO_THINKING, encode_image_data_uri, map_concurrent
 from ..utils.http_env import sanitized_httpx_proxy_env
 
 logger = logging.getLogger(__name__)
@@ -87,6 +87,7 @@ def _ocr_one_page(client, model: str, idx: int, path: Path, total: int) -> _Page
             model=model,
             messages=[{"role": "user", "content": content}],
             temperature=0.0,
+            extra_body=NO_THINKING,
         )
         choice = resp.choices[0]
         page_text = (choice.message.content or "").strip()
