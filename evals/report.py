@@ -34,6 +34,12 @@ from .score import (
 
 # 价格表（¥ / 百万 token，查询日期 2026-05-25，**估算，以阿里云百炼控制台为准**）。
 # 文本模型；带小版本号的是当前在售命名，无版本别名会随官方升级漂移（评测请锁 snapshot）。
+#
+# ⚠️ 表中数字未经权威复核，且已知与公开渠道口径冲突（2026-08 检索到 qwen3.7-max
+# 为 12/36，与此处 2.5/10.0 差约 4 倍）。百炼官方模型文档页不列单价，BSS 定价 API
+# 对百炼 token 计费返回空，只有账单 API（DescribeInstanceBill --IsBillingItem true）
+# 能给权威 ListPrice，但要求 CLI 登录账号与所用 API key 同属一个阿里云账号。
+# **下成本结论前必须先按上述方式核实，别直接引用本表。**
 PRICE_RMB_PER_M: dict[str, tuple[float, float]] = {
     # model: (input, output)
     "qwen3.7-max": (2.5, 10.0),
@@ -46,7 +52,10 @@ PRICE_RMB_PER_M: dict[str, tuple[float, float]] = {
     "qwen-turbo": (0.3, 0.6),
     "qwen3-235b-a22b": (0.7 * 7, 2.8 * 7),  # 国际美元价×约7 粗折人民币，待核
 }
-DEFAULT_PRICE = (2.5, 10.0)
+# 刻意不设 DEFAULT_PRICE 兜底：表里没有的模型，成本一律报"未知"。
+# 曾经用 (2.5, 10.0) 兜底，结果评测 qwen3.8-max 时它照抄了 qwen3.7-max 的价格，
+# 报告打出"¥69.9/千文档、与 champion 持平"这种看着可信的假数字——成本是替换决策的
+# 第二道闸门，宁可显式空缺逼人去查，也不能拿编的数字糊过去。
 
 
 # ============================================================================
@@ -133,7 +142,10 @@ def _cost_of(model: str, usage: Optional[dict]) -> Optional[float]:
     """据 usage 估单文档成本（¥）。usage 缺失返回 None。"""
     if not usage:
         return None
-    pin, pout = PRICE_RMB_PER_M.get(model, DEFAULT_PRICE)
+    price = PRICE_RMB_PER_M.get(model)
+    if price is None:            # 价格表没收录 → 不猜，交给上层报"未知"
+        return None
+    pin, pout = price
     itok = usage.get("input_tokens") or usage.get("prompt_tokens") or 0
     otok = usage.get("output_tokens") or usage.get("completion_tokens") or 0
     return itok / 1e6 * pin + otok / 1e6 * pout
@@ -217,7 +229,8 @@ def render_markdown(run_meta: dict, aggs: dict[str, ModelAgg], champion: str) ->
         mean, lo, _ = bootstrap_ci(ws)
         p50, p95 = agg.p50_p95()
         cost = agg.avg_cost_per_1k()
-        cost_s = f"{cost:.1f}" if cost is not None else "—"
+        known = model in PRICE_RMB_PER_M
+        cost_s = f"{cost:.1f}" if cost is not None else ("—" if known else "价格未收录")
         sig = agg.sig_recall()
         sig_s = f"{sig:.0%}" if sig is not None else "—"
         if model == champion:
