@@ -1,8 +1,8 @@
 # evals — 合同抽取换模型评测脚手架
 
-判断能否用更便宜/更快的模型替换 `qwen3.7-max`，覆盖**文本抽取线**和 **VL 签章线**。
-评测调项目自己的 `extract_document()` / `check_seals_on_images()` **整条链路**，对产出的
-`DocumentExtraction` 逐字段打分——测的就是生产实际会产出什么。
+判断能否用更便宜/更快的模型替换生产链路中的文本、OCR 或视觉模型。评测调项目自己的
+`extract_document()` / `run_full_extraction()` / `check_seals_on_images()`，对产出的
+`DocumentExtraction` 逐字段打分——测的就是生产实际会产出什么，而不是孤立 prompt 的输出。
 
 > 开源测评栈调研、为何薄自建、候选模型对比、方法学引用，全在 **[RESEARCH.md](./RESEARCH.md)**。
 
@@ -13,14 +13,15 @@ evals/
   RESEARCH.md     调研：开源框架横评 + 候选模型对比 + 方法学
   README.md       本文件：怎么跑 / 怎么加 case / 决策框架
   score.py        确定性逐字段打分（纯函数，可单测）
-  run.py          跑 cases×模型（抽取线）
+  run.py          跑 cases×模型×repeat（文本/OCR/视觉轴）
+  runtime.py      不可变 manifest、结果锁、原子 OCR artifact cache
   report.py       gate 决策表（抽取线）
   seal.py         VL 签章线（gen/run/report/demo 一体）
   demo.py         无 key 演示（产 sample_report.md）
   sample_report.md / sample_seal_report.md   演示产物
   cases/extraction/<id>/{input.txt, gold.json, meta.json}
   cases/seal/<id>/{page_*.png, gold.json, meta.json[, private/]}
-  results/        每次跑生成（已 gitignore）
+  results/        每次跑生成（已 gitignore；含 run_meta.json / results.jsonl / ocr-cache）
 ```
 
 ## 快速开始
@@ -30,17 +31,83 @@ evals/
 uv run --no-sync python -m evals.demo
 uv run --no-sync python -m evals.seal demo
 
-# 1) 真实跑（需 DASHSCOPE_API_KEY，走 .env / config）
-uv run --no-sync python -m evals.run --models qwen3.7-max,qwen-plus,qwen-flash --suite extraction
-uv run --no-sync python -m evals.report evals/results/<时间戳>
+# 1) 真实跑（需 DASHSCOPE_API_KEY，走 .env / config）。auto 优先 source.pdf，
+#    每个候选都会跑完整 OCR→类型路由→特化→融合链路。
+uv run --no-sync python -m evals.run \
+  --axis text --models qwen3.7-max,qwen3.7-plus,qwen3.8-flash \
+  --suite extraction --out evals/results/text-r1
+uv run --no-sync python -m evals.report evals/results/text-r1
 
-# 2) 签章线
+# 2) 单独评估 OCR 候选；qwen-vl-ocr 是当前生产基线，文本/VL 模型维持 manifest 中锁定的配置。
+uv run --no-sync python -m evals.run \
+  --axis ocr --models qwen-vl-ocr,qwen3.5-ocr \
+  --suite extraction --out evals/results/ocr-r1
+
+# 3) 单独评估视觉候选。一个候选同时覆盖 VL 签章和 fusion 看图抽字段模型。
+uv run --no-sync python -m evals.run \
+  --axis vision --models qwen3.6-flash,qwen3.7-plus \
+  --suite extraction --out evals/results/vision-r1
+
+# 4) 独立签章线
 uv run --no-sync python -m evals.seal gen                  # 合成 plumbing 图（首次）
 uv run --no-sync python -m evals.seal run --models qwen-vl-max,qwen3-vl-flash
 uv run --no-sync python -m evals.seal report evals/results/<seal_时间戳>
 ```
 
 测试用 `uv run --no-sync python -m pytest`（见仓库 memory：`uv run pytest` 会落到 pyenv shim）。
+
+## 运行矩阵、输入模式与模型轴
+
+`evals.run` 的一个结果 identity 是 `(candidate model, case_id, repeat_idx)`。PDF case 会真正循环
+`--models × --repeat`；它不再像旧 runner 一样只跑一次生产默认模型。候选 model id 记录在
+JSONL 的 `model`，`llm_model` 始终记录实际负责文档抽取的文本模型，因此 OCR/视觉轴不会把候选
+标签误报成文本模型。
+
+- `--axis text`（默认）：仅用 `model_overrides(text_model=<candidate>)` 覆盖文本模型。
+- `--axis ocr`：仅覆盖 `ocr_model`。每个 OCR 候选有独立缓存 key；其他模型保持锁定配置。
+- `--axis vision`：同时覆盖 `vl_model` 与 `vl_extract_model`，避免签章与融合偷偷混用两种候选。
+- `--input-mode auto`（默认）：有 `source.pdf` 时优先 PDF；否则用 `input.txt`。
+  `--input-mode text` 是旧文本基线对照，`--input-mode pdf` 强制只选有 PDF 的 case。
+- `--case-ids a,b` 允许低成本 smoke；选中的 case 集会写进 manifest，后续不能悄悄换成另一批。
+
+每条记录都有 `candidate_request` / `model_validation`，列出候选实际到达的 stage 和 model。
+若一个 case 根本没有适用请求（例如纯文本 PDF 在 OCR 轴没有 OCR 页），它会明确标
+`not_evaluated`；报告会把它当作证据不足，而不是把“没有调用”误当作候选通过。
+
+## OCR 缓存与成本口径
+
+同一 PDF 的 OCR 是可复用但昂贵的前置步骤。runner 用下列内容构造 cache key：PDF SHA-256、
+实际 OCR model、OCR 运行旋钮，以及 OCR 相关源码 hash。缓存目录中只在 OCR **完整成功**后原子
+发布 `source.pdf`、`ocr/`、OCR call ledger、耗时和 pipeline metadata；失败页或截断页绝不会被
+下一次运行复用。
+
+- 默认缓存是 `<out>/ocr-cache`；可用 `--cache-dir /path/to/shared-cache` 在多个 run 之间共享。
+- 每次候选抽取前都会把 cache artifact `copytree` 到独立临时目录，视觉融合按需补图不会污染共享 OCR。
+- JSONL 的 `calls` 会合并 OCR 与抽取调用。缓存复制的 OCR call 带 `cache_hit: true`；
+  `usage` / `logical_total_latency_s` 仍按每文档包含一次 OCR，`actual_usage` / `actual_ocr_latency_s`
+  则说明本次是否真的又发了请求。未知 usage 永远是未知，不会显示成零成本。
+
+## 可恢复运行与不可变 manifest
+
+首次写入 `--out` 时，runner 原子创建 `run_meta.json`。它固定 schema、suite、axis、input mode、
+case 的 input/gold SHA-256、源码 fingerprint、非敏感模型配置和运行旋钮、`expected_case_ids`、
+`repeat` 与 `config_fingerprint`。API key 不写入 manifest；base URL 会去掉 userinfo/query/fragment。
+候选轴上的模型配置故意不进入 fingerprint，因而可以安全地追加新候选：
+
+```bash
+# 同一 manifest 下只补跑 qwen3.8-flash，不会重跑已有成功 identity。
+uv run --no-sync python -m evals.run \
+  --axis text --models qwen3.8-flash --out evals/results/text-r1
+
+# partial/error 保留在 JSONL；只有这条显式命令会 append 一个 last-wins 重试记录。
+uv run --no-sync python -m evals.run \
+  --axis text --models qwen3.8-flash --out evals/results/text-r1 --retry-failed
+```
+
+改变 input/gold、选中 case、repeat、非候选配置、运行旋钮或源码后，runner 会拒绝续写；老目录若已有
+内容却没有 manifest，也会拒绝 append。一个 output directory 有进程锁，损坏 JSONL 同样拒绝继续写。
+单条失败不会中断矩阵，但命令最终返回非零，且 `status` 只能是 `ok`、`partial` 或 `error`；OCR 页失败/
+截断或生产阶段错误都不能伪装成成功。
 
 ## Step-0：先零脚手架冒烟，再做量化
 
@@ -133,7 +200,8 @@ CONTRACT_ARCHIVE_EVALSET_DIR=~/project/contract-archive-evalset/dataset \
 
 ```bash
 CONTRACT_ARCHIVE_EVALSET_DIR=~/project/contract-archive-evalset/dataset \
-  uv run --no-sync python -m evals.run --models qwen3.7-max --out evals/results/gate
+  uv run --no-sync python -m evals.run \
+    --axis text --input-mode auto --models qwen3.7-max --out evals/results/gate
 CONTRACT_ARCHIVE_EVALSET_DIR=~/project/contract-archive-evalset/dataset \
   uv run --no-sync python -m evals.report evals/results/gate
 ```

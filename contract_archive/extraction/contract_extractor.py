@@ -17,6 +17,7 @@ from ..schemas import (
     ExtractionConfidence,
     FieldConfidence,
 )
+from ..errors import ErrorInfo, extract_empty
 from .llm_extractor import call_llm_extract
 from .normalize import (
     coerce_bool,
@@ -33,6 +34,60 @@ _SCORED_FIELDS = (
     "contract_name", "party_a", "party_b", "amount",
     "sign_date", "expire_date", "auto_renewal", "risk_clauses",
 )
+
+
+def _invalid_obligations_error() -> ErrorInfo:
+    """Return a safe error when the specialised obligations payload is unusable.
+
+    A specialised extraction is allowed to replace the generic obligations only
+    when it explicitly supplied a fully valid list.  Treating a missing or partly
+    malformed value as ``[]`` would turn an absent model field into permission to
+    erase useful generic extraction results in the doc-type handler.
+    """
+    return ErrorInfo(
+        code="INVALID_RESPONSE",
+        category="validation",
+        message="LLM returned invalid obligations",
+        retryable=False,
+    )
+
+
+def _coerce_explicit_obligations(raw: dict) -> tuple[list, ErrorInfo | None]:
+    """Coerce only an explicit, entirely valid obligations list.
+
+    ``coerce_obligations`` owns the accepted actor aliases and normalisation.
+    Validate each item around that established coercer rather than recreating a
+    second alias table here.  Every semantic string field is deliberately strict:
+    silently stringifying a number/object makes malformed LLM JSON look like an
+    authoritative empty or valid result.
+    """
+    if "obligations" not in raw or not isinstance(raw.get("obligations"), list):
+        return [], _invalid_obligations_error()
+
+    obligations_raw = raw["obligations"]
+    for item in obligations_raw:
+        if not isinstance(item, dict):
+            return [], _invalid_obligations_error()
+        actor = item.get("actor")
+        action = item.get("action")
+        if not isinstance(actor, str) or not actor.strip():
+            return [], _invalid_obligations_error()
+        if not isinstance(action, str) or not action.strip():
+            return [], _invalid_obligations_error()
+        if any(
+            item.get(field) is not None and not isinstance(item.get(field), str)
+            for field in ("deadline", "evidence")
+        ):
+            return [], _invalid_obligations_error()
+        # This uses the existing actor aliases and action semantics.  A one-item
+        # result proves that the item did not have an unknown actor or blank
+        # action; anything else invalidates the entire replacement list.
+        if len(coerce_obligations([item])) != 1:
+            return [], _invalid_obligations_error()
+
+    # An explicit [] is meaningful: it is the one safe way for the specialised
+    # extractor to clear generic obligations.
+    return coerce_obligations(obligations_raw), None
 
 
 def _build_confidence(ext: ContractExtraction) -> ExtractionConfidence:
@@ -67,6 +122,7 @@ def extract_contract(
     document_text: str,
     llm_enabled: bool = True,
     model: str | None = None,
+    max_chars: int | None = None,
 ) -> tuple[ContractExtraction, ExtractionConfidence]:
     """
     合同字段抽取主入口（LLM-only）。
@@ -79,9 +135,39 @@ def extract_contract(
     if not llm_enabled:
         return ContractExtraction(), ExtractionConfidence()
 
-    raw = call_llm_extract(document_text, model=model).parsed
+    if max_chars is None:
+        result = call_llm_extract(document_text, model=model)
+    else:
+        result = call_llm_extract(document_text, model=model, max_chars=max_chars)
+    raw = result.parsed
     if not raw:
-        return ContractExtraction(), ExtractionConfidence()
+        # Keep the failed specialisation observable to the doc-type handler.  An
+        # empty object with no original transport/parse error is also an omitted
+        # obligations field, so it must not be mistaken for an authoritative [].
+        return (
+            ContractExtraction(
+                llm_model=result.model,
+                llm_usage=result.usage,
+                extraction_error=result.error or _invalid_obligations_error(),
+            ),
+            ExtractionConfidence(),
+        )
+
+    if not isinstance(raw, dict):
+        return (
+            ContractExtraction(
+                llm_model=result.model,
+                llm_usage=result.usage,
+                extraction_error=result.error or extract_empty("LLM returned invalid JSON"),
+            ),
+            ExtractionConfidence(),
+        )
+
+    # A truthy JSON object without an explicit valid obligations list is not a
+    # successful specialised obligation extraction.  Still retain every other
+    # parsable contract field and the call metadata for auditability; the handler
+    # will use ``extraction_error`` to preserve the generic obligations.
+    obligations, obligations_error = _coerce_explicit_obligations(raw)
 
     ext = ContractExtraction(
         contract_name=(raw.get("contract_name") or None),
@@ -92,7 +178,10 @@ def extract_contract(
         expire_date=normalize_date(raw.get("expire_date")) if isinstance(raw.get("expire_date"), str) else None,
         auto_renewal=coerce_bool(raw.get("auto_renewal")),
         risk_clauses=coerce_str_list(raw.get("risk_clauses")),
-        obligations=coerce_obligations(raw.get("obligations")),
+        obligations=obligations,
+        llm_model=result.model,
+        llm_usage=result.usage,
+        extraction_error=obligations_error or result.error,
     )
     ext.amount_value = parse_money_value(ext.amount)
     ext.raw_evidence = {

@@ -19,7 +19,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..schemas import ContractExtraction, DocumentExtraction, ExtractionConfidence
+from ..schemas import ContractExtraction, DocumentExtraction, ExtractionConfidence, StageIssue
+from ..utils import merge_usage
 from .contract_extractor import extract_contract
 from .insurance_extractor import INSURANCE_FIELD_DEFS
 from .vision_seal import augment_completeness_with_vision
@@ -49,7 +50,23 @@ def _contract_specialized(
 ) -> tuple[ContractExtraction, ExtractionConfidence]:
     """合同第二层：跑合同特化抽取，把义务/标题合回信封（专属 prompt 对义务/罚则区分更细）。"""
     ext, conf = extract_contract(document_text, llm_enabled=llm_enabled)
-    envelope.obligations = ext.obligations
+    # 合同特化是一次额外 LLM 调用，其用量应进入信封总账；失败调用若有已知 usage
+    # 同样不可丢掉。runtime 的逐调用账本由 ingest 顶层另行附着。
+    if ext.llm_usage:
+        envelope.llm_usage = merge_usage([envelope.llm_usage, ext.llm_usage])
+    if ext.extraction_error is not None:
+        envelope.extraction_error = ext.extraction_error
+        envelope.stage_issues.append(
+            StageIssue(
+                stage="contract_extract",
+                error=ext.extraction_error,
+                severity="error",
+            )
+        )
+    # 特化调用成功时，它的显式空列表也是一个有意义的纠偏结论（清掉通用抽取的误报）。
+    # 失败（包括无效 obligations JSON）或 --no-llm 时没有替换通用结果的权限。
+    if llm_enabled and ext.extraction_error is None:
+        envelope.obligations = ext.obligations
     if not ext.contract_name and envelope.title:
         ext.contract_name = envelope.title
     return ext, conf

@@ -20,6 +20,7 @@ from ..config import get_timeout_s, load_settings
 from ..errors import ErrorInfo, classify_exception, config_missing
 from ..utils.http_env import sanitized_httpx_proxy_env
 from ..utils.llm import NO_THINKING
+from ..utils.llm_runtime import observed_chat_completion
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,43 @@ class LlmResult:
     model: str                            # 本次实际请求的 model id
     usage: dict[str, Any] | None = None   # token 用量（DashScope resp["usage"]）；读不到为 None
     error: Optional[ErrorInfo] = None     # 结构化错误（缺 key / API 异常）；成功为 None
+
+
+def input_too_long_error(document_text: str, max_chars: int | None) -> ErrorInfo | None:
+    """显式长度上限只作调用方保护，绝不悄悄截掉文档中段。"""
+    if max_chars is None or len(document_text) <= max_chars:
+        return None
+    return ErrorInfo(
+        code="INPUT_TOO_LONG",
+        category="validation",
+        message=(
+            "document text exceeds the explicit max_chars limit "
+            f"({len(document_text)} > {max_chars})"
+        ),
+        retryable=False,
+    )
+
+
+def output_truncated_error() -> ErrorInfo:
+    """模型以 length 结束时不能把部分 JSON 伪装成成功抽取。"""
+    return ErrorInfo(
+        code="OUTPUT_TRUNCATED",
+        category="validation",
+        message="LLM response reached its output limit",
+        retryable=False,
+    )
+
+
+def safe_api_error(exc: BaseException, action: str) -> ErrorInfo:
+    """保留可重试分类，移除可能含 prompt/响应正文的异常消息。"""
+    classified = classify_exception(exc)
+    return ErrorInfo(
+        code=classified.code,
+        category=classified.category,
+        message=action,
+        retryable=classified.retryable,
+        retry_after_s=classified.retry_after_s,
+    )
 
 
 LLM_SYSTEM_PROMPT = """你是一名严谨的法律助理。请从给定的合同文本中抽取结构化字段。
@@ -89,7 +127,7 @@ def call_llm_extract(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
-    max_chars: int = 24000,
+    max_chars: int | None = None,
 ) -> LlmResult:
     """
     调用 DashScope LLM（OpenAI 兼容口）进行合同字段抽取。
@@ -97,7 +135,7 @@ def call_llm_extract(
     见 CLAUDE.md：DashScope 一律走 OpenAI 兼容接口（原生 Generation 不认部分模型 id）。
     :param document_text: 已 OCR 得到的合同全文（推荐用 markdown 版本）
     :param model: 默认从 DASHSCOPE_LLM_MODEL env 读，最终默认 qwen3.7-max
-    :param max_chars: 截断阈值，避免超过模型上下文
+    :param max_chars: 显式输入上限；超限返回 INPUT_TOO_LONG，默认发送全文
     :return: LlmResult（parsed/model/usage）；失败时 parsed={}，调用方判 `if not res.parsed`
     """
     # 统一从 config 层取（env > 配置文件 > 默认）；显式传参仍优先（param or settings）。
@@ -105,6 +143,9 @@ def call_llm_extract(
     model = model or settings.dashscope_model
     api_key = api_key or settings.dashscope_api_key
     base_url = base_url or settings.dashscope_base_url
+    too_long = input_too_long_error(document_text, max_chars)
+    if too_long is not None:
+        return LlmResult(parsed={}, model=model, error=too_long)
     if not api_key:
         logger.warning("DASHSCOPE_API_KEY missing; skip LLM extraction")
         return LlmResult(
@@ -112,28 +153,54 @@ def call_llm_extract(
             error=config_missing("DASHSCOPE_API_KEY 缺失，跳过 LLM 抽取"),
         )
 
-    user_msg = f"以下是合同正文，请抽取字段：\n\n{_truncate_middle(document_text, max_chars)}"
+    user_msg = f"以下是合同正文，请抽取字段：\n\n{document_text}"
     try:
-        content, usage = _call_openai_compat(LLM_SYSTEM_PROMPT, user_msg, model, api_key, base_url)
-    except Exception as e:  # noqa: BLE001 — 外部调用降级返回空，但保留结构化 error 供上层判重试
-        logger.exception("DashScope LLM call failed: %s", e)
-        return LlmResult(parsed={}, model=model, error=classify_exception(e))
+        content, usage, finish_reason = _call_openai_compat(
+            LLM_SYSTEM_PROMPT,
+            user_msg,
+            model,
+            api_key,
+            base_url,
+            stage="contract_extract",
+        )
+    except Exception as exc:  # noqa: BLE001 — 外部调用降级返回空，但保留结构化 error 供上层判重试
+        logger.warning("DashScope LLM contract extraction call failed")
+        return LlmResult(
+            parsed={}, model=model, error=safe_api_error(exc, "LLM contract extraction request failed")
+        )
 
+    if finish_reason == "length":
+        logger.warning("LLM contract extraction response reached its output limit")
+        return LlmResult(parsed={}, model=model, usage=usage, error=output_truncated_error())
     if not content:
         logger.warning("LLM empty response")
-        return LlmResult(parsed={}, model=model, usage=usage)
+        return LlmResult(
+            parsed={}, model=model, usage=usage,
+            error=ErrorInfo(
+                code="EMPTY_RESPONSE",
+                category="validation",
+                message="LLM returned an empty response",
+                retryable=False,
+            ),
+        )
     parsed = _parse_json_loose(content)
     if not parsed:
-        logger.warning("LLM response not parseable as JSON: %s", content[:200])
+        logger.warning("LLM contract extraction response was not parseable as JSON")
+        return LlmResult(
+            parsed={}, model=model, usage=usage,
+            error=ErrorInfo(
+                code="INVALID_JSON",
+                category="validation",
+                message="LLM returned invalid JSON",
+                retryable=False,
+            ),
+        )
     return LlmResult(parsed=parsed, model=model, usage=usage)
 
 
-def _truncate_middle(text: str, max_chars: int) -> str:
-    """超长则头 1/3 尾 2/3 截断——尾部承载签字/金额/到期日等关键信息，权重更高。"""
-    if len(text) <= max_chars:
-        return text
-    head = max_chars // 3
-    return text[:head] + "\n\n[...省略中段...]\n\n" + text[-(max_chars - head):]
+def _truncate_middle(text: str, max_chars: int | None) -> str:
+    """兼容旧的内部导入；新调用入口不再用它截断正文。"""
+    return text
 
 
 def _usage_from_openai(resp: Any) -> dict[str, Any] | None:
@@ -150,17 +217,24 @@ def _usage_from_openai(resp: Any) -> dict[str, Any] | None:
 
 
 def _call_openai_compat(
-    system_prompt: str, user_content: str, model: str, api_key: str, base_url: str
-) -> tuple[str, dict[str, Any] | None]:
+    system_prompt: str,
+    user_content: str,
+    model: str,
+    api_key: str,
+    base_url: str,
+    *,
+    stage: str,
+) -> tuple[str, dict[str, Any] | None, str | None]:
     """
-    经 DashScope 的 OpenAI 兼容接口调文本模型，返回 (content, usage)。失败抛异常由调用方降级。
+    经 DashScope 的 OpenAI 兼容接口调文本模型，返回 (content, usage, finish_reason)。
+    失败抛异常由调用方降级。
 
     见 CLAUDE.md：DashScope 一律走兼容口（原生 Generation 不认部分模型 id，如 qwen3.6-flash）。
     开 json_object；**不设 max_tokens**（避免 JSON 被截断成非法串）；各 prompt 已含 "JSON" 字样。
 
     显式 timeout（默认 300s，DASHSCOPE_TIMEOUT_S 可调）：不设则吃 SDK 默认 ~600s，
-    上游 hang 时 CI/agent 会静默干等近 10 分钟。300s 给长合同（截断后约 6 万字，
-    且故意不设 max_tokens）留足头寸，又不至无界等待。超时异常由调用方 except 兜底降级。
+    上游 hang 时 CI/agent 会静默干等近 10 分钟。300s 给长文档（不截断正文，且故意
+    不设 max_tokens）留足头寸，又不至无界等待。超时异常由调用方 except 兜底降级。
     """
     from openai import OpenAI
 
@@ -170,7 +244,9 @@ def _call_openai_compat(
             api_key=api_key, base_url=compat_url,
             timeout=get_timeout_s("DASHSCOPE_TIMEOUT_S", 300.0),
         )
-        resp = client.chat.completions.create(
+        resp = observed_chat_completion(
+            client,
+            stage=stage,
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -181,7 +257,12 @@ def _call_openai_compat(
             response_format={"type": "json_object"},
             extra_body=NO_THINKING,
         )
-    return (resp.choices[0].message.content or ""), _usage_from_openai(resp)
+    choice = resp.choices[0]
+    return (
+        choice.message.content or "",
+        _usage_from_openai(resp),
+        getattr(choice, "finish_reason", None),
+    )
 
 
 def _parse_json_loose(text: str) -> dict[str, Any]:

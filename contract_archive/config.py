@@ -21,6 +21,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .utils.llm_runtime import current_model_overrides
+
 logger = logging.getLogger(__name__)
 
 APP_CONFIG_DIR = "contract-archive"
@@ -28,7 +30,7 @@ CONFIG_FILENAME = "config.json"
 DEFAULT_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/api/v1"
 DEFAULT_DASHSCOPE_MODEL = "qwen3.7-max"
 DEFAULT_DASHSCOPE_VL_MODEL = "qwen3.6-flash"  # 多模态签章核查（OpenAI 兼容接口）；更准用 qwen3.6-plus
-DEFAULT_DASHSCOPE_OCR_MODEL = "qwen-vl-ocr-latest"  # OCR 阶段专用 OCR 模型，逐页调用（maxInput 30000，不能一次塞多页）
+DEFAULT_DASHSCOPE_OCR_MODEL = "qwen-vl-ocr"  # OCR 阶段专用 OCR 模型，逐页调用（maxInput 30000，不能一次塞多页）
 DEFAULT_DASHSCOPE_VL_EXTRACT_MODEL = "qwen3.6-flash"  # 多源融合的看图抽字段（通用 VL，需理解版式/表格，非纯 OCR）
 
 
@@ -160,7 +162,7 @@ def load_settings(path: Path | None = None) -> Settings:
     # 默认值的单一真相源是 CONFIG_KEYS 里的 default（_read_value 已兜底）。
     # 这里的 `or DEFAULT_*` 不是第二默认源（引用同一常量），只是把 read() 的 str|None
     # 类型收敛成 Settings 字段要求的 str。api_key 无 default，`or ""` 同理收敛。
-    return Settings(
+    settings = Settings(
         dashscope_api_key=read("dashscope.api_key") or "",
         dashscope_base_url=read("dashscope.base_url") or DEFAULT_DASHSCOPE_BASE_URL,
         dashscope_model=read("dashscope.model") or DEFAULT_DASHSCOPE_MODEL,
@@ -171,6 +173,16 @@ def load_settings(path: Path | None = None) -> Settings:
         archive_dir=read("archive.dir"),
         config_path=path or config_path(),
     )
+    overrides = current_model_overrides()
+    if overrides.text_model is not None:
+        settings.dashscope_model = overrides.text_model
+    if overrides.vl_model is not None:
+        settings.dashscope_vl_model = overrides.vl_model
+    if overrides.ocr_model is not None:
+        settings.dashscope_ocr_model = overrides.ocr_model
+    if overrides.vl_extract_model is not None:
+        settings.dashscope_vl_extract_model = overrides.vl_extract_model
+    return settings
 
 
 def set_value(key: str, value: str, path: Path | None = None) -> Path:

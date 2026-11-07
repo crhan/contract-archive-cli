@@ -40,6 +40,7 @@ from .archive import (
     checkpoint,
     delete_document,
     discover_pdfs,
+    get_document,
     ingest_pdf,
     open_archive_db,
     re_extract,
@@ -62,6 +63,8 @@ from .cli_common import (
     err_console,
     not_found_json,
 )
+
+logger = logging.getLogger(__name__)
 
 # ---------- ingest ----------
 
@@ -341,7 +344,7 @@ def delete(
     purge_files: bool = typer.Option(
         False,
         "--purge-files",
-        help="同时删除 archive/documents/<sha-short>/（默认只删 DB 行）",
+        help="同时删除该完整 SHA 的所有 archive generation（默认只删 DB 行）",
     ),
     yes: bool = typer.Option(False, "--yes", "-y", help="跳过确认提示"),
 ) -> None:
@@ -350,6 +353,9 @@ def delete(
     源 PDF（用户原文件）任何情况下都不会被删除。
     """
     paths = _resolve_archive(archive)
+    # Validate writable archive internals before open_archive_db creates its
+    # persistent schema lock under locks/.
+    paths.ensure()
     conn = open_archive_db(paths.db_path)
     row = _resolve_ident(conn, ident)
     if not row:
@@ -382,17 +388,70 @@ def delete(
             conn.close()
             raise typer.Exit(0)
 
-    output_dir = delete_document(conn, row.id)
-    checkpoint(conn)
-    conn.close()
+    # A confirmation prompt is outside the slot lock by design.  Re-read under
+    # the lock afterwards so a concurrent reingest/re-extract cannot make us
+    # validate one pointer and delete a newer row or generation.
+    purge_failures: list[tuple[Path, OSError]] = []
+    try:
+        with paths.slot_lock(row.sha256):
+            current = get_document(conn, row.id)
+            if current is None:
+                err_console.print(f"[yellow]already deleted: {ident}[/yellow]")
+                raise typer.Exit(1)
+            try:
+                # Validate containment/symlinks before touching the DB.  Purge
+                # additionally verifies every historical generation's source.pdf
+                # against the full SHA, never a short-prefix glob alone.
+                paths.resolve_document_dir(current)
+                purge_dirs = (
+                    paths.document_dirs_for_sha(current.sha256)
+                    if purge_files
+                    else []
+                )
+            except (OSError, ValueError) as exc:
+                err_console.print(
+                    f"[red]refusing delete: archive files failed safety validation: {exc}[/red]"
+                )
+                raise typer.Exit(1) from exc
 
-    if purge_files and output_dir:
-        from shutil import rmtree
+            delete_document(conn, current.id)
+            checkpoint(conn)
 
-        out = Path(output_dir)
-        if out.exists():
-            rmtree(out)
-            err_console.print(f"[green]✓ removed {out}[/green]")
+            if purge_files:
+                from shutil import rmtree
+
+                for directory in purge_dirs:
+                    try:
+                        rmtree(directory)
+                    except OSError as exc:
+                        logger.warning("could not purge archive generation %s: %s", directory, exc)
+                        purge_failures.append((directory, exc))
+                    else:
+                        err_console.print(f"[green]✓ removed {directory}[/green]")
+    finally:
+        conn.close()
+
+    if purge_failures:
+        # File deletion cannot be transactional with SQLite.  The record has
+        # already committed, so make the incomplete purge machine-visible and
+        # list only the controlled directories that remain for an operator to
+        # retry; do not claim full delete success.
+        remaining = [
+            directory
+            for directory, _exc in purge_failures
+            if directory.exists() or directory.is_symlink()
+        ]
+        err_console.print("[yellow]数据库记录已删除，但以下目录未清理：[/yellow]")
+        for directory, exc in purge_failures:
+            if directory in remaining:
+                # Avoid Rich's terminal-width wrapping: this is an exact,
+                # copyable retry path for manual cleanup.
+                print(f"  {directory}", file=err_console.file)
+                print(f"    error: {exc}", file=err_console.file)
+        if not remaining:
+            err_console.print("  [dim]目录已不存在；请按日志核对文件系统状态[/dim]")
+        raise typer.Exit(1)
+
     err_console.print(f"[green]✓ deleted DB row id={row.id}[/green]")
 
 

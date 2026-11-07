@@ -25,8 +25,8 @@ PDF ─► sha256 去重 ─► OCR 提取（页级分流：文本页原生 / �
                                           │
               ┌───────────────────────────┴──┐
               ▼                              ▼
-   db.sqlite (通用信封 + 索引)     documents/<sha-12>/
-                                    ├── source.pdf  (硬链接)
+   db.sqlite（通用信封 + 索引；       documents/<sha12>.gen-<uuid>/
+     output_dir 指向当前一代）        ├── source.pdf  （独立 copy，SHA 已核验）
                                     ├── ocr/markdown.md ...
                                     ├── extraction_result.json  (通用信封 + 融合 sidecar)
                                     └── ingest.log
@@ -118,7 +118,7 @@ $EDITOR .env   # 填入 DASHSCOPE_API_KEY
 | `DASHSCOPE_API_KEY` | `dashscope.api_key` | 必填。[百炼控制台](https://dashscope.console.aliyun.com/) 申请 |
 | `DASHSCOPE_LLM_MODEL` | `dashscope.model` | 默认 `qwen3.7-max`（用户百炼账户的特定别名；若 404 换 `qwen-max` / `qwen3-max`） |
 | `DASHSCOPE_BASE_URL` | `dashscope.base_url` | 默认 `https://dashscope.aliyuncs.com/api/v1`；海外换 `https://dashscope-intl.aliyuncs.com/api/v1` |
-| `DASHSCOPE_OCR_MODEL` | `dashscope.ocr_model` | 逐页 VL OCR 模型，默认 `qwen-vl-ocr-latest` |
+| `DASHSCOPE_OCR_MODEL` | `dashscope.ocr_model` | 逐页 VL OCR 模型，默认稳定 ID `qwen-vl-ocr` |
 | `DASHSCOPE_VL_MODEL` | `dashscope.vl_model` | 签章核查视觉模型，默认 `qwen3.6-flash` |
 | `DASHSCOPE_VL_EXTRACT_MODEL` | `dashscope.vl_extract_model` | 多源融合"看图抽字段"视觉模型，默认 `qwen3.6-flash` |
 | `CONTRACT_ARCHIVE_DIR` | `archive.dir` | 档案库根目录，默认 XDG `~/.local/share/contract-archive`；CLI `--archive` 优先 |
@@ -132,6 +132,12 @@ $EDITOR .env   # 填入 DASHSCOPE_API_KEY
 | `CONTRACT_ARCHIVE_VISION_FUSION_MAX_PAGES` | — | 融合看图单文档最多看几页（优先表格/扫描页），默认 `20` |
 | `CONTRACT_ARCHIVE_FUSION_THRESHOLD` | — | 融合低置信阈值 `[0,1]`，低于触发 agent 兜底，默认 `0.6` |
 | `CONTRACT_ARCHIVE_EVALSET_DIR` | — | 评测私有数据集根目录（仅开发/质量门禁用）；不设回退主仓库内合成 cases |
+
+OCR 默认值使用 [Qwen-VL-OCR 官方文档](https://help.aliyun.com/zh/model-studio/qwen-vl-ocr)
+列出的稳定 ID `qwen-vl-ocr`。在当前项目的已验证账号与 OpenAI 兼容端点中，
+`qwen-vl-ocr-latest` 会返回 `404 model_not_found`，而 `qwen-vl-ocr` 可正常完成请求；
+这不表示该别名已在所有区域或账号下线。已有环境变量或配置文件中的显式模型 ID 保持原样，
+程序不会在运行时静默改写或回退它们。
 
 > 标 `—` 的是运行时旋钮，保持 env-only、不进 config 文件层。
 
@@ -147,7 +153,7 @@ uv run contract-archive ingest ~/Documents/contracts/
 # 跳过字段抽取：仅入库 OCR 产物，抽取字段留空，可后续 extract 补抽
 uv run contract-archive ingest path/to/合同.pdf --no-llm
 
-# 强制重跑（已 ingest 过的也再跑一遍，覆盖旧记录）
+# 强制重跑（同一 SHA 会发布新一代并切换当前指针；旧代保留）
 uv run contract-archive ingest path/to/合同.pdf --reingest
 
 # 试跑前 3 个
@@ -158,6 +164,10 @@ uv run contract-archive ingest ~/Documents/contracts/ --dry-run        # 只预�
 uv run contract-archive ingest ~/Documents/contracts/ --max-files 20   # 超 20 个直接报错退出，防误喂大目录
 uv run contract-archive ingest ~/Documents/contracts/ --progress ndjson  # 每文件一行 JSON 事件，供 agent 流式消费
 ```
+
+> 每次 ingest / reingest 都在独立 generation 中工作，`source.pdf` 是经完整 SHA 校验的 copy，
+> 不是会随原文件变化的硬链接。文件先持久化发布、再切 DB 指针；运行未能发布或提交时，上次有效版本
+> 仍是当前版本。旧 generation 和可审计 orphan 不会自动清理。
 
 ### 查询
 
@@ -241,6 +251,10 @@ uv run contract-archive extract 5            # 复跑 id=5 的抽取
 uv run contract-archive extract 5 --no-llm   # 跳过 LLM（抽取字段留空，rule 已退役）
 ```
 
+默认会把完整 OCR 文本交给抽取，不会静默缩短正文。调用方若设置明确的长度预算，超限会以
+`INPUT_TOO_LONG` 失败；模型输出到达长度上限会标记 `OUTPUT_TRUNCATED`，不会把残缺 JSON 当成功。
+阶段问题中 required `error` 会让结果成为 `partial`，可选后处理的 `warning` 只保留诊断信息。
+
 ### 统计与维护
 
 ```bash
@@ -281,9 +295,12 @@ archive/
 ├── db.sqlite                     # 索引表
 ├── db.sqlite-wal / -shm          # WAL 模式产物（运行时）
 ├── ingest.jsonl                  # 总日志（每次 ingest 一行 JSON）
+├── locks/<sha12>.lock             # 从去重到 DB 提交都持有的槽锁；文件长期保留
+├── failed-logs/                   # 已有有效档案重跑失败时的独立诊断日志
+├── tmp/runs/<sha12>-<uuid>/       # 未发布 staging；异常时保留以供核查
 └── documents/
-    └── a3f9c2b1/                 # sha256 前 12 位
-        ├── source.pdf            # 硬链接源 PDF（跨盘 fallback copy）
+    └── a3f9c2b1c4d5.gen-<uuid>/  # 不可变 generation；db.output_dir 指向当前一代
+        ├── source.pdf            # 完整 SHA 校验后的独立 copy
         ├── ocr/
         │   ├── markdown.md
         │   ├── layout.json       # bbox 已归一到 PDF point
@@ -295,6 +312,17 @@ archive/
         ├── extraction_confidence.json
         └── ingest.log            # 单合同 stderr
 ```
+
+`output_dir` 是 DB pointer，不是可直接相信的绝对路径：命令会用受控目录名重新锚定到当前 archive，
+所以整体搬迁后仍可读取。不要手改该字段或在 `documents/` 放 symlink；这些路径会被拒绝。常规运行不做
+自动 GC，清理旧代或 orphan 前应先人工核对。
+
+## ✦ 模型变更实测
+
+换文本、OCR 或视觉模型不能只做一次 `extract`。用 [`evals/README.md`](evals/README.md) 的 runner
+分别跑 text / OCR / vision 三轴；优先让有 `source.pdf` 的 case 走完整生产链路。每个输出目录的
+`run_meta.json` 是不可变 manifest，OCR cache 只复用完整成功的产物；供应商没有返回 usage 时成本仍是
+unknown，不能按零计。
 
 ## ✦ Docker
 

@@ -11,7 +11,7 @@ Schema 的稳定性是这个项目的命脉——后续 compare.py 完全依赖�
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -132,6 +132,10 @@ class PipelineMeta(BaseModel):
     # 页级分流摘要：{"total","text_pages","ocr_pages","table_pages"}。
     # 供评测/调试看一份文档怎么被分流。
     page_routing: dict[str, int] = Field(default_factory=dict)
+    # VL OCR 页级异常状态。页码均为 1-based，直接对应 raw_text 的“第 X 页”标题，
+    # 便于补跑/人工复核；原生文本页不会出现在这里。
+    ocr_failed_pages: list[int] = Field(default_factory=list)
+    ocr_truncated_pages: list[int] = Field(default_factory=list)
 
 
 class PipelineOutput(BaseModel):
@@ -184,6 +188,11 @@ class ContractExtraction(BaseModel):
         default_factory=dict,
         description="字段→原文证据片段，用于人工抽检",
     )
+    # 合同特化调用的元数据。它们让 handler 即使在特化失败时也能把真实失败
+    # 传回通用信封，而不是把“空抽取”误当成一次成功。
+    llm_model: Optional[str] = None
+    llm_usage: Optional[dict[str, Any]] = None
+    extraction_error: Optional[ErrorInfo] = None
 
 
 # -------- 通用文档抽取（LLM-first，跨类型） --------
@@ -351,6 +360,14 @@ class FieldVerdict(BaseModel):
     candidates: list[FieldCandidate] = Field(default_factory=list)  # 喂给评判的全部候选（审计）
 
 
+class StageIssue(BaseModel):
+    """流水线某阶段的结构化问题，保留可机读错误但不包含 prompt/响应正文。"""
+
+    stage: str
+    error: ErrorInfo
+    severity: Literal["error", "warning"] = "error"
+
+
 class DocumentExtraction(BaseModel):
     """
     通用文档抽取信封：任何文档类型都归一化到这里（LLM-first）。
@@ -408,6 +425,12 @@ class DocumentExtraction(BaseModel):
     # 抽取元数据（非文档内容）：本次抽取失败的结构化错误，含 retryable 供 Agent 判重试。
     # 成功 / --no-llm 为 None。随 extraction_result.json 留存，并由 ingest 读出填 IngestResult.error。
     extraction_error: Optional[ErrorInfo] = None
+    # 各阶段的失败/降级状态。document/contract/OCR 等必需阶段用 error；可选的
+    # 融合、签章看图用 warning，保留已抽出的原字段不受影响。
+    stage_issues: list[StageIssue] = Field(default_factory=list)
+    # 本次抽取实际发生的 LLM 调用账本。运行时观察器由 ingest 在单次运行边界收集后
+    # 写入，schema 在此处保证落盘/向后兼容；记录本身保持 JSON-safe dict。
+    llm_calls: list[dict[str, Any]] = Field(default_factory=list)
     # 多源融合 sidecar（保险等开启 vision fusion 的类型才填）：高价值概念的逐项评判结论。
     # **只读不回写原字段**——保护 amounts/fields 的 evidence/unit/computed_total 不变量。
     # 随 model_dump_json 进 details_json，零 DB 迁移。未融合为空列表。

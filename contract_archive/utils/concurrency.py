@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextvars import copy_context
 from typing import Callable, TypeVar
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,13 @@ def map_concurrent(
 
     out: list[R] = [None] * len(items)  # type: ignore[list-item]
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        fut_to_idx = {ex.submit(_run_one, fn, it, on_error): i for i, it in enumerate(items)}
+        # Context objects cannot be entered by multiple threads at once. Copy once
+        # per submitted task so scoped model overrides and call collectors propagate
+        # safely to every worker without sharing a Context instance.
+        fut_to_idx = {
+            ex.submit(copy_context().run, _run_one, fn, it, on_error): i
+            for i, it in enumerate(items)
+        }
         for fut in as_completed(fut_to_idx):
             out[fut_to_idx[fut]] = fut.result()
     return out

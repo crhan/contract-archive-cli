@@ -60,12 +60,13 @@ def test_config_file_overrides_default(tmp_path):
 
 
 def test_ocr_model_defaults():
-    assert cfg.load_settings().dashscope_ocr_model == cfg.DEFAULT_DASHSCOPE_OCR_MODEL
+    assert cfg.DEFAULT_DASHSCOPE_OCR_MODEL == "qwen-vl-ocr"
+    assert cfg.load_settings().dashscope_ocr_model == "qwen-vl-ocr"
 
 
-def test_ocr_model_env_over_default(monkeypatch):
-    monkeypatch.setenv("DASHSCOPE_OCR_MODEL", "qwen-vl-ocr-custom")
-    assert cfg.load_settings().dashscope_ocr_model == "qwen-vl-ocr-custom"
+def test_ocr_model_env_preserves_explicit_legacy_alias(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_OCR_MODEL", "qwen-vl-ocr-latest")
+    assert cfg.load_settings().dashscope_ocr_model == "qwen-vl-ocr-latest"
 
 
 def test_ocr_model_file_over_default(tmp_path):

@@ -142,8 +142,8 @@ def test_ingest_happy_path(archive_root, conn, sample_pdf, sample_markdown):
     assert result.sha256
     assert result.ocr_duration_s is not None
 
-    # 文件落盘检查（rename 事务边界后所有 archive 内文件都应到位）
-    doc_dir = archive_root.doc_dir(result.sha256)
+    # 文件落盘检查：DB output_dir 是当前 immutable generation 的唯一指针。
+    doc_dir = archive_root.resolve_document_dir(get_document(conn, result.doc_id))
     assert (doc_dir / "source.pdf").exists()
     assert (doc_dir / "source.pdf").read_bytes() == sample_pdf.read_bytes()
     assert (doc_dir / "ocr" / "markdown.md").exists()
@@ -201,7 +201,9 @@ def test_ingest_reingest_replaces(archive_root, conn, sample_pdf, sample_markdow
     after = get_document(conn, r2.doc_id)
     assert after.ingested_at == orig.ingested_at  # ingested_at 不应被覆盖
     # markdown 内容确实换了
-    new_md = (archive_root.doc_dir(r2.sha256) / "ocr" / "markdown.md").read_text(encoding="utf-8")
+    new_md = (
+        archive_root.resolve_document_dir(get_document(conn, r2.doc_id)) / "ocr" / "markdown.md"
+    ).read_text(encoding="utf-8")
     assert "新版合同" in new_md
 
 
@@ -219,9 +221,9 @@ def test_ingest_ocr_failure_writes_failed_status(
         r = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
     assert r.status == "failed"
     assert "simulated OCR crash" in r.error_message
-    # 失败时 tmp 应该被清理，但 documents/<sha>/source.pdf 要保留供 show/人工核对。
-    doc_dir = archive_root.doc_dir(r.sha256)
-    assert not (archive_root.tmp_dir / r.sha256[:12]).exists()
+    # 新失败会发布独立 failed generation；staging 不再使用固定的 tmp/<sha> 槽。
+    doc_dir = archive_root.resolve_document_dir(get_document(conn, r.doc_id))
+    assert not list(archive_root.runs_dir.glob(f"{r.sha256[:12]}-*"))
     assert doc_dir.exists()
     assert (doc_dir / "source.pdf").read_bytes() == sample_pdf.read_bytes()
     assert (doc_dir / "ingest.log").exists()
@@ -264,14 +266,17 @@ def test_duplicate_ingest_repairs_missing_archived_source(
     stub = StubOCRPipeline(markdown_text=sample_markdown)
     with _patch_pipeline(stub):
         r1 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
-    source_pdf = archive_root.doc_dir(r1.sha256) / "source.pdf"
+    source_pdf = archive_root.resolve_document_dir(get_document(conn, r1.doc_id)) / "source.pdf"
     source_pdf.unlink()
 
     with _patch_pipeline(stub):
         r2 = ingest_pdf(sample_pdf, archive_root, conn, llm_enabled=False)
 
     assert r2.status == "skipped"
-    assert source_pdf.read_bytes() == sample_pdf.read_bytes()
+    repaired_source = archive_root.resolve_document_dir(get_document(conn, r1.doc_id)) / "source.pdf"
+    assert repaired_source != source_pdf
+    assert not source_pdf.exists()  # published generations are never repaired in place
+    assert repaired_source.read_bytes() == sample_pdf.read_bytes()
 
 
 def test_list_and_search(archive_root, conn, sample_pdf, tmp_path):
@@ -418,7 +423,7 @@ def test_show_ident_sha_prefix(archive_root, conn, sample_pdf, sample_markdown):
         archive_root=archive_root.root,
         include_original_source=False,
     )
-    archived_source = archive_root.doc_dir(r.sha256) / "source.pdf"
+    archived_source = archive_root.resolve_document_dir(get_document(conn, r.doc_id)) / "source.pdf"
     assert payload["source_path"] == str(archived_source)
     assert payload["archive_source_exists"] is True
     assert "original_source_path" not in payload

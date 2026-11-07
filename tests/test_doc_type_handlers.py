@@ -6,7 +6,9 @@ _run_extraction 据 doc_type 查表分派（合同走特化、非合同走信封
 from __future__ import annotations
 
 from contract_archive.archive import ingest
+from contract_archive.extraction import contract_extractor
 from contract_archive.extraction import doc_type_handlers as dth
+from contract_archive.extraction.llm_extractor import LlmResult
 from contract_archive.extraction.vision_seal import augment_completeness_with_vision
 from contract_archive.schemas import ContractExtraction, DocumentExtraction, ExtractionConfidence
 
@@ -29,19 +31,23 @@ def test_get_handler_unregistered_falls_back_to_default():
 
 
 def test_contract_specialized_merges_obligations_and_title(monkeypatch):
-    from contract_archive.schemas import ObligationItem
-
-    obls = [ObligationItem(actor="party_a", action="付款")]
-
-    def fake_extract_contract(text, llm_enabled=True):
-        return ContractExtraction(contract_name=None, obligations=obls), ExtractionConfidence()
-
-    monkeypatch.setattr(dth, "extract_contract", fake_extract_contract)
+    """Run the real contract extractor; only the LLM boundary is mocked."""
+    monkeypatch.setattr(
+        contract_extractor,
+        "call_llm_extract",
+        lambda *_args, **_kwargs: LlmResult(
+            parsed={
+                "contract_name": None,
+                "obligations": [{"actor": "甲方", "action": "付款"}],
+            },
+            model="contract-test",
+        ),
+    )
     env = DocumentExtraction(doc_type="合同协议", title="某买卖合同")
     ext, conf = dth._contract_specialized("正文", env, True)
 
     # 义务合回信封（合同专属 prompt 对义务更细）
-    assert env.obligations == obls
+    assert [(item.actor, item.action) for item in env.obligations] == [("party_a", "付款")]
     # 合同抽取没给 contract_name → 回退用信封 title
     assert ext.contract_name == "某买卖合同"
 

@@ -15,11 +15,17 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..config import get_timeout_s, load_settings
-from ..errors import ErrorInfo, config_missing
+from ..errors import ErrorInfo, config_missing, extract_empty
 from ..schemas import FieldCandidate
 from ..utils import NO_THINKING, encode_image_data_uri, map_concurrent, merge_usage
 from ..utils.http_env import sanitized_httpx_proxy_env
-from .llm_extractor import _parse_json_loose, _usage_from_openai
+from ..utils.llm_runtime import observed_chat_completion
+from .llm_extractor import (
+    _parse_json_loose,
+    _usage_from_openai,
+    output_truncated_error,
+    safe_api_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,11 +107,15 @@ def read_fields_on_images(
 
     by_key: dict[str, list[FieldCandidate]] = {k: [] for k in keys}
     usages: list[Optional[dict]] = []
+    errors: list[ErrorInfo] = []
     for label, res in zip(labels, per_image):
-        if not res:  # 该页失败（map_concurrent 降级 None）
+        if not res:  # 防御性兜底：worker 已自行隔离异常，正常不会走到这里
             continue
-        parsed, usage = res
+        parsed, usage, error = res
         usages.append(usage)
+        if error is not None:
+            errors.append(error)
+            continue
         for k in keys:
             cand = candidate_from_raw(parsed.get(k), source="vision", page=label)
             if cand is not None:
@@ -115,6 +125,7 @@ def read_fields_on_images(
         by_key={k: v for k, v in by_key.items() if v},  # 丢掉无候选的键
         model=model,
         usage=merge_usage(usages),
+        error=errors[0] if errors else None,
     )
 
 
@@ -126,20 +137,41 @@ def _build_prompt(fields_spec: dict[str, str]) -> str:
     return VISION_EXTRACT_PROMPT.format(fields=fields, schema=schema)
 
 
-def _read_one(client, model: str, prompt: str, path: Path) -> tuple[dict, Optional[dict]]:
-    """看一张图抽字段，返回 (parsed_json, usage)。异常由 map_concurrent 隔离为 None。"""
-    content = [
-        {"type": "text", "text": prompt},
-        {"type": "image_url", "image_url": {"url": encode_image_data_uri(path)}},
-    ]
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": content}],
-        temperature=0.0,
-        extra_body=NO_THINKING,
-    )
-    parsed = _parse_json_loose(resp.choices[0].message.content or "")
-    return parsed, _usage_from_openai(resp)
+def _read_one(
+    client, model: str, prompt: str, path: Path
+) -> tuple[dict, Optional[dict], Optional[ErrorInfo]]:
+    """看一张图抽字段，返回 (parsed_json, usage, safe_error)。
+
+    逐页异常必须自己变成结构化结果，不能交给 map_concurrent 的默认日志（它会
+    记录上游异常文本）。其他页仍可正常产生候选。
+    """
+    try:
+        content = [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": encode_image_data_uri(path)}},
+        ]
+        resp = observed_chat_completion(
+            client,
+            stage="fusion_vision",
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            temperature=0.0,
+            extra_body=NO_THINKING,
+        )
+    except Exception as exc:  # noqa: BLE001 - 单页失败不能阻断其他页
+        return {}, None, safe_api_error(exc, "Fusion vision extraction request failed")
+
+    usage = _usage_from_openai(resp)
+    choice = resp.choices[0]
+    if getattr(choice, "finish_reason", None) == "length":
+        return {}, usage, output_truncated_error()
+    content_text = choice.message.content or ""
+    if not content_text:
+        return {}, usage, extract_empty("LLM returned an empty response")
+    parsed = _parse_json_loose(content_text)
+    if not parsed:
+        return {}, usage, extract_empty("LLM returned invalid JSON")
+    return parsed, usage, None
 
 
 _NULLISH = {"", "null", "none", "n/a", "无", "未知"}

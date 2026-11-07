@@ -318,3 +318,63 @@ def test_agent_fallback_is_noop():
     doc = DocumentExtraction(doc_type="保险凭证", fusion_overall_confidence=0.3)
     out = agent_fallback.escalate_low_confidence(doc, source_pdf="x.pdf")
     assert out is doc  # 原样返回，不改抽取
+
+
+# ---------- source usage is retained on optional-fusion failures ----------
+
+
+def _patch_source_results(monkeypatch, text_by_key, vision_by_key):
+    from contract_archive.extraction import text_fields, vl_extract
+    from contract_archive.extraction.text_fields import TextFieldsResult
+    from contract_archive.extraction.vl_extract import VisionFieldsResult
+
+    monkeypatch.setattr(
+        text_fields,
+        "read_fields_in_text",
+        lambda *_args, **_kwargs: TextFieldsResult(
+            by_key=text_by_key,
+            usage={"input_tokens": 2, "output_tokens": 3, "total_tokens": 11},
+        ),
+    )
+    monkeypatch.setattr(
+        vl_extract,
+        "read_fields_on_images",
+        lambda *_args, **_kwargs: VisionFieldsResult(
+            by_key=vision_by_key,
+            usage={"input_tokens": 4, "output_tokens": 5, "total_tokens": 22},
+        ),
+    )
+
+
+def test_source_usage_survives_no_candidate_return(monkeypatch):
+    """A/C requests still count when both sources return no candidate."""
+    _patch_source_results(monkeypatch, {}, {})
+    env = DocumentExtraction(
+        doc_type="保险凭证",
+        llm_usage={"input_tokens": 1, "output_tokens": 1, "total_tokens": 6},
+    )
+
+    assert fusion.run_vision_fusion(env, "全文", {1: Path("p1")}, fields={"k": "字段"}) is False
+    assert env.llm_usage == {"input_tokens": 7, "output_tokens": 9, "total_tokens": 39}
+
+
+def test_source_usage_survives_adjudication_setup_failure(monkeypatch):
+    """A/C usage is committed before an OpenAI client construction failure."""
+    _patch_source_results(monkeypatch, {"k": [_t("A")]}, {"k": [_v("B", page=1)]})
+    fake_openai = types.ModuleType("openai")
+
+    def fail_client(**_kwargs):
+        raise RuntimeError("constructor body must not enter the ledger")
+
+    fake_openai.OpenAI = fail_client
+    monkeypatch.setitem(sys.modules, "openai", fake_openai)
+    env = DocumentExtraction(
+        doc_type="保险凭证",
+        llm_usage={"input_tokens": 1, "output_tokens": 1, "total_tokens": 6},
+    )
+
+    assert fusion.run_vision_fusion(env, "全文", {1: Path("p1")}, fields={"k": "字段"}) is False
+    assert env.llm_usage == {"input_tokens": 7, "output_tokens": 9, "total_tokens": 39}
+    assert [(issue.stage, issue.severity) for issue in env.stage_issues] == [
+        ("fusion_adjudicate", "warning")
+    ]

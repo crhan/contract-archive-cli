@@ -634,10 +634,14 @@ def update_extraction(
     extraction: ContractExtraction,
     confidence: ExtractionConfidence,
     envelope: Optional[DocumentExtraction] = None,
+    output_dir: Optional[str] = None,
 ) -> None:
     """
     复跑抽取（OCR 产物已存在）后更新字段。同一事务：
     risk_clauses / obligations 显式 DELETE 再 INSERT，避免重复堆积。
+
+    ``output_dir`` 是已发布 immutable generation 的新 pointer。传入时它和所有
+    新抽取字段在同一个 SQLite 事务中切换；事务失败时旧 pointer/字段原样保留。
     """
     ext = extraction
     env = envelope or contract_to_envelope(ext)
@@ -645,6 +649,7 @@ def update_extraction(
         conn.execute(
             """
             UPDATE documents SET
+              output_dir = COALESCE(?, output_dir),
               status = ?,
               llm_duration_s = ?,
               error_message = ?,
@@ -657,6 +662,7 @@ def update_extraction(
             WHERE id = ?
             """,
             (
+                output_dir,
                 status,
                 llm_duration_s,
                 error_message,
@@ -687,6 +693,22 @@ def update_extraction(
         _insert_obligations(conn, doc_id, env.obligations)
         _insert_seals(conn, doc_id, _collect_seals(env))
         _insert_subjects(conn, doc_id, _subjects_for(env, ext))
+
+
+def update_output_dir(conn: sqlite3.Connection, doc_id: int, output_dir: str) -> None:
+    """仅切换 documents.output_dir pointer，不改既有档案元数据。
+
+    用于发现当前 generation 缺少 ``source.pdf`` 时：先从旧 generation copy 到新的
+    staging、补齐独立快照、发布，再在这个小事务里切 pointer。历史 generation 不会被
+    就地修补或删除。
+    """
+    with transaction(conn):
+        cursor = conn.execute(
+            "UPDATE documents SET output_dir = ? WHERE id = ?",
+            (output_dir, doc_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"document id={doc_id} not found while updating output_dir")
 
 
 def replace_document(

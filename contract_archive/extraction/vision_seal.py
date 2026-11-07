@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..config import get_timeout_s, load_settings
+from ..errors import ErrorInfo, config_missing, extract_empty
 from ..schemas import (
     Completeness,
     CompletenessIssue,
@@ -22,6 +23,7 @@ from ..schemas import (
     LabeledValue,
     PersonIdentity,
     PREVIEW_DIR,
+    StageIssue,
 )
 from ..utils import (
     NO_THINKING,
@@ -29,7 +31,12 @@ from ..utils import (
     inspect_pdf_pages,
     render_pdf_to_images,
 )
-from .llm_extractor import _parse_json_loose
+from ..utils.llm_runtime import observed_chat_completion
+from .llm_extractor import (
+    _parse_json_loose,
+    output_truncated_error,
+    safe_api_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,8 +111,8 @@ def _ensure_tail_previews(ocr_dir: Path, preview: Path, max_pages: int) -> None:
         page_infos = inspect_pdf_pages(source_pdf)
         start = max(0, len(page_infos) - max_pages)
         render_pdf_to_images(source_pdf, preview, dpi=160, pages=list(range(start, len(page_infos))))
-    except Exception as e:  # noqa: BLE001 - 签章预览是可选增强，失败即降级
-        logger.warning("渲染落款候选页失败: %s", e)
+    except Exception:  # noqa: BLE001 - 签章预览是可选增强，失败即降级
+        logger.warning("rendering candidate signature pages failed")
 
 
 def _signature_page_idxs_from_text(ocr_dir: Path) -> list[int]:
@@ -129,38 +136,49 @@ def _signature_page_idxs_from_text(ocr_dir: Path) -> list[int]:
 
 def _call_vl(
     image_paths: list[Path], model: str, api_key: str, base_url: str
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[ErrorInfo]]:
     """
-    走 DashScope 的 OpenAI 兼容接口调多模态模型看落款页图。失败返回 None。
+    走 DashScope 的 OpenAI 兼容接口调多模态模型看落款页图。失败返回安全错误。
 
     端点：把原生 base_url 的 /api/v1 换成 /compatible-mode/v1（DashScope OpenAI 兼容模式）。
     图：本地 PNG 转 base64 data URI（兼容接口不支持 file://）。
     """
-    from openai import OpenAI
-
-    compat_url = base_url.replace("/api/v1", "/compatible-mode/v1")
-    content: list[dict] = [{"type": "text", "text": VL_PROMPT}]
-    for p in image_paths:
-        content.append({"type": "text", "text": f"【第 {_page_no(p)} 页】"})
-        content.append({"type": "image_url", "image_url": {"url": encode_image_data_uri(p)}})
-    content.append({"type": "text", "text": "请逐页核查落款签章，按要求输出 JSON（每个 unit 回填 page）。"})
     try:
+        # 图像读取/编码、SDK 构造、请求和响应解包都属于可选增强阶段；任一处
+        # 失败都必须留下安全 warning，而不能让后续错误地清空文本抽取的签章问题。
+        from openai import OpenAI
+
+        compat_url = base_url.replace("/api/v1", "/compatible-mode/v1")
+        content: list[dict] = [{"type": "text", "text": VL_PROMPT}]
+        for p in image_paths:
+            content.append({"type": "text", "text": f"【第 {_page_no(p)} 页】"})
+            content.append(
+                {"type": "image_url", "image_url": {"url": encode_image_data_uri(p)}}
+            )
+        content.append(
+            {"type": "text", "text": "请逐页核查落款签章，按要求输出 JSON（每个 unit 回填 page）。"}
+        )
         # 显式 timeout（默认 300s，DASHSCOPE_TIMEOUT_S 可调）：VL 内联多张落款页大图、
         # 请求体大更易长挂，不设则吃 SDK 默认 ~600s。超时走下面 except 降级返回 None。
         client = OpenAI(
             api_key=api_key, base_url=compat_url,
             timeout=get_timeout_s("DASHSCOPE_TIMEOUT_S", 300.0),
         )
-        resp = client.chat.completions.create(
+        resp = observed_chat_completion(
+            client,
+            stage="seal_vision",
             model=model,
             messages=[{"role": "user", "content": content}],
             temperature=0.1,
             extra_body=NO_THINKING,
         )
-    except Exception as e:  # noqa: BLE001 — 外部调用，任何异常都降级，不让它中断入库
-        logger.exception("VL 签章核查调用失败: %s", e)
-        return None
-    return resp.choices[0].message.content
+        choice = resp.choices[0]
+        if getattr(choice, "finish_reason", None) == "length":
+            return None, output_truncated_error()
+        return choice.message.content, None
+    except Exception as exc:  # noqa: BLE001 — 外部调用，任何异常都降级，不让它中断入库
+        logger.warning("VL seal verification call failed")
+        return None, safe_api_error(exc, "VL seal verification request failed")
 
 
 def _page_no(image: Path) -> str:
@@ -188,7 +206,10 @@ def _issues_from_vision(parsed: dict, fallback_evidence: str = "") -> list[Compl
             role = str(party.get("role") or "").strip()
             if not role:
                 continue
-            if not bool(party.get("has_seal")) and not bool(party.get("has_signature")):
+            # _read_seals_on_images_with_issue validates these as real bool values.
+            # Keep exact checks here too so a direct/internal caller cannot turn the
+            # string "false" into a truthy signed result.
+            if party.get("has_seal") is False and party.get("has_signature") is False:
                 issues.append(CompletenessIssue(
                     item=f"{agreement}·{role}签章",
                     category="signature",
@@ -220,23 +241,84 @@ def read_seals_on_images(
     :return: 解析后的 dict（无图 → {"units": []}）；无 key / VL 调用失败 /
              响应无法解析返回 None——让调用方据此降级（保留原文本签章判断）。
     """
+    parsed, _ = _read_seals_on_images_with_issue(images, model, api_key, base_url)
+    return parsed
+
+
+def _read_seals_on_images_with_issue(
+    images: list[Path],
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+) -> tuple[Optional[dict], Optional[ErrorInfo]]:
+    """与 public read_seals_on_images 相同，但把可选阶段的安全错误返回给 handler。"""
     if not images:
-        return {"units": []}
+        return {"units": []}, None
     settings = load_settings()
     model = model or settings.dashscope_vl_model
     api_key = api_key or settings.dashscope_api_key
     base_url = base_url or settings.dashscope_base_url
     if not api_key:
         logger.warning("DASHSCOPE_API_KEY missing; skip VL seal check")
-        return None
-    text = _call_vl(images, model, api_key, base_url)
+        return None, config_missing("DASHSCOPE_API_KEY missing; skip VL seal verification")
+    text, error = _call_vl(images, model, api_key, base_url)
+    if error is not None:
+        return None, error
     if not text:
-        return None
+        return None, extract_empty("LLM returned an empty response")
     parsed = _parse_json_loose(text)
     if not parsed:
-        logger.warning("VL 签章响应无法解析为 JSON: %s", text[:200])
-        return None
-    return parsed
+        logger.warning("VL seal verification response was not parseable as JSON")
+        return None, extract_empty("LLM returned invalid JSON")
+    structure_error = _invalid_seal_response_error(parsed)
+    if structure_error is not None:
+        logger.warning("VL seal verification response had an invalid structure")
+        return None, structure_error
+    return parsed, None
+
+
+def _invalid_seal_response_error(parsed: object) -> Optional[ErrorInfo]:
+    """Validate the minimum structure needed to replace text-derived seal issues.
+
+    The model may legitimately omit optional prompt fields such as ``agreement``,
+    ``page`` and seal-reading metadata.  It may not omit the actual signing verdict:
+    every returned unit must contain at least one party, and every party must have a
+    non-empty role plus literal JSON booleans for both verdicts.  A partially valid
+    response is deliberately rejected as a whole: accepting its good units would
+    incorrectly clear issues for the unverified units.
+    """
+    if not isinstance(parsed, dict):
+        return _seal_response_structure_error()
+    units = parsed.get("units")
+    if not isinstance(units, list) or not units:
+        return _seal_response_structure_error()
+    for unit in units:
+        if not isinstance(unit, dict):
+            return _seal_response_structure_error()
+        parties = unit.get("parties")
+        if not isinstance(parties, list) or not parties:
+            return _seal_response_structure_error()
+        for party in parties:
+            if not isinstance(party, dict):
+                return _seal_response_structure_error()
+            role = party.get("role")
+            if not isinstance(role, str) or not role.strip():
+                return _seal_response_structure_error()
+            if type(party.get("has_seal")) is not bool:
+                return _seal_response_structure_error()
+            if type(party.get("has_signature")) is not bool:
+                return _seal_response_structure_error()
+    return None
+
+
+def _seal_response_structure_error() -> ErrorInfo:
+    """Safe, machine-readable error for a syntactically valid but unusable result."""
+    return ErrorInfo(
+        code="INVALID_RESPONSE",
+        category="validation",
+        message="LLM returned an invalid seal verification structure",
+        retryable=False,
+    )
 
 
 def check_seals_on_images(
@@ -282,6 +364,12 @@ def _seal_number(party: dict) -> str:
 # 反被幻觉的"甲方|X"主体截走章号（实测的浙典/浙奥分裂成因之一）。
 _ROLE_GROUP_A = ("甲", "出卖", "卖方", "出租", "转让", "出借", "供方", "发包")
 _ROLE_GROUP_B = ("乙", "买受", "买方", "承租", "受让", "借款", "需方", "承包")
+_SINGLE_PAGE_EVIDENCE_RE = re.compile(
+    r"^\s*(?:据落款页图\s*[：:]?\s*)?第\s*(\d+)\s*页\s*$"
+)
+_SUPPLEMENT_AGREEMENT_RE = re.compile(
+    r"^补充协议(?:[一二三四五六七八九十百千]+|\d+|[（(](?:[一二三四五六七八九十百千]+|\d+)[）)])?$"
+)
 
 
 def _role_group(role: str) -> str:
@@ -292,6 +380,164 @@ def _role_group(role: str) -> str:
     if any(k in text for k in _ROLE_GROUP_B):
         return "B"
     return ""
+
+
+def _coverage_role_group(role: object) -> str:
+    """Return an unambiguous A/B role group for destructive issue replacement.
+
+    ``_role_group`` intentionally has a permissive first-match behaviour for
+    attaching optional seal identifiers.  Clearing a pre-existing issue needs a
+    stricter proof: a phrase containing aliases from both camps (for example
+    ``甲乙双方``) has no unique party slot and must not authorise a clear.
+    """
+    if not isinstance(role, str):
+        return ""
+    text = role.strip()
+    if not text:
+        return ""
+    is_a = any(alias in text for alias in _ROLE_GROUP_A)
+    is_b = any(alias in text for alias in _ROLE_GROUP_B)
+    if is_a == is_b:
+        return ""
+    # Keep the existing role normaliser as the source of the returned group.
+    return _role_group(text)
+
+
+def _coverage_agreement(value: object) -> str:
+    """Map only unambiguous model agreement labels to a stable slot kind."""
+    if not isinstance(value, str):
+        return ""
+    label = "".join(value.split())
+    if label in {"主协议", "主合同", "本协议"}:
+        return "main"
+    if _SUPPLEMENT_AGREEMENT_RE.fullmatch(label):
+        return "supplement"
+    return ""
+
+
+def _coverage_page(value: object) -> int | None:
+    """Parse a positive page number without accepting booleans or fractional data."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        page = int(value.strip())
+        return page if page > 0 else None
+    return None
+
+
+def _image_pages(images: list[Path]) -> set[int]:
+    """Return only valid positive page numbers represented by this VL request."""
+    pages: set[int] = set()
+    for image in images:
+        page = _coverage_page(_page_no(image))
+        if page is not None:
+            pages.add(page)
+    return pages
+
+
+def _old_signature_slot(
+    issue: CompletenessIssue, *, has_sub_agreements: bool
+) -> tuple[str, int, str] | None:
+    """Decode one existing signature issue into a trusted `(agreement, page, role)` slot.
+
+    The initial text extraction can be wrong, so it only supplies an issue to
+    replace when its evidence names exactly one page and its item identifies a
+    party.  Agreement omission is safe to infer as the main agreement only if the
+    envelope has no sub-agreements; otherwise it could refer to any signing unit.
+    """
+    evidence = _SINGLE_PAGE_EVIDENCE_RE.fullmatch(issue.evidence or "")
+    if evidence is None:
+        return None
+    page = _coverage_page(evidence.group(1))
+    if page is None:
+        return None
+
+    parts = [part.strip() for part in (issue.item or "").split("·")]
+    if len(parts) == 1:
+        role_text = parts[0]
+        # A one-part item is only an omitted agreement, not a malformed embedded
+        # agreement label.  Refuse text such as "主协议甲方签章" with no delimiter.
+        if has_sub_agreements or "协议" in role_text or "合同" in role_text:
+            return None
+        agreement = "main"
+    elif len(parts) == 2 and all(parts):
+        agreement = _coverage_agreement(parts[0])
+        role_text = parts[1]
+        if not agreement:
+            return None
+    else:
+        return None
+
+    role = _coverage_role_group(role_text)
+    if not role:
+        return None
+    return agreement, page, role
+
+
+def _vision_slots_with_clearance(
+    parsed: dict, image_pages: set[int]
+) -> set[tuple[str, int, str]] | None:
+    """Return uniquely represented, in-request VL signing slots.
+
+    Every response unit and party must map to a trusted slot.  A single unknown
+    agreement/role/page, out-of-request page, or repeated slot invalidates the
+    whole response: a valid subset cannot authorise deleting any old issue.
+    """
+    slots: set[tuple[str, int, str]] = set()
+    for unit in parsed.get("units") or []:
+        if not isinstance(unit, dict):
+            return None
+        agreement = _coverage_agreement(unit.get("agreement"))
+        page = _coverage_page(unit.get("page"))
+        if not agreement or page is None or page not in image_pages:
+            return None
+        parties = unit.get("parties")
+        if not isinstance(parties, list) or not parties:
+            return None
+        for party in parties:
+            if not isinstance(party, dict):
+                return None
+            role = _coverage_role_group(party.get("role"))
+            if not role:
+                return None
+            slot = agreement, page, role
+            if slot in slots:
+                return None
+            slots.add(slot)
+    return slots
+
+
+def _has_complete_signature_coverage(
+    env: DocumentExtraction, parsed: dict, images: list[Path]
+) -> bool:
+    """Whether every pre-existing signature issue has one trusted VL slot."""
+    available = _vision_slots_with_clearance(parsed, _image_pages(images))
+    if available is None:
+        return False
+    if env.completeness is None:
+        return True
+    old_issues = [issue for issue in env.completeness.issues if issue.category == "signature"]
+    if not old_issues:
+        return True
+
+    has_sub_agreements = bool(env.sub_agreements)
+    matched_old_slots: set[tuple[str, int, str]] = set()
+    for issue in old_issues:
+        slot = _old_signature_slot(issue, has_sub_agreements=has_sub_agreements)
+        if slot is None or slot not in available or slot in matched_old_slots:
+            return False
+        matched_old_slots.add(slot)
+    return True
+
+
+def _incomplete_coverage_error() -> ErrorInfo:
+    """Safe warning for a response that cannot replace all old signature issues."""
+    return ErrorInfo(
+        code="INCOMPLETE_COVERAGE",
+        category="validation",
+        message="Vision seal response did not cover every existing signature issue",
+        retryable=False,
+    )
 
 
 def _match_head_party(env: DocumentExtraction, vl_role: str) -> Optional[PersonIdentity]:
@@ -324,7 +570,7 @@ def _attach_seal_identities(env: DocumentExtraction, parsed: dict) -> None:
         if not isinstance(unit, dict):
             continue
         for party in unit.get("parties") or []:
-            if not isinstance(party, dict) or not bool(party.get("has_seal")):
+            if not isinstance(party, dict) or party.get("has_seal") is not True:
                 continue
             seal_no = _seal_number(party)
             if not seal_no:
@@ -386,7 +632,7 @@ def _signatory_mismatch_issues(env: DocumentExtraction, parsed: dict) -> list[Co
 
 def augment_completeness_with_vision(env: DocumentExtraction, ocr_dir: Path) -> bool:
     """
-    用 VL 看落款页重判签章：替换 env.completeness 的 signature 类 issues（保留 field/amount），
+    用 VL 看落款页重判签章：只在覆盖每一条旧签章 issue 后才替换它们（保留 field/amount），
     并把读出的印章绑定到头部主体（供 known_parties 跨合同核对章号一致性）。
 
     仅对合同协议生效。成功返回 True；无图 / 无 key / VL 失败返回 False，
@@ -398,19 +644,64 @@ def augment_completeness_with_vision(env: DocumentExtraction, ocr_dir: Path) -> 
     if not images:
         logger.info("未定位到落款页图，跳过 VL 签章核查")
         return False
-    parsed = read_seals_on_images(images)
+    parsed, error = _read_seals_on_images_with_issue(images)
+    if error is not None:
+        # 签章看图是可选增强：绝不清掉文本抽取出的 completeness/原字段，只留可审计 warning。
+        env.stage_issues.append(
+            StageIssue(stage="seal_vision", error=error, severity="warning")
+        )
     if parsed is None:
         return False
+
+    # Replacing text-derived signature issues is destructive.  Do it only if the
+    # response contains one unambiguous, requested-image slot for every old issue;
+    # a partial response must not clear its covered subset either.
+    if not _has_complete_signature_coverage(env, parsed, images):
+        env.stage_issues.append(
+            StageIssue(
+                stage="seal_vision",
+                error=_incomplete_coverage_error(),
+                severity="warning",
+            )
+        )
+        return False
+
     sig_issues = _issues_from_vision(parsed, _signature_evidence(images))
     # 落款人 vs 当事人交叉核对：签字人不在名单 → 疑似代签/冒签（也归 signature 类）。
     sig_issues += _signatory_mismatch_issues(env, parsed)
-    # 保留文本判出的非签章缺陷（field/amount 等），签章(signature)缺陷整体换成 VL 看图的结果。
-    field_issues = [i for i in env.completeness.issues if i.category != "signature"] if env.completeness else []
-    all_issues = field_issues + sig_issues
-    env.completeness = Completeness(
-        status="incomplete" if all_issues else "complete",
-        issues=all_issues,
+
+    old_completeness = env.completeness
+    old_signature_issues = (
+        [issue for issue in old_completeness.issues if issue.category == "signature"]
+        if old_completeness
+        else []
     )
+    non_signature_issues = (
+        [issue for issue in old_completeness.issues if issue.category != "signature"]
+        if old_completeness
+        else []
+    )
+
+    if old_signature_issues:
+        # Full coverage authorises replacing all old signature issues as a unit.
+        # Non-signature issues survive unchanged; only an issue-free result may
+        # become complete.
+        all_issues = non_signature_issues + sig_issues
+        env.completeness = Completeness(
+            status="incomplete" if all_issues else "complete",
+            issues=all_issues,
+        )
+    elif sig_issues:
+        # With no old signature issue there is nothing to clear.  A newly observed
+        # defect can still make an unknown/empty completeness result incomplete.
+        env.completeness = Completeness(
+            status="incomplete",
+            issues=non_signature_issues + sig_issues,
+        )
+    # If there were no old signature issues and vision found none, retain the
+    # original status exactly.  In particular unknown/None must not become
+    # complete just because the response happened to be all-positive.
+
     # 印章读数绑定到头部主体，使 2.7 的 known_parties reconcile 自动跨合同核对章号一致性。
     _attach_seal_identities(env, parsed)
     return True

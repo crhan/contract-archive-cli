@@ -14,6 +14,8 @@ from typing import Optional
 
 from rich.table import Table
 
+from .archive.paths import ArchivePaths
+
 
 def status_color(s: str) -> str:
     """status 着色：ok 绿 / partial 黄 / failed 红。"""
@@ -97,9 +99,20 @@ def ingest_result_to_dict(r) -> dict:
 
 
 def archived_doc_dir(row, archive_root: Optional[Path | str] = None) -> Path:
-    """show 用的档案目录路径；传入 archive_root 时始终落在 archive 可控目录内。"""
+    """show 用的档案目录路径，兼容历史目录与 immutable generation。
+
+    搬库时数据库仍可能存着旧根目录的绝对 ``output_dir``；只能采纳其经过
+    SHA 命名校验的 basename，再重新锚定到当前 ``archive_root/documents``。不把
+    任意数据库路径当作可信文件系统路径。
+    """
     if archive_root is not None:
-        return Path(archive_root) / "documents" / row.sha256[:12]
+        paths = ArchivePaths(Path(archive_root))
+        try:
+            return paths.resolve_document_dir(row)
+        except ValueError:
+            # 渲染不能因一条损坏/恶意 DB pointer 崩掉；返回一个 archive 内且不会
+            # 指向任何现有 document generation 的诊断位置，绝不跟随原 pointer。
+            return paths.documents_dir.resolve() / ".invalid-document-pointer"
     if row.output_dir:
         return Path(row.output_dir)
     return Path("documents") / row.sha256[:12]

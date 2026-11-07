@@ -26,15 +26,18 @@ from ..schemas import (
     LabeledValue,
     PersonIdentity,
     Seal,
+    StageIssue,
     SubAgreement,
 )
 from ..config import load_settings
-from ..errors import classify_exception, config_missing, extract_empty
+from ..errors import config_missing, extract_empty
 from .llm_extractor import (
     LlmResult,
     _call_openai_compat,
     _parse_json_loose,
-    _truncate_middle,
+    input_too_long_error,
+    output_truncated_error,
+    safe_api_error,
 )
 from .normalize import coerce_obligations, normalize_date, parse_money_value
 from .amount_check import check_amount_consistency
@@ -209,7 +212,7 @@ def call_llm_document(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
-    max_chars: int = 60000,
+    max_chars: int | None = None,
 ) -> LlmResult:
     """
     调 DashScope LLM（OpenAI 兼容口）做通用文档抽取，返回 LlmResult（parsed/model/usage）。
@@ -223,6 +226,9 @@ def call_llm_document(
     model = model or settings.dashscope_model
     api_key = api_key or settings.dashscope_api_key
     base_url = base_url or settings.dashscope_base_url
+    too_long = input_too_long_error(document_text, max_chars)
+    if too_long is not None:
+        return LlmResult(parsed={}, model=model, error=too_long)
     if not api_key:
         logger.warning("DASHSCOPE_API_KEY missing; skip LLM document extraction")
         return LlmResult(
@@ -230,19 +236,38 @@ def call_llm_document(
             error=config_missing("DASHSCOPE_API_KEY 缺失，跳过 LLM 文档抽取"),
         )
 
-    user_msg = f"以下是文档正文，请判类型并抽取字段：\n\n{_truncate_middle(document_text, max_chars)}"
+    user_msg = f"以下是文档正文，请判类型并抽取字段：\n\n{document_text}"
     try:
-        content, usage = _call_openai_compat(DOC_EXTRACT_SYSTEM_PROMPT, user_msg, model, api_key, base_url)
-    except Exception as e:  # noqa: BLE001 — 外部调用降级返回空，但保留结构化 error 供上层判重试
-        logger.exception("DashScope document LLM call failed: %s", e)
-        return LlmResult(parsed={}, model=model, error=classify_exception(e))
+        content, usage, finish_reason = _call_openai_compat(
+            DOC_EXTRACT_SYSTEM_PROMPT,
+            user_msg,
+            model,
+            api_key,
+            base_url,
+            stage="document_extract",
+        )
+    except Exception as exc:  # noqa: BLE001 — 外部调用降级返回空，但保留结构化 error 供上层判重试
+        logger.warning("DashScope document extraction call failed")
+        return LlmResult(
+            parsed={}, model=model, error=safe_api_error(exc, "LLM document extraction request failed")
+        )
 
+    if finish_reason == "length":
+        logger.warning("LLM document extraction response reached its output limit")
+        return LlmResult(parsed={}, model=model, usage=usage, error=output_truncated_error())
     if not content:
         logger.warning("LLM empty response (document extract)")
-        return LlmResult(parsed={}, model=model, usage=None)
+        return LlmResult(
+            parsed={}, model=model, usage=usage,
+            error=extract_empty("LLM returned an empty response"),
+        )
     parsed = _parse_json_loose(content)
     if not parsed:
-        logger.warning("LLM document response not parseable: %s", content[:200])
+        logger.warning("LLM document extraction response was not parseable as JSON")
+        return LlmResult(
+            parsed={}, model=model, usage=usage,
+            error=extract_empty("LLM returned invalid JSON"),
+        )
     return LlmResult(parsed=parsed, model=model, usage=usage)
 
 
@@ -456,6 +481,7 @@ def extract_document(
     document_text: str,
     llm_enabled: bool = True,
     model: str | None = None,
+    max_chars: int | None = None,
 ) -> DocumentExtraction:
     """
     通用文档抽取主入口：LLM 判类型 + 抽字段 → DocumentExtraction 信封。
@@ -469,15 +495,25 @@ def extract_document(
     if not llm_enabled:
         return DocumentExtraction()
 
-    res = call_llm_document(document_text, model=model)
+    # Only forward an explicit limit. Existing callers commonly monkeypatch the
+    # historical two-argument call shape, and the default remains full-text.
+    call_kwargs: dict[str, Any] = {"model": model}
+    if max_chars is not None:
+        call_kwargs["max_chars"] = max_chars
+    res = call_llm_document(document_text, **call_kwargs)
     raw = res.parsed
     if not raw:
         # 抽取为空：**不设 llm_model（保持 None）**——schema 定义"调用失败 llm_model 为 None"，
         # 且 evals 的 parse_ok 一票否决依赖它（llm_model 非 None = 调用/解析成功）；这里若设非 None，
         # 会让产不出 JSON 的劣质模型在换模型评测里蒙混过 parse_ok gate（见 MEMORY「评测报告撒谎坑」）。
         # 只带结构化 error（缺 key→CONFIG_MISSING / API 异常分类 / 空 JSON→EXTRACT_EMPTY），供 ingest 判重试。
+        error = res.error or extract_empty("LLM returned empty or invalid JSON")
         return DocumentExtraction(
-            extraction_error=res.error or extract_empty("LLM 返回空或无法解析为 JSON"),
+            llm_usage=res.usage,
+            extraction_error=error,
+            stage_issues=[
+                StageIssue(stage="document_extract", error=error, severity="error")
+            ],
         )
 
     doc_type = str(raw.get("doc_type", "")).strip()
@@ -543,4 +579,9 @@ def extract_document(
         llm_usage=res.usage,
         # 结构化错误：成功为 None；用于 ingest 失败诊断与 Agent 重试决策。
         extraction_error=res.error,
+        stage_issues=(
+            [StageIssue(stage="document_extract", error=res.error, severity="error")]
+            if res.error is not None
+            else []
+        ),
     )

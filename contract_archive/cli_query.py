@@ -269,9 +269,13 @@ def raw(
         err_console.print(f"[red]not found: {ident}[/red]")
         raise typer.Exit(1)
 
-    # output_dir 可能为空串（失败入库的记录），Path("")/"ocr" 会落到不存在目录，
-    # load_document_text 返回 ""，统一走下面的"无原文"分支，无需单独判空。
-    ocr_dir = Path(row.output_dir) / "ocr"
+    # output_dir 是可搬库的 DB pointer，不可信任其中的旧绝对路径。只接受
+    # ArchivePaths 验证过的受控 basename，并重新锚定到当前 archive root。
+    try:
+        ocr_dir = paths.resolve_document_dir(row) / "ocr"
+    except ValueError as exc:
+        err_console.print(f"[red]unsafe archive path for id={row.id}: {exc}[/red]")
+        raise typer.Exit(1) from exc
     text = load_document_text(ocr_dir)
     if not text:
         err_console.print(

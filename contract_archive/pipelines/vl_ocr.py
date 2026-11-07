@@ -5,7 +5,7 @@
 qwen3.6-flash 才扛得住，且慢、易超时）。这里改为每页一次调用、拼接结果，既用上专用
 OCR 模型，也消除了整份请求的页数硬限制。
 
-模型取 settings.dashscope_ocr_model（默认 qwen-vl-ocr-latest）；签章核查仍用 vl_model，
+模型取 settings.dashscope_ocr_model（默认稳定 ID qwen-vl-ocr）；签章核查仍用 vl_model，
 互不影响。
 """
 from __future__ import annotations
@@ -18,6 +18,7 @@ from typing import NamedTuple, Optional
 from ..config import get_timeout_s, load_settings
 from ..utils import NO_THINKING, encode_image_data_uri, map_concurrent
 from ..utils.http_env import sanitized_httpx_proxy_env
+from ..utils.llm_runtime import observed_chat_completion
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +35,11 @@ VL_OCR_PAGE_PROMPT = """你是严谨的 OCR 助理。请只转写这张图片中
 # 单页三种异常态各用独立标记，互不混淆 —— 关键是把"请求失败"和"模型识别不清"分开：
 #   _MARK_FAILED    请求级失败（SDK 自动重试耗尽后仍抛错）。混进 [看不清] 就永久救不回、
 #                   也无法事后审计/单页补跑，所以必须独立。
-#   _MARK_TRUNCATED 输出触达模型 8192 token 上限被截断；已得内容保留，但显式标记残页。
+#   _MARK_TRUNCATED 输出触达模型输出上限被截断；已得内容保留，但显式标记残页。
 #   _MARK_ILLEGIBLE 模型正常返回但本页无可识别文本。
 _MARK_FAILED = "[本页 OCR 调用失败]"
 _MARK_TRUNCATED = "[本页输出达模型上限被截断]"
 _MARK_ILLEGIBLE = "[看不清]"
-
 
 def _ocr_max_retries() -> int:
     """逐页 OCR 的 SDK 重试次数（CONTRACT_ARCHIVE_VL_OCR_RETRIES 可调，默认 4）。
@@ -83,7 +83,9 @@ def _ocr_one_page(client, model: str, idx: int, path: Path, total: int) -> _Page
             {"type": "image_url", "image_url": {"url": encode_image_data_uri(path)}},
             {"type": "text", "text": VL_OCR_PAGE_PROMPT},
         ]
-        resp = client.chat.completions.create(
+        resp = observed_chat_completion(
+            client,
+            stage="ocr_page",
             model=model,
             messages=[{"role": "user", "content": content}],
             temperature=0.0,
@@ -92,15 +94,18 @@ def _ocr_one_page(client, model: str, idx: int, path: Path, total: int) -> _Page
         choice = resp.choices[0]
         page_text = (choice.message.content or "").strip()
         truncated = choice.finish_reason == "length"
-    except Exception as e:  # noqa: BLE001 - 单页失败不能拖垮整份
-        logger.warning("[vl-ocr] page %s/%s failed after retries: %s", idx, total, e)
+    except Exception:  # noqa: BLE001 - 单页失败不能拖垮整份
+        # 异常文本可能含上游回显，不能带进日志/审计产物。
+        logger.warning("[vl-ocr] page %s/%s failed after retries", idx, total)
         return _PageResult(_MARK_FAILED, ok=False, failed=True, truncated=False)
 
     if truncated:
-        # qwen-vl-ocr 单页输出硬上限 8192 token，超了会被静默截断。
-        # 保留已得内容（残页也有价值），但显式标记，避免下游把残页当完整页。
+        # 模型触达自身输出上限会被截断。保留已得内容但显式标记，避免下游把残页
+        # 当作完整页；各模型使用供应商默认上限，不在请求或日志里硬编码某个值。
         logger.warning(
-            "[vl-ocr] page %s/%s truncated at output cap (maxOutputTokens=8192)", idx, total
+            "[vl-ocr] page %s/%s reached the model output limit",
+            idx,
+            total,
         )
         page_text = f"{page_text}\n\n{_MARK_TRUNCATED}".strip()
 

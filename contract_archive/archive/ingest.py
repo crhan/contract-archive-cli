@@ -2,13 +2,13 @@
 单 PDF 入库流水线。
 
 流程（每个 PDF 一次调用）：
-  1) 流式 SHA256
-  2) 查 documents.sha256 → 命中 + 非 reingest 直接 skip
-  3) 在 tmp/<sha-short>/ 先留 source.pdf，再跑 OCR pipeline + 抽取
-  4) 全成功后 os.rename(tmp → documents/<sha-short>/) 是事务边界
-  5) DB 写入 documents + risk_clauses（单事务，由 repository 保证）
+  1) 流式 SHA256，并持有该 SHA 前缀的跨进程槽锁
+  2) 锁内查 documents.sha256；命中 + 非 reingest 直接 skip
+  3) 在 tmp/runs/<sha-short>-<uuid>/ 做 source.pdf 独立快照、OCR + 抽取
+  4) 完整 staging rename 到 documents/<sha-short>.gen-<uuid>/（不可变 generation）
+  5) DB 写入 documents + risk_clauses，或在同一事务中切换 output_dir pointer
   6) 追加一行 ingest.jsonl 总日志
-  7) 失败时：仍保留 documents/<sha-short>/source.pdf + ingest.log，记 status=failed
+  7) 失败时：新文档可发布 failed generation；已有成功档案保留旧 pointer + 独立失败日志
 
 状态语义：
   - ok       OCR + 抽取都成功
@@ -20,14 +20,17 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sqlite3
+import stat
 import time
 import traceback
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from ..errors import ErrorInfo, classify_exception, extract_empty, ocr_failed
 from ..extraction import extract_contract, extract_document
@@ -40,17 +43,21 @@ from ..schemas import (
     FILE_EXTRACTION,
     FILE_EXTRACTION_CONF,
     FILE_MARKDOWN,
+    FILE_PIPELINE_META,
     FILE_RAW_TEXT,
     PREVIEW_DIR,
     ContractExtraction,
     DocumentExtraction,
     ExtractionConfidence,
+    PipelineMeta,
+    StageIssue,
 )
 from ..utils import classify_pages
+from ..utils.llm_runtime import collect_llm_calls, normalize_llm_usage
 from ..utils.page_router import MODE_OCR
 from ..utils.pdf import render_pdf_to_images
 from .party_registry import PartyRegistry
-from .paths import ArchivePaths, SHA_SHORT_LEN, link_or_copy, safe_rmtree, sha256_of_file
+from .paths import ArchivePaths, SHA_SHORT_LEN, link_or_copy, sha256_of_file
 from .repository import (
     contract_to_envelope,
     find_by_sha,
@@ -58,6 +65,7 @@ from .repository import (
     insert_document,
     replace_document,
     update_extraction,
+    update_output_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -120,6 +128,104 @@ def _run_extraction(
     return ContractExtraction(), conf, envelope
 
 
+def _attach_runtime_ledger(
+    envelope: DocumentExtraction,
+    records: list[dict[str, object]],
+) -> None:
+    """Attach observed calls, preserving envelope metadata when mocks made none."""
+    if not records:
+        return
+    envelope.llm_calls = [dict(record) for record in records]
+    totals: dict[str, int | float] = {}
+    for record in records:
+        usage = normalize_llm_usage(record.get("usage"))
+        if usage is None:
+            continue
+        for name, value in usage.items():
+            totals[name] = totals.get(name, 0) + value
+    if totals:
+        envelope.llm_usage = totals
+
+
+def _append_stage_issue(
+    envelope: DocumentExtraction,
+    *,
+    stage: str,
+    error: ErrorInfo,
+    severity: Literal["error", "warning"],
+) -> None:
+    """Append a stage issue once, preserving extractor-supplied issues."""
+    if any(
+        issue.stage == stage
+        and issue.error.code == error.code
+        and issue.severity == severity
+        for issue in envelope.stage_issues
+    ):
+        return
+    envelope.stage_issues.append(StageIssue(stage=stage, error=error, severity=severity))
+
+
+def _ocr_incomplete_error(ocr_dir: Path) -> ErrorInfo | None:
+    """Read durable page-level OCR failure markers, preserving old archives."""
+    path = ocr_dir / FILE_PIPELINE_META
+    if not path.is_file():
+        return None
+    try:
+        meta = PipelineMeta.model_validate_json(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 - manually created old archives can lack metadata shape
+        logger.warning("could not read OCR pipeline metadata %s: %s", path, exc)
+        return None
+    failed = sorted(set(meta.ocr_failed_pages))
+    truncated = sorted(set(meta.ocr_truncated_pages))
+    if not failed and not truncated:
+        return None
+    details: list[str] = []
+    if failed:
+        details.append(f"failed pages={failed}")
+    if truncated:
+        details.append(f"truncated pages={truncated}")
+    return ErrorInfo(
+        code="OCR_INCOMPLETE",
+        category="infra",
+        message="OCR incomplete: " + "; ".join(details),
+        retryable=False,
+    )
+
+
+def _mark_ocr_incomplete(envelope: DocumentExtraction, ocr_dir: Path) -> ErrorInfo | None:
+    """Add the required ``ocr_page`` issue when metadata reports page loss."""
+    error = _ocr_incomplete_error(ocr_dir)
+    if error is not None:
+        _append_stage_issue(envelope, stage="ocr_page", error=error, severity="error")
+    return error
+
+
+def _finalize_extraction_status(
+    status: str,
+    envelope: DocumentExtraction,
+    error_message: Optional[str],
+    error_info: Optional[ErrorInfo],
+) -> tuple[str, Optional[str], Optional[ErrorInfo]]:
+    """Turn required stage failures into partial results without dropping fields."""
+    if status == "failed":
+        return status, error_message, error_info
+    required_error = envelope.extraction_error
+    if required_error is None:
+        required_error = next(
+            (issue.error for issue in envelope.stage_issues if issue.severity == "error"),
+            None,
+        )
+    if required_error is None:
+        return status, error_message, error_info
+    if status == "ok":
+        status = "partial"
+    if error_info is None:
+        error_info = required_error
+    if error_message is None:
+        error_message = f"{required_error.code}: {required_error.message}"
+    return status, error_message, error_info
+
+
 def run_full_extraction(document_text: str, ocr_dir: Path) -> DocumentExtraction:
     """跑完整抽取链路（类型路由 + 特化 + 通用后处理 + 多源融合），**不落库**——供评测/复用。
 
@@ -127,17 +233,50 @@ def run_full_extraction(document_text: str, ocr_dir: Path) -> DocumentExtraction
     → 通用后处理（页码校正）→ 多源融合（保险等）。跳过身份核对（跨文档、需基准库，与单文档
     评测无关）。用生产默认模型。任何后处理/融合异常不中断，尽力返回已得信封。
     """
-    _, _, envelope = _run_extraction(document_text, llm_enabled=True)
-    for pp in get_handler(envelope.doc_type).post_processors:
+    envelope = DocumentExtraction()
+    # Keep this collector inside run_full_extraction.  Nested collectors are
+    # intentionally independent in llm_runtime, so an eval run receives exactly
+    # its own production calls rather than an outer caller's partial ledger.
+    with collect_llm_calls() as collector:
         try:
-            pp(envelope, ocr_dir)
-        except Exception as e:  # noqa: BLE001 — 专属后处理失败不影响其余
-            logger.warning("post:%s 跳过（异常）: %s", getattr(pp, "__name__", pp), e)
-    try:
-        correct_evidence_pages(envelope, ocr_dir)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("page-fix 跳过（异常）: %s", e)
-    _maybe_run_vision_fusion(envelope, document_text, ocr_dir, logger.info)
+            _, _, envelope = _run_extraction(document_text, llm_enabled=True)
+            for pp in get_handler(envelope.doc_type).post_processors:
+                stage = f"post:{getattr(pp, '__name__', 'processor')}"
+                try:
+                    pp(envelope, ocr_dir)
+                except Exception as e:  # noqa: BLE001 — optional post-processing
+                    logger.warning("%s 跳过（异常）: %s", stage, e)
+                    _append_stage_issue(
+                        envelope,
+                        stage=stage,
+                        error=classify_exception(e),
+                        severity="warning",
+                    )
+            try:
+                correct_evidence_pages(envelope, ocr_dir)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("page-fix 跳过（异常）: %s", e)
+                _append_stage_issue(
+                    envelope,
+                    stage="page_fix",
+                    error=classify_exception(e),
+                    severity="warning",
+                )
+            _maybe_run_vision_fusion(envelope, document_text, ocr_dir, logger.info)
+        except Exception as e:  # noqa: BLE001 — eval must expose, not erase, failures
+            error = classify_exception(e)
+            logger.warning("full extraction failed: %s", e)
+            if envelope.extraction_error is None:
+                envelope.extraction_error = error
+            _append_stage_issue(
+                envelope,
+                stage="extraction",
+                error=error,
+                severity="error",
+            )
+        finally:
+            _mark_ocr_incomplete(envelope, ocr_dir)
+            _attach_runtime_ledger(envelope, collector.records)
     return envelope
 
 
@@ -248,28 +387,167 @@ def _maybe_run_vision_fusion(
             )
     except Exception as e:  # noqa: BLE001 — 融合失败不能中断入库
         log(f"[fusion] 跳过（异常）: {e}")
+        _append_stage_issue(
+            envelope,
+            stage="fusion",
+            error=classify_exception(e),
+            severity="warning",
+        )
         return
     conf = envelope.fusion_overall_confidence
     if conf is None:
         return
-    # 融合分写进可查询的 overall_confidence 列（sidecar 与列保持一致，不留旧启发式分）
-    if confidence is not None:
-        confidence.overall = conf
-    if conf < threshold:
-        escalate_low_confidence(envelope, source_pdf=str(ocr_dir.parent / "source.pdf"))
+    try:
+        # 融合分写进可查询的 overall_confidence 列（sidecar 与列保持一致，不留旧启发式分）
+        if confidence is not None:
+            confidence.overall = conf
+        if conf < threshold:
+            escalate_low_confidence(envelope, source_pdf=str(ocr_dir.parent / "source.pdf"))
+    except Exception as e:  # noqa: BLE001 — optional fusion follow-up cannot fail extraction
+        log(f"[fusion] 后处理跳过（异常）: {e}")
+        _append_stage_issue(
+            envelope,
+            stage="fusion",
+            error=classify_exception(e),
+            severity="warning",
+        )
 
 
-def _ensure_archived_source(paths: ArchivePaths, sha: str, pdf_path: Path) -> Path:
+def _new_staging(paths: ArchivePaths, sha: str) -> tuple[Path, Path]:
+    """创建独占 staging，并返回 ``(staging, generation_target)``。
+
+    两个目录使用同一个 UUID，方便人工追踪一次运行；绝不复用或清理同名目录。
     """
-    幂等保证 archive 可控目录内有 source.pdf。
+    # Validate/create tmp/runs before allocating a child.  Do not use
+    # ``mkdir(parents=True)`` below: a pre-existing symlink parent must be
+    # rejected before it can redirect a staging write.
+    paths.ensure()
+    for _ in range(8):
+        run_id = uuid.uuid4().hex
+        staging = paths.staging_dir(sha, run_id)
+        try:
+            staging.mkdir()
+        except FileExistsError:
+            continue
+        return staging, paths.generation_dir(sha, run_id)
+    raise RuntimeError(f"could not allocate unique archive staging directory for {sha[:SHA_SHORT_LEN]}")
 
-    重复 ingest 命中 skip 时也走这里：如果历史产物被误删，当前这次 ingest 仍会
-    把源 PDF 补回 documents/<sha-short>/source.pdf。
+
+def _fsync_file(path: Path) -> None:
+    """把一个已关闭的普通文件同步到存储介质。"""
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_directory(path: Path) -> None:
+    """同步目录项；Linux archive 运行环境支持 O_DIRECTORY。"""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _sync_staging_tree(staging: Path) -> None:
+    """发布前递归 fsync staging 的文件和目录，拒绝不受控 symlink。"""
+    directories: list[Path] = []
+    for current, dirnames, filenames in os.walk(staging, topdown=True, followlinks=False):
+        current_path = Path(current)
+        directories.append(current_path)
+        for dirname in dirnames:
+            if (current_path / dirname).is_symlink():
+                raise ValueError(f"refusing to publish symlinked archive directory: {current_path / dirname}")
+        for filename in filenames:
+            path = current_path / filename
+            if path.is_symlink():
+                raise ValueError(f"refusing to publish symlinked archive file: {path}")
+            if not stat.S_ISREG(path.lstat().st_mode):
+                raise ValueError(f"refusing to publish non-regular archive file: {path}")
+            _fsync_file(path)
+    for directory in reversed(directories):
+        _fsync_directory(directory)
+
+
+def _publish_staging(paths: ArchivePaths, staging: Path, generation: Path) -> Path:
+    """把完整 staging 原子发布为新 generation，并持久化目录项。
+
+    文件和 staging 目录会先 fsync；rename 后同时 fsync 源/目标父目录。若任一步失败，
+    调用方不会切 SQLite pointer，可能留下可人工核对的 staging/orphan generation。SQLite
+    自身负责其事务耐久性；这里不把单纯 rename 误表述为跨设备断电的完整系统保证。
     """
-    source_pdf = paths.doc_dir(sha) / "source.pdf"
-    if not source_pdf.exists():
-        link_or_copy(pdf_path, source_pdf)
-    return source_pdf
+    # Staging and generation are derived by _new_staging.  Check their expected
+    # parents explicitly so a future caller cannot make rename write outside a
+    # controlled archive directory.
+    paths.ensure()
+    if staging.parent != paths.runs_dir or generation.parent != paths.documents_dir:
+        raise ValueError("staging/generation path is outside controlled archive directories")
+    if staging.is_symlink() or not staging.is_dir():
+        raise ValueError(f"refusing invalid archive staging directory: {staging}")
+    if generation.exists() or generation.is_symlink():
+        raise FileExistsError(f"refusing to overwrite existing archive generation: {generation}")
+    _sync_staging_tree(staging)
+    # Revalidate immediately before rename: ensure() catches ordinary
+    # replacement/symlink poisoning without claiming a full race-proof sandbox.
+    paths.ensure()
+    if (
+        generation.parent != paths.documents_dir
+        or generation.parent.is_symlink()
+        or staging.parent != paths.runs_dir
+        or staging.parent.is_symlink()
+        or staging.is_symlink()
+        or not staging.is_dir()
+    ):
+        raise ValueError(f"refusing invalid archive documents directory: {generation.parent}")
+    if generation.exists() or generation.is_symlink():
+        raise FileExistsError(f"refusing to overwrite existing archive generation: {generation}")
+    source_parent = staging.parent
+    os.rename(staging, generation)
+    _fsync_directory(generation.parent)
+    if source_parent != generation.parent:
+        _fsync_directory(source_parent)
+    return generation
+
+
+def _safe_append_jsonl(path: Path, payload: dict) -> None:
+    """提交成功后的审计日志是尽力而为，不能反过来把成功操作报成失败。"""
+    try:
+        _append_jsonl(path, payload)
+    except OSError as exc:
+        logger.warning("archive audit log write failed after commit (%s): %s", path, exc)
+
+
+def _ensure_archived_source(
+    paths: ArchivePaths,
+    conn: sqlite3.Connection,
+    row,
+    pdf_path: Path,
+) -> Path:
+    """保证当前 pointer 指向含有正确 source.pdf 快照的 generation。
+
+    已发布 generation 一律不可就地修补。若历史 generation 缺 source.pdf 或内容哈希不符，
+    复制实际 ``row.output_dir`` 到 staging、补上校验过的独立快照、发布新 generation 后只
+    切换 pointer。这样不会重建/覆盖旧 ``documents/<sha12>`` 目录，也不会误伤前缀碰撞。
+    调用方必须已持有该 SHA 的槽锁。
+    """
+    current_dir = paths.resolve_document_dir(row)
+    source_pdf = current_dir / "source.pdf"
+    if source_pdf.is_file() and sha256_of_file(source_pdf) == row.sha256:
+        return source_pdf
+    if not current_dir.is_dir():
+        raise FileNotFoundError(f"archive output missing for id={row.id}: {current_dir}")
+
+    staging, generation = _new_staging(paths, row.sha256)
+    shutil.copytree(current_dir, staging, copy_function=shutil.copy2, dirs_exist_ok=True)
+    link_or_copy(pdf_path, staging / "source.pdf", expected_sha256=row.sha256)
+    final_dir = _publish_staging(paths, staging, generation)
+    update_output_dir(conn, row.id, str(final_dir))
+    return final_dir / "source.pdf"
 
 
 # ---------- 入口 ----------
@@ -299,23 +577,74 @@ def ingest_pdf(
         raise FileNotFoundError(pdf_path)
 
     paths.ensure()
-
     logger.info("hashing %s", pdf_path.name)
     sha = sha256_of_file(pdf_path)
-    sha_short = sha[:SHA_SHORT_LEN]
-    logger.info("sha256=%s", sha_short)
+    logger.info("sha256=%s", sha[:SHA_SHORT_LEN])
 
+    # 从查重、快照、发布到 DAO 提交始终在同一个物理槽锁内。必须在锁后重新查 DB：
+    # 等锁期间另一个进程可能已经完成了同一份 PDF 的入库。也必须重算源文件：
+    # 若输入在初始 hash 和获得锁之间被原地替换，不能拿旧 SHA 的锁去 skip/改旧记录。
+    with paths.slot_lock(sha):
+        locked_sha = sha256_of_file(pdf_path)
+        if locked_sha != sha:
+            raise ValueError(
+                "source changed while waiting for archive slot lock; please retry ingest"
+            )
+        return _ingest_pdf_locked(
+            pdf_path, paths, conn, sha=sha, reingest=reingest,
+            llm_enabled=llm_enabled, pipeline=pipeline,
+        )
+
+
+def _ingest_pdf_locked(
+    pdf_path: Path,
+    paths: ArchivePaths,
+    conn: sqlite3.Connection,
+    *,
+    sha: str,
+    reingest: bool,
+    llm_enabled: bool,
+    pipeline: Optional[OCRPipeline],
+) -> IngestResult:
+    """Locked ingest boundary with one ledger spanning OCR and extraction."""
+    with collect_llm_calls() as collector:
+        return _ingest_pdf_locked_with_ledger(
+            pdf_path,
+            paths,
+            conn,
+            sha=sha,
+            reingest=reingest,
+            llm_enabled=llm_enabled,
+            pipeline=pipeline,
+            collector=collector,
+        )
+
+
+def _ingest_pdf_locked_with_ledger(
+    pdf_path: Path,
+    paths: ArchivePaths,
+    conn: sqlite3.Connection,
+    *,
+    sha: str,
+    reingest: bool,
+    llm_enabled: bool,
+    pipeline: Optional[OCRPipeline],
+    collector,
+) -> IngestResult:
+    """``ingest_pdf`` work under the slot lock and active runtime collector."""
     existing_id = find_by_sha(conn, sha)
+    existing = get_document(conn, existing_id) if existing_id else None
+    if existing_id and existing is None:
+        raise RuntimeError(f"document id={existing_id} disappeared during ingest")
     if existing_id and not reingest:
-        prev = get_document(conn, existing_id)
-        prev_status = prev.status if prev else None
+        prev_status = existing.status if existing else None
         if prev_status == "failed":
             # 上次失败不算"已入库"——重跑就是想重试，自动按 reingest 处理，
             # 不要 skip 后甩给用户一句"加 --reingest"（UX：见 id=6 排查）。
-            logger.info("sha=%s 上次 ingest 失败，自动重试", sha_short)
+            logger.info("sha=%s 上次 ingest 失败，自动重试", sha[:SHA_SHORT_LEN])
             reingest = True
         else:
-            _ensure_archived_source(paths, sha, pdf_path)
+            _ensure_archived_source(paths, conn, existing, pdf_path)
             if prev_status == "partial":
                 hint = f"（OCR 已完成、抽取未完成；用 `extract {existing_id}` 只重跑抽取，省去 OCR）"
             else:
@@ -328,18 +657,21 @@ def ingest_pdf(
                 skipped_reason=f"sha256 已在档案库{hint}；要强制重跑整条流程加 --reingest",
             )
 
-    # 在 tmp 跑，全成功后 rename 到 documents/<sha-short>/
-    tmp_doc_dir = paths.tmp_dir / sha_short
-    safe_rmtree(tmp_doc_dir)
-    tmp_doc_dir.mkdir(parents=True, exist_ok=True)
+    # 每次运行独占 staging；绝不删除同 SHA 前缀下的旧 staging/generation。
+    tmp_doc_dir, generation_dir = _new_staging(paths, sha)
     ocr_dir = tmp_doc_dir / "ocr"
 
     # 单合同 stderr 日志（plain text），与档案库总 jsonl 互补
     log_path = tmp_doc_dir / "ingest.log"
     log_handle = log_path.open("w", encoding="utf-8")
     log_handle.write(f"# ingest started at {_utc_now()}\n# pdf={pdf_path}\n")
-    link_strategy = link_or_copy(pdf_path, tmp_doc_dir / "source.pdf")
-    log_handle.write(f"[source.pdf] {link_strategy}ed from {pdf_path}\n")
+    staged_source = tmp_doc_dir / "source.pdf"
+    try:
+        link_strategy = link_or_copy(pdf_path, staged_source, expected_sha256=sha)
+    except Exception:
+        log_handle.close()
+        raise
+    log_handle.write(f"[source.pdf] {link_strategy}ed from {pdf_path}; sha256 verified\n")
 
     ocr_duration: Optional[float] = None
     llm_duration: Optional[float] = None
@@ -355,7 +687,7 @@ def ingest_pdf(
         pl = pipeline or OCRPipeline()
         t0 = time.perf_counter()
         try:
-            pl.run(pdf_path, ocr_dir)
+            pl.run(staged_source, ocr_dir)
             ocr_duration = time.perf_counter() - t0
             log_handle.write(f"\n[ocr] OK in {ocr_duration:.2f}s\n")
         except Exception as e:
@@ -371,10 +703,12 @@ def ingest_pdf(
                 sha=sha,
                 tmp_doc_dir=tmp_doc_dir,
                 log_handle=log_handle,
-                existing_id=existing_id,
+                existing=existing,
+                generation_dir=generation_dir,
                 ocr_duration=ocr_duration,
                 error_message=error_message,
                 error=ocr_failed(str(e)),
+                ledger_records=collector.records,
             )
 
         # ---- 2. 抽取（基于 OCR 产物的 raw_text.txt 优先） ----
@@ -416,18 +750,31 @@ def ingest_pdf(
             error_info = classify_exception(e)
             extraction = ContractExtraction()
             confidence = ExtractionConfidence()
-            envelope = DocumentExtraction()
+            envelope = DocumentExtraction(extraction_error=error_info)
+            _append_stage_issue(
+                envelope,
+                stage="extraction",
+                error=error_info,
+                severity="error",
+            )
             log_handle.write(f"\n[extract] FAILED (status=partial): {error_message}\n")
             log_handle.write(traceback.format_exc())
 
         # ---- 2.5 类型专属后处理（据 doc_type 查处理器；合同=看落款页图重判签章，其他类型可能无）----
         if status != "failed" and llm_enabled:
             for pp in get_handler(envelope.doc_type).post_processors:
+                stage = f"post:{getattr(pp, '__name__', 'processor')}"
                 try:
                     if pp(envelope, ocr_dir):
                         log_handle.write(f"[post:{pp.__name__}] 完成\n")
                 except Exception as e:  # noqa: BLE001 — 专属后处理失败不能中断入库
                     log_handle.write(f"[post:{pp.__name__}] 跳过（异常）: {e}\n")
+                    _append_stage_issue(
+                        envelope,
+                        stage=stage,
+                        error=classify_exception(e),
+                        severity="warning",
+                    )
 
             # ---- 2.6 出处页码校正（通用，类型无关）：用 layout 页码覆盖 LLM 猜的页码 ----
             try:
@@ -435,6 +782,12 @@ def ingest_pdf(
                     log_handle.write("[page-fix] 出处页码已据 layout 校正\n")
             except Exception as e:  # noqa: BLE001 — 页码校正失败不能中断入库
                 log_handle.write(f"[page-fix] 跳过（异常）: {e}\n")
+                _append_stage_issue(
+                    envelope,
+                    stage="page_fix",
+                    error=classify_exception(e),
+                    severity="warning",
+                )
 
             # ---- 2.7 身份基本信息核对：首见入库、再见校对（known_parties 基准库）----
             # 把抽到的 person_identities（精确到人的身份证/电话/银行账号/开户行…）与
@@ -458,6 +811,15 @@ def ingest_pdf(
                 lambda m: log_handle.write(m + "\n"), confidence,
             )
 
+        # The ledger must cover OCR plus both document/contract extraction calls
+        # on a new ingest.  Completeness markers are persisted by OCR, not inferred
+        # from whether later LLM extraction found a useful title.
+        _mark_ocr_incomplete(envelope, ocr_dir)
+        _attach_runtime_ledger(envelope, collector.records)
+        status, error_message, error_info = _finalize_extraction_status(
+            status, envelope, error_message, error_info
+        )
+
         # ---- 3. extracted.json 落盘（写通用信封；即使 partial 也写空对象，便于后续 extract 复跑） ----
         (tmp_doc_dir / FILE_EXTRACTION).write_text(
             envelope.model_dump_json(indent=2), encoding="utf-8"
@@ -466,17 +828,15 @@ def ingest_pdf(
             confidence.model_dump_json(indent=2), encoding="utf-8"
         )
 
-        # ---- 4. 事务边界：rename tmp → documents/<sha-short>/ ----
-        final_doc_dir = paths.doc_dir(sha)
-        safe_rmtree(final_doc_dir)
-        final_doc_dir.parent.mkdir(parents=True, exist_ok=True)
-        tmp_doc_dir.rename(final_doc_dir)
-        # rename 之后 log_handle 仍然有效（文件描述符不依赖路径），但 path 已变
-        # 为了后续追加，把 handle 关掉再开新的
+        # ---- 4. 发布新 immutable generation：sync staging → atomic rename → sync 父目录 ----
+        # 先关闭日志文件，让 _publish_staging 能递归 fsync 全部文件；之后绝不修改这个 generation。
+        log_handle.flush()
+        os.fsync(log_handle.fileno())
         log_handle.close()
-        log_handle = (final_doc_dir / "ingest.log").open("a", encoding="utf-8")
+        log_handle = None
+        final_doc_dir = _publish_staging(paths, tmp_doc_dir, generation_dir)
 
-        # ---- 5. DB 写入 ----
+        # ---- 5. DB 写入 / 切 pointer ----
         if existing_id:
             replace_document(
                 conn,
@@ -492,7 +852,6 @@ def ingest_pdf(
                 envelope=envelope,
             )
             doc_id = existing_id
-            log_handle.write(f"\n[db] replaced id={doc_id} status={status}\n")
         else:
             doc_id = insert_document(
                 conn,
@@ -507,16 +866,12 @@ def ingest_pdf(
                 confidence=confidence,
                 envelope=envelope,
             )
-            # 极端竞态：sha 在我们 hash 完到 insert 之间被别的 worker 写入
+            # 所有本工具进程都持有同一槽锁时不应发生；若外部绕过锁写入，宁可留下
+            # 可审计 orphan generation，也不能把未知行当成自己的成功结果。
             if doc_id is None:
-                doc_id = find_by_sha(conn, sha)
-                log_handle.write(
-                    f"\n[db] race: sha already inserted by peer, reusing id={doc_id}\n"
-                )
-            else:
-                log_handle.write(f"\n[db] inserted id={doc_id} status={status}\n")
+                raise RuntimeError(f"sha256 inserted outside archive slot lock: {sha}")
 
-        _append_jsonl(
+        _safe_append_jsonl(
             paths.ingest_log,
             {
                 "ts": _utc_now(),
@@ -542,7 +897,8 @@ def ingest_pdf(
         )
     finally:
         try:
-            log_handle.close()
+            if log_handle is not None:
+                log_handle.close()
         except Exception:
             pass
 
@@ -555,77 +911,90 @@ def _commit_failed(
     sha: str,
     tmp_doc_dir: Path,
     log_handle,
-    existing_id: Optional[int],
+    generation_dir: Path,
+    existing,
     ocr_duration: Optional[float],
     error_message: str,
     error: Optional[ErrorInfo] = None,
+    ledger_records: Optional[list[dict[str, object]]] = None,
 ) -> IngestResult:
     """
-    OCR 失败的收尾。DB 仍要记一条 status=failed，且保留 archive 内 source.pdf。
+    OCR 失败的收尾。
 
-    如果是已成功/partial 的文档强制 reingest 失败，保留旧 output_dir 产物，只把本次
-    失败日志挪到 archive root；如果是新文档或上次本来就是 failed，则把 tmp 提交成
-    documents/<sha-short>/，至少留下 source.pdf + ingest.log。
+    已有 ok/partial 档案的本次 reingest 失败不能碰旧 DB 行或旧 generation：只返回
+    本次失败，并把诊断日志复制到独立位置。新文档（以及此前已是 failed 的文档）可以
+    发布一个 failed generation，再按既有失败状态语义写库。
     """
-    log_handle.close()
+    try:
+        log_handle.flush()
+        os.fsync(log_handle.fileno())
+    except OSError as exc:
+        logger.warning("could not sync failed ingest log before preserving it: %s", exc)
+    finally:
+        log_handle.close()
 
-    final_doc_dir = paths.doc_dir(sha)
-    existing = get_document(conn, existing_id) if existing_id else None
-    old_output_dir = Path(existing.output_dir) if existing and existing.output_dir else None
-    keep_old_outputs = (
-        existing is not None
-        and existing.status in {"ok", "partial"}
-        and old_output_dir is not None
-        and old_output_dir.exists()
-    )
+    # A fatal OCR exception can happen after an observed page request recorded
+    # an error.  Persist that safe runtime ledger for a new/previously-failed
+    # row; it carries error *categories* only, never the exception text.  An
+    # existing ok/partial row remains untouched by this failed reingest path.
+    failure_envelope = DocumentExtraction()
+    _attach_runtime_ledger(failure_envelope, ledger_records or [])
+    try:
+        # For a failed reingest of an already-good row, staging is intentionally
+        # retained for forensics.  Keep the failed attempt's safe call ledger
+        # there rather than overwriting the current DB envelope.
+        (tmp_doc_dir / FILE_EXTRACTION).write_text(
+            failure_envelope.model_dump_json(indent=2), encoding="utf-8"
+        )
+    except OSError as exc:
+        logger.warning("could not preserve failed OCR call ledger in staging: %s", exc)
 
-    failed_log: Optional[Path]
-    if keep_old_outputs:
-        # 旧 OCR 产物仍可用，不能被一次失败的 reingest 覆盖；但确保留档 PDF 在可控目录内。
-        _ensure_archived_source(paths, sha, pdf_path)
-        failed_log = paths.root / f"failed_{sha[:SHA_SHORT_LEN]}_{int(time.time())}.log"
+    if existing is not None and existing.status in {"ok", "partial"}:
+        paths.failed_logs_dir.mkdir(parents=True, exist_ok=True)
+        failed_log = paths.failed_logs_dir / f"{tmp_doc_dir.name}.log"
         try:
-            (tmp_doc_dir / "ingest.log").rename(failed_log)
-        except OSError:
+            shutil.copy2(tmp_doc_dir / "ingest.log", failed_log)
+        except OSError as exc:
+            logger.warning("could not preserve failed reingest log at %s: %s", failed_log, exc)
             failed_log = None
-        safe_rmtree(tmp_doc_dir)
-        output_dir = str(old_output_dir)
+        # Keep staging for forensics. It is intentionally neither published nor cleaned up.
+        doc_id = existing.id
     else:
-        safe_rmtree(final_doc_dir)
-        final_doc_dir.parent.mkdir(parents=True, exist_ok=True)
-        tmp_doc_dir.rename(final_doc_dir)
-        output_dir = str(final_doc_dir)
+        final_doc_dir = _publish_staging(paths, tmp_doc_dir, generation_dir)
         failed_log = final_doc_dir / "ingest.log"
+        if existing is not None:
+            replace_document(
+                conn,
+                existing.id,
+                source_path=str(pdf_path),
+                output_dir=str(final_doc_dir),
+                status="failed",
+                ocr_duration_s=ocr_duration,
+                llm_duration_s=None,
+                error_message=error_message,
+                extraction=ContractExtraction(),
+                confidence=ExtractionConfidence(),
+                envelope=failure_envelope,
+            )
+            doc_id = existing.id
+        else:
+            doc_id = insert_document(
+                conn,
+                sha256=sha,
+                source_path=str(pdf_path),
+                output_dir=str(final_doc_dir),
+                status="failed",
+                ocr_duration_s=ocr_duration,
+                llm_duration_s=None,
+                error_message=error_message,
+                extraction=ContractExtraction(),
+                confidence=ExtractionConfidence(),
+                envelope=failure_envelope,
+            )
+            if doc_id is None:
+                raise RuntimeError(f"sha256 inserted outside archive slot lock: {sha}")
 
-    if existing_id:
-        replace_document(
-            conn,
-            existing_id,
-            source_path=str(pdf_path),
-            output_dir=output_dir,
-            status="failed",
-            ocr_duration_s=ocr_duration,
-            llm_duration_s=None,
-            error_message=error_message,
-            extraction=ContractExtraction(),
-            confidence=ExtractionConfidence(),
-        )
-        doc_id = existing_id
-    else:
-        doc_id = insert_document(
-            conn,
-            sha256=sha,
-            source_path=str(pdf_path),
-            output_dir=output_dir,
-            status="failed",
-            ocr_duration_s=ocr_duration,
-            llm_duration_s=None,
-            error_message=error_message,
-            extraction=ContractExtraction(),
-            confidence=ExtractionConfidence(),
-        )
-
-    _append_jsonl(
+    _safe_append_jsonl(
         paths.ingest_log,
         {
             "ts": _utc_now(),
@@ -665,10 +1034,55 @@ def re_extract(
     基于已有 OCR 产物重跑抽取。用于 partial 状态修复或调 prompt 后批量再抽取。
     不动 OCR 产物，不动 sha256/source_path/ingested_at。
     """
+    initial = get_document(conn, doc_id)
+    if not initial:
+        raise ValueError(f"document id={doc_id} not found")
+    paths.ensure()
+    # 和 ingest 一样，锁后重读 pointer，避免 re_extract 从一代复制、另一代被 reingest 切换。
+    with paths.slot_lock(initial.sha256):
+        return _re_extract_locked(doc_id, paths, conn, llm_enabled=llm_enabled)
+
+
+def _re_extract_locked(
+    doc_id: int,
+    paths: ArchivePaths,
+    conn: sqlite3.Connection,
+    *,
+    llm_enabled: bool,
+) -> IngestResult:
+    """Locked re-extract boundary with a ledger for this extraction run only."""
+    with collect_llm_calls() as collector:
+        return _re_extract_locked_with_ledger(
+            doc_id,
+            paths,
+            conn,
+            llm_enabled=llm_enabled,
+            collector=collector,
+        )
+
+
+def _re_extract_locked_with_ledger(
+    doc_id: int,
+    paths: ArchivePaths,
+    conn: sqlite3.Connection,
+    *,
+    llm_enabled: bool,
+    collector,
+) -> IngestResult:
+    """Copy the current generation and write a new one under the active ledger."""
     doc = get_document(conn, doc_id)
     if not doc:
         raise ValueError(f"document id={doc_id} not found")
-    ocr_dir = Path(doc.output_dir) / "ocr"
+    current_dir = paths.resolve_document_dir(doc)
+    current_source = current_dir / "source.pdf"
+    if not current_source.is_file():
+        raise FileNotFoundError(f"archived source missing for id={doc_id}: {current_source}")
+    if sha256_of_file(current_source) != doc.sha256:
+        raise ValueError(f"archived source hash mismatch for id={doc_id}: {current_source}")
+
+    staging, generation_dir = _new_staging(paths, doc.sha256)
+    shutil.copytree(current_dir, staging, copy_function=shutil.copy2, dirs_exist_ok=True)
+    ocr_dir = staging / "ocr"
     if not ocr_dir.exists():
         raise FileNotFoundError(
             f"OCR output missing for id={doc_id}: {ocr_dir}"
@@ -706,20 +1120,39 @@ def re_extract(
         error_info = classify_exception(e)
         extraction = ContractExtraction()
         confidence = ExtractionConfidence()
-        envelope = DocumentExtraction()
+        envelope = DocumentExtraction(extraction_error=error_info)
+        _append_stage_issue(
+            envelope,
+            stage="extraction",
+            error=error_info,
+            severity="error",
+        )
     llm_duration = time.perf_counter() - t0
 
     # 类型专属后处理（据 doc_type 查处理器；合同=看落款页图重判签章）。
     if llm_enabled and status == "ok":
         for pp in get_handler(envelope.doc_type).post_processors:
+            stage = f"post:{getattr(pp, '__name__', 'processor')}"
             try:
                 pp(envelope, ocr_dir)
             except Exception as e:  # noqa: BLE001 — 专属后处理失败不能中断重抽
                 logger.warning("post:%s 跳过（异常）: %s", pp.__name__, e)
+                _append_stage_issue(
+                    envelope,
+                    stage=stage,
+                    error=classify_exception(e),
+                    severity="warning",
+                )
         try:
             correct_evidence_pages(envelope, ocr_dir)
         except Exception as e:  # noqa: BLE001 — 页码校正失败不能中断重抽
             logger.warning("page-fix 跳过（异常）: %s", e)
+            _append_stage_issue(
+                envelope,
+                stage="page_fix",
+                error=classify_exception(e),
+                severity="warning",
+            )
 
         # 身份基本信息核对：首见入库、再见校对。与 ingest 的 2.7 一致——
         # 否则重抽会把已核对出的 identity_issues 清空，造成 ingest/extract 行为分叉。
@@ -735,13 +1168,26 @@ def re_extract(
         # 多源融合（仅 enable_vision_fusion 的类型，如保险）：A文本/C看图评判 → sidecar。
         _maybe_run_vision_fusion(envelope, document_text, ocr_dir, logger.info, confidence)
 
-    # 落盘新 extracted.json（通用信封）
-    (Path(doc.output_dir) / FILE_EXTRACTION).write_text(
+    # Re-extraction deliberately does not re-run OCR, so this collector contains
+    # only calls made by this extraction/post-processing pass.  The copied OCR
+    # metadata still has to fail closed if it declares missing/truncated pages.
+    _mark_ocr_incomplete(envelope, ocr_dir)
+    _attach_runtime_ledger(envelope, collector.records)
+    status, error_message, error_info = _finalize_extraction_status(
+        status, envelope, error_message, error_info
+    )
+
+    # 只写 staging 的新 extracted.json；当前 generation 始终不被就地修改。
+    (staging / FILE_EXTRACTION).write_text(
         envelope.model_dump_json(indent=2), encoding="utf-8"
     )
-    (Path(doc.output_dir) / FILE_EXTRACTION_CONF).write_text(
+    (staging / FILE_EXTRACTION_CONF).write_text(
         confidence.model_dump_json(indent=2), encoding="utf-8"
     )
+
+    # 先发布文件，再把 DB pointer 和抽取字段在同一事务里切换。DB 失败时旧 generation
+    # 及旧 metadata 保持不变，新 generation 留作可审计 orphan。
+    final_dir = _publish_staging(paths, staging, generation_dir)
 
     update_extraction(
         conn,
@@ -752,9 +1198,10 @@ def re_extract(
         extraction=extraction,
         confidence=confidence,
         envelope=envelope,
+        output_dir=str(final_dir),
     )
 
-    _append_jsonl(
+    _safe_append_jsonl(
         paths.ingest_log,
         {
             "ts": _utc_now(),

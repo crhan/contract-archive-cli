@@ -27,6 +27,17 @@
 - usage 从 `resp.usage`（`prompt_tokens`/`completion_tokens`/`total_tokens`）读，归一化成
   `input_tokens`/`output_tokens`/`total_tokens`。
 
+## OCR 模型 ID：默认稳定 ID，不做静默替换
+
+OCR 默认值是 `qwen-vl-ocr`。当前项目验证的账号与 OpenAI 兼容端点中，
+`qwen-vl-ocr-latest` 返回 `404 model_not_found`，而 `qwen-vl-ocr` 正常完成请求；官方
+[Qwen-VL-OCR 文档](https://help.aliyun.com/zh/model-studio/qwen-vl-ocr)列出稳定 ID
+`qwen-vl-ocr`。这只是当前环境的兼容性证据，不得推断 `-latest` 已在所有区域或账号下线，
+也不是模型质量升级结论。
+
+用户显式设置的 `DASHSCOPE_OCR_MODEL` 或 `dashscope.ocr_model` 必须原样使用：不要因失败
+自动重写为默认值、隐藏 fallback，或改变评测候选标签。默认值只适用于没有显式配置的新设置。
+
 ## 文档类型路由：doc_type → handler 映射，别再散落 if doc_type==
 
 本项目处理**所有** PDF 类型（合同/保险/证明/发票/旅行/证件…），不只合同。流程是
@@ -74,6 +85,32 @@ openai SDK 同步阻塞、GIL 在网络等待时释放，线程池足够（不�
 也走 VL）。OCR 据此做**混合提取**：文本页原生抽取、扫描/表格页 VL OCR，按页序拼回——取代旧的
 "整份 native OR 整份 OCR"，混合版式不再丢数据。
 
+## 档案 generation：DB 指针只能在发布后切换
+
+新产物一律发布为 `documents/<sha12>.gen-<uuid>/`，是**不可变 generation**；
+`documents.output_dir` 只是当前一代的 DB pointer，不能把 `<sha12>/` 当成新写入目录。
+
+- 读、渲染、删除等路径必须经 `ArchivePaths.resolve_document_dir`：它只采纳受控 basename、在当前
+  archive 根重新锚定，因此整库搬迁后仍可用；`documents/` 或 generation 是 symlink 时必须拒绝，别直接
+  信任 DB 里的绝对路径。
+- 持有 `slot_lock(sha)` 的范围是锁内去重复查、快照、发布直到 DB 事务提交；锁文件要保留，不能 unlink
+  后重建。`source.pdf` 是校验完整 SHA 的独立 copy，不得恢复硬链接。
+- 先将 staging fsync/rename 成 durable generation，再提交 DB 行或切 `output_dir`。旧代和发布后提交失败
+  留下的 orphan 都是审计材料，**没有自动 GC**；重跑若未成功发布/提交，必须保留上次有效 pointer/元数据。
+
+## 抽取完整性与阶段状态：不能拿残缺结果冒充成功
+
+- 默认把完整 OCR 文本交给抽取，禁止静默截中段/尾部；调用方若有明确 `max_chars` 预算，超限应返回
+  `INPUT_TOO_LONG`，模型以长度结束则是 `OUTPUT_TRUNCATED`，而不是解析部分 JSON 后标成功。
+- `stage_issues` 中 required 的 `error` 必须把可用 OCR 的结果降为 `partial`；可选后处理仅记
+  `warning`，不应无故改变状态或抹掉已抽出的字段。
+
+## 运行时实验：ContextVar 传模型选择与调用账本
+
+评测或临时实验用 `utils.llm_runtime.model_overrides` / `collect_llm_calls`，不要改进程环境或持久配置。
+`map_concurrent` 会把该 ContextVar 复制到每个 worker；SDK 请求经 `observed_chat_completion` 记录实际
+model、usage、耗时和安全错误类别，账本不保留 prompt、响应或密钥。
+
 ## 评测：换模型/改 prompt/改流水线 → 跑评测过 gate 才提交
 
 `evals/` 是离线评测脚手架。两阶段：`evals.run`（跑→`results.jsonl` 增量累积）+ `evals.report`
@@ -84,3 +121,6 @@ openai SDK 同步阻塞、GIL 在网络等待时释放，线程池足够（不�
 内合成 cases（CI smoke）。**改抽取 prompt/模型/流水线后，必须**指向私有数据集跑一遍过四重 gate、
 确认无回归再提交。原始 PDF case 走整条生产链路（`ingest.run_full_extraction`），文本 case 供模型对比。
 详见 `evals/README.md`。
+
+模型替换的实测要跑 text / OCR / vision 三轴，并优先用真实 `source.pdf`；runner 的不可变 manifest 和
+仅完整成功才发布的 OCR cache 是可比性的一部分。供应商未返回 usage 时保持 unknown，绝不可按零成本计。

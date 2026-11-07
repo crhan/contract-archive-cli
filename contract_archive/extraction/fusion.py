@@ -22,11 +22,17 @@ from pathlib import Path
 from typing import Optional
 
 from ..config import get_timeout_s, load_settings
-from ..errors import ErrorInfo, config_missing
-from ..schemas import DocumentExtraction, FieldCandidate, FieldVerdict
+from ..errors import ErrorInfo, config_missing, extract_empty
+from ..schemas import DocumentExtraction, FieldCandidate, FieldVerdict, StageIssue
 from ..utils import NO_THINKING, encode_image_data_uri, map_concurrent, merge_usage
 from ..utils.http_env import sanitized_httpx_proxy_env
-from .llm_extractor import _parse_json_loose, _usage_from_openai
+from ..utils.llm_runtime import observed_chat_completion
+from .llm_extractor import (
+    _parse_json_loose,
+    _usage_from_openai,
+    output_truncated_error,
+    safe_api_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -178,25 +184,51 @@ def adjudicate_field(
     images: list[Path],
     field_def: str,
     threshold: float,
-) -> tuple[FieldVerdict, Optional[dict]]:
-    """源间矛盾 → 据原图独立评判。返回 (verdict, usage)。异常由调用方隔离。"""
+) -> tuple[FieldVerdict, Optional[dict], Optional[ErrorInfo]]:
+    """源间矛盾 → 据原图独立评判，失败则保守降级且返回安全错误。"""
     flat = _flatten(cands_by_source)
     prompt = ADJUDICATE_PROMPT.format(
         key=key,
         definition=field_def or "（无额外定义，按字面理解）",
         candidates=_render_candidates(cands_by_source),
     )
-    content: list[dict] = [{"type": "text", "text": prompt}]
-    for img in images:
-        content.append({"type": "image_url", "image_url": {"url": encode_image_data_uri(img)}})
+    try:
+        content: list[dict] = [{"type": "text", "text": prompt}]
+        for img in images:
+            content.append({"type": "image_url", "image_url": {"url": encode_image_data_uri(img)}})
+        resp = observed_chat_completion(
+            client,
+            stage="fusion_adjudicate",
+            model=model,
+            messages=[{"role": "user", "content": content}],
+            temperature=0.0,
+            extra_body=NO_THINKING,
+        )
+    except Exception as exc:  # noqa: BLE001 - 可选融合不能覆盖已有抽取
+        return (
+            _no_image_verdict(key, cands_by_source),
+            None,
+            safe_api_error(exc, "Fusion adjudication request failed"),
+        )
 
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": content}],
-        temperature=0.0,
-        extra_body=NO_THINKING,
-    )
-    parsed = _parse_json_loose(resp.choices[0].message.content or "")
+    usage = _usage_from_openai(resp)
+    choice = resp.choices[0]
+    if getattr(choice, "finish_reason", None) == "length":
+        return _no_image_verdict(key, cands_by_source), usage, output_truncated_error()
+    content_text = choice.message.content or ""
+    if not content_text:
+        return (
+            _no_image_verdict(key, cands_by_source),
+            usage,
+            extract_empty("LLM returned an empty response"),
+        )
+    parsed = _parse_json_loose(content_text)
+    if not parsed:
+        return (
+            _no_image_verdict(key, cands_by_source),
+            usage,
+            extract_empty("LLM returned invalid JSON"),
+        )
     value = parsed.get("value")
     value = str(value).strip() if value not in (None, "") else None
     try:
@@ -215,7 +247,7 @@ def adjudicate_field(
         rationale=str(parsed.get("rationale") or "")[:200],
         candidates=flat,
     )
-    return verdict, _usage_from_openai(resp)
+    return verdict, usage, None
 
 
 def fuse_sources(
@@ -265,7 +297,7 @@ def fuse_sources(
             for key in disputed:
                 verdicts[key] = _no_image_verdict(key, candidates[key])
         else:
-            usage = _adjudicate_disputed(
+            usage, error = _adjudicate_disputed(
                 disputed, candidates, images_by_page, field_defs, threshold,
                 model, api_key, base_url, verdicts,
             )
@@ -278,8 +310,8 @@ def fuse_sources(
 def _adjudicate_disputed(
     disputed, candidates, images_by_page, field_defs, threshold,
     model, api_key, base_url, verdicts,
-) -> Optional[dict]:
-    """并发评判矛盾键。client/proxy-env 外层一次性构造，worker 只复用。回填 verdicts，返回合并 usage。"""
+) -> tuple[Optional[dict], Optional[ErrorInfo]]:
+    """并发评判矛盾键，回填 verdicts，并把可选阶段失败安全地带回上层。"""
     from openai import OpenAI
 
     compat_url = base_url.replace("/api/v1", "/compatible-mode/v1")
@@ -291,30 +323,36 @@ def _adjudicate_disputed(
             max_retries=2,
         )
 
-        def _one(key: str) -> tuple[str, FieldVerdict, Optional[dict]]:
+        def _one(key: str) -> tuple[str, FieldVerdict, Optional[dict], Optional[ErrorInfo]]:
             # client 直接闭包进来（不走模块级状态，多文档并发融合也互不干扰）。
             pages = _pages_for(candidates[key])
             images = [images_by_page[p] for p in pages if p in images_by_page]
             if not images:
-                return key, _no_image_verdict(key, candidates[key]), None
-            verdict, u = adjudicate_field(
+                return key, _no_image_verdict(key, candidates[key]), None, None
+            verdict, u, err = adjudicate_field(
                 client, model, key, candidates[key], images, field_defs.get(key, ""), threshold
             )
-            return key, verdict, u
+            return key, verdict, u, err
 
         results = map_concurrent(_one, disputed)
 
     usages: list[Optional[dict]] = []
+    errors: list[ErrorInfo] = []
     for res in results:
         if not res:  # 整个 _one 抛异常被隔离（含原图编码失败等）——下面补无图降级
             continue
-        key, verdict, u = res
+        key, verdict, u, err = res
         verdicts[key] = verdict
         usages.append(u)
-    # 被隔离掉的矛盾键补无图降级，避免漏键
-    for key in disputed:
+        if err is not None:
+            errors.append(err)
+    # 被隔离掉的矛盾键补无图降级，避免漏键。
+    missing_keys = [key for key in disputed if key not in verdicts]
+    if missing_keys:
+        errors.append(extract_empty("Fusion adjudication task did not return a result"))
+    for key in missing_keys:
         verdicts.setdefault(key, _no_image_verdict(key, candidates[key]))
-    return merge_usage(usages)
+    return merge_usage(usages), (errors[0] if errors else None)
 
 
 def attach_verdicts(extraction: DocumentExtraction, result: FusionResult) -> DocumentExtraction:
@@ -323,6 +361,14 @@ def attach_verdicts(extraction: DocumentExtraction, result: FusionResult) -> Doc
     extraction.fusion_overall_confidence = result.overall_confidence
     if result.usage:
         extraction.llm_usage = merge_usage([extraction.llm_usage, result.usage])
+    if result.error is not None:
+        extraction.stage_issues.append(
+            StageIssue(
+                stage="fusion_adjudicate",
+                error=result.error,
+                severity="warning",
+            )
+        )
     return extraction
 
 
@@ -355,35 +401,71 @@ def run_vision_fusion(
     image_paths = [images_by_page[p] for p in labels]
 
     def _a():  # A 路：文本看字段
-        return read_fields_in_text(
-            document_text, fields, model=text_model, api_key=api_key, base_url=base_url
-        )
+        try:
+            return read_fields_in_text(
+                document_text, fields, model=text_model, api_key=api_key, base_url=base_url
+            )
+        except Exception as exc:  # noqa: BLE001 - 可选融合不能中断必需抽取
+            from .text_fields import TextFieldsResult
+
+            return TextFieldsResult(
+                error=safe_api_error(exc, "Fusion text field extraction failed")
+            )
 
     def _c():  # C 路：看图看字段（无图则跳过）
         if not image_paths:
             return None
-        return read_fields_on_images(
-            image_paths, fields, page_labels=labels,
-            model=vision_model, api_key=api_key, base_url=base_url,
-        )
+        try:
+            return read_fields_on_images(
+                image_paths, fields, page_labels=labels,
+                model=vision_model, api_key=api_key, base_url=base_url,
+            )
+        except Exception as exc:  # noqa: BLE001 - 可选融合不能中断必需抽取
+            from .vl_extract import VisionFieldsResult
+
+            return VisionFieldsResult(
+                error=safe_api_error(exc, "Fusion vision field extraction failed")
+            )
 
     # A/C 两路并发：各自内部还会开 sanitized_httpx_proxy_env（改进程级 os.environ）。两个并发
     # 上下文各自进退会乱序恢复 NO_PROXY（竞态）。外层再套一层 guard：内层都只在"已 sanitize"值上
     # 进退，真正的原值恢复由外层在 map_concurrent join 之后单线程完成，消除竞态。
     with sanitized_httpx_proxy_env():
         a_res, c_res = map_concurrent(lambda f: f(), [_a, _c], max_workers=2)
-    text_by_key = a_res.by_key if a_res else {}
-    vision_by_key = c_res.by_key if c_res else {}
-    if not text_by_key and not vision_by_key:
-        return False
-
-    result = fuse_sources(
-        text_by_key, vision_by_key,
-        images_by_page=images_by_page, field_defs=fields, threshold=threshold,
-        model=vision_model, api_key=api_key, base_url=base_url,
-    )
-    attach_verdicts(extraction, result)  # 已并入评判开销
+    # Source calls have already happened even if neither yielded a candidate or
+    # adjudication setup fails below.  Merge their usage exactly once here; the
+    # later attach step owns only the adjudicator's usage.
     extraction.llm_usage = merge_usage(
         [extraction.llm_usage, a_res.usage if a_res else None, c_res.usage if c_res else None]
     )
+    text_by_key = a_res.by_key if a_res else {}
+    vision_by_key = c_res.by_key if c_res else {}
+    if a_res and a_res.error is not None:
+        extraction.stage_issues.append(
+            StageIssue(stage="fusion_text", error=a_res.error, severity="warning")
+        )
+    if c_res and c_res.error is not None:
+        extraction.stage_issues.append(
+            StageIssue(stage="fusion_vision", error=c_res.error, severity="warning")
+        )
+    if not text_by_key and not vision_by_key:
+        return False
+
+    try:
+        result = fuse_sources(
+            text_by_key, vision_by_key,
+            images_by_page=images_by_page, field_defs=fields, threshold=threshold,
+            model=vision_model, api_key=api_key, base_url=base_url,
+        )
+    except Exception as exc:  # noqa: BLE001 - 保持信封原字段和已有融合 sidecar
+        logger.warning("fusion adjudication failed; preserving original extraction fields")
+        extraction.stage_issues.append(
+            StageIssue(
+                stage="fusion_adjudicate",
+                error=safe_api_error(exc, "Fusion adjudication failed"),
+                severity="warning",
+            )
+        )
+        return False
+    attach_verdicts(extraction, result)  # 已并入评判开销
     return bool(result.verdicts)

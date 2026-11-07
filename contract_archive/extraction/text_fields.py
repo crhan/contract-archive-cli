@@ -10,9 +10,15 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..config import load_settings
-from ..errors import ErrorInfo, classify_exception, config_missing
+from ..errors import ErrorInfo, config_missing, extract_empty
 from ..schemas import FieldCandidate
-from .llm_extractor import _call_openai_compat, _parse_json_loose, _truncate_middle
+from .llm_extractor import (
+    _call_openai_compat,
+    _parse_json_loose,
+    input_too_long_error,
+    output_truncated_error,
+    safe_api_error,
+)
 from .vl_extract import candidate_from_raw
 
 logger = logging.getLogger(__name__)
@@ -52,7 +58,7 @@ def read_fields_in_text(
     model: str | None = None,
     api_key: str | None = None,
     base_url: str | None = None,
-    max_chars: int = 24000,
+    max_chars: int | None = None,
 ) -> TextFieldsResult:
     """从全文抽取 fields_spec 描述的字段，产出 source="text" 候选。无凭证/空输入 → 空结果。"""
     settings = load_settings()
@@ -61,6 +67,9 @@ def read_fields_in_text(
     base_url = base_url or settings.dashscope_base_url
     if not fields_spec or not document_text:
         return TextFieldsResult(model=model)
+    too_long = input_too_long_error(document_text, max_chars)
+    if too_long is not None:
+        return TextFieldsResult(model=model, error=too_long)
     if not api_key:
         logger.warning("DASHSCOPE_API_KEY missing; skip text field extraction")
         return TextFieldsResult(
@@ -68,14 +77,42 @@ def read_fields_in_text(
         )
 
     system = _build_system(fields_spec)
-    user = f"以下是文档全文，请抽取字段：\n\n{_truncate_middle(document_text, max_chars)}"
+    user = f"以下是文档全文，请抽取字段：\n\n{document_text}"
     try:
-        content, usage = _call_openai_compat(system, user, model, api_key, base_url)
-    except Exception as e:  # noqa: BLE001 — 外部调用降级，保留 error 供上层判
-        logger.exception("text field extraction failed: %s", e)
-        return TextFieldsResult(model=model, error=classify_exception(e))
+        content, usage, finish_reason = _call_openai_compat(
+            system,
+            user,
+            model,
+            api_key,
+            base_url,
+            stage="fusion_text",
+        )
+    except Exception as exc:  # noqa: BLE001 — 外部调用降级，保留 error 供上层判
+        logger.warning("text field extraction call failed")
+        return TextFieldsResult(
+            model=model,
+            error=safe_api_error(exc, "Fusion text field extraction request failed"),
+        )
+
+    if finish_reason == "length":
+        logger.warning("text field extraction response reached its output limit")
+        return TextFieldsResult(model=model, usage=usage, error=output_truncated_error())
+    if not content:
+        logger.warning("text field extraction returned an empty response")
+        return TextFieldsResult(
+            model=model,
+            usage=usage,
+            error=extract_empty("LLM returned an empty response"),
+        )
 
     parsed = _parse_json_loose(content)
+    if not parsed:
+        logger.warning("text field extraction response was not parseable as JSON")
+        return TextFieldsResult(
+            model=model,
+            usage=usage,
+            error=extract_empty("LLM returned invalid JSON"),
+        )
     by_key: dict[str, list[FieldCandidate]] = {}
     for k in fields_spec:
         cand = candidate_from_raw(parsed.get(k), source="text")

@@ -47,7 +47,7 @@ from ..utils import (
     select_device,
 )
 from ..utils.page_router import MODE_OCR, MODE_TEXT
-from .vl_ocr import _MARK_ILLEGIBLE, ocr_pages
+from .vl_ocr import _MARK_FAILED, _MARK_ILLEGIBLE, ocr_pages
 
 logger = logging.getLogger(__name__)
 
@@ -110,9 +110,10 @@ class OCRPipeline:
         t0 = time.perf_counter()
         try:
             result = self._process(pdf_path, out_dir)
-        except Exception as e:
-            logger.exception("[%s] pipeline failed", self.name)
-            _dump_failure(out_dir, pdf_path, started, str(e))
+        except Exception:
+            # 不把 PDF/上游异常的原始文本写进日志或 pipeline_meta；它可能包含文档内容。
+            logger.error("[%s] pipeline failed", self.name)
+            _dump_failure(out_dir, pdf_path, started)
             raise
         duration = time.perf_counter() - t0
         finished = datetime.now()
@@ -194,23 +195,50 @@ class OCRPipeline:
 
         preview_dir = work_dir / PREVIEW_DIR
         pages = _render_previews_safe(pdf_path, preview_dir, self.vl_ocr_dpi)
-        if not pages:
-            return None
         img_by_idx = {p.page_index: p.image_path for p in pages}
 
+        ocr_route_idxs = {r.page_index for r in routes if r.mode == MODE_OCR}
         ocr_pairs = [
             (r.page_index, img_by_idx[r.page_index])
             for r in routes
             if r.mode == MODE_OCR and r.page_index in img_by_idx
         ]
-        page_results = ocr_pages(
-            [img for _, img in ocr_pairs],
-            page_labels=[idx + 1 for idx, _ in ocr_pairs],
+        missing_render_idxs = ocr_route_idxs - set(img_by_idx)
+        page_results = (
+            ocr_pages(
+                [img for _, img in ocr_pairs],
+                page_labels=[idx + 1 for idx, _ in ocr_pairs],
+            )
+            if ocr_pairs
+            else []
         )
+
+        # 无凭证/整批调用不可用时，不能悄悄漏掉 OCR 页：每个本应 OCR 的已渲染页
+        # 都落一个明确失败标记，供 PipelineMeta 与上游把它视为必需阶段失败。
         if page_results is None:
-            return None
-        ocr_body_by_idx = {idx: res.body for (idx, _), res in zip(ocr_pairs, page_results)}
+            page_results = []
+            missing_ocr_result_idxs = {idx for idx, _ in ocr_pairs}
+        else:
+            missing_ocr_result_idxs = {
+                idx for idx, _ in ocr_pairs[len(page_results):]
+            }
+
+        ocr_body_by_idx = {
+            idx: res.body for (idx, _), res in zip(ocr_pairs, page_results)
+        }
         ocr_ok = any(res.ok for res in page_results)
+        failed_pages = {
+            idx + 1
+            for (idx, _), res in zip(ocr_pairs, page_results)
+            if res.failed
+        }
+        failed_pages.update(idx + 1 for idx in missing_render_idxs)
+        failed_pages.update(idx + 1 for idx in missing_ocr_result_idxs)
+        truncated_pages = {
+            idx + 1
+            for (idx, _), res in zip(ocr_pairs, page_results)
+            if res.truncated
+        }
 
         native_by_idx = extract_pages_text(
             pdf_path, [r.page_index for r in routes if r.mode == MODE_TEXT]
@@ -222,6 +250,14 @@ class OCRPipeline:
             idx = r.page_index
             if idx in ocr_body_by_idx:
                 body = ocr_body_by_idx[idx]
+            elif idx in ocr_route_idxs:
+                # 区分渲染缺页和远端 OCR 调用失败：两者都进 failed_pages，但原文
+                # 标记让人工知道补跑该从哪一步开始。
+                body = (
+                    "[本页渲染失败，无法进行 OCR]"
+                    if idx in missing_render_idxs
+                    else _MARK_FAILED
+                )
             else:
                 native = native_by_idx.get(idx, "").strip()
                 if native:
@@ -232,8 +268,7 @@ class OCRPipeline:
             blocks.append(f"## 第 {idx + 1} 页\n\n{body}")
 
         if not ocr_ok and not native_ok:
-            logger.warning("[vl-ocr] hybrid produced no usable page")
-            return None
+            logger.warning("[vl-ocr] hybrid produced no usable page; preserving page failure markers")
 
         return _output_from_text(
             pdf_path=pdf_path,
@@ -244,6 +279,8 @@ class OCRPipeline:
             notes=_text_stats_note("backend=hybrid-text-vl", text_stats),
             preview_image_paths=[str(p.image_path) for p in pages],
             page_routing=summary,
+            ocr_failed_pages=sorted(failed_pages),
+            ocr_truncated_pages=sorted(truncated_pages),
         )
 
 
@@ -264,14 +301,14 @@ def _dump(out_dir: Path, result: PipelineOutput) -> None:
     )
 
 
-def _dump_failure(out_dir: Path, pdf_path: Path, started: datetime, err: str) -> None:
+def _dump_failure(out_dir: Path, pdf_path: Path, started: datetime) -> None:
     meta = PipelineMeta(
         pipeline_name="ocr",
         source_pdf=str(pdf_path),
         started_at=started,
         finished_at=datetime.now(),
         duration_seconds=(datetime.now() - started).total_seconds(),
-        notes=f"FAILED: {err}",
+        notes="FAILED: OCR pipeline failure",
     )
     (out_dir / FILE_PIPELINE_META).write_text(
         meta.model_dump_json(indent=2), encoding="utf-8"
@@ -297,8 +334,8 @@ def _text_stats_note(prefix: str, stats: TextLayerStats) -> str:
 def _render_previews_safe(pdf_path: Path, preview_dir: Path, dpi: int) -> list:
     try:
         return render_pdf_to_images(pdf_path, preview_dir, dpi=dpi)
-    except Exception as e:  # noqa: BLE001 - previews are useful but not primary text output
-        logger.warning("[pdf] preview render failed; continue without previews: %s", e)
+    except Exception:  # noqa: BLE001 - previews are useful but not primary text output
+        logger.warning("[pdf] preview render failed; preserving affected OCR pages as failures")
         return []
 
 
@@ -312,6 +349,8 @@ def _output_from_text(
     notes: str,
     preview_image_paths: list[str] | None = None,
     page_routing: dict[str, int] | None = None,
+    ocr_failed_pages: list[int] | None = None,
+    ocr_truncated_pages: list[int] | None = None,
 ) -> PipelineOutput:
     markdown = _clean_markdown_text(text)
     sections = _split_sections(markdown)
@@ -347,6 +386,8 @@ def _output_from_text(
             duration_seconds=0.0,
             notes=notes,
             page_routing=page_routing or {},
+            ocr_failed_pages=ocr_failed_pages or [],
+            ocr_truncated_pages=ocr_truncated_pages or [],
         ),
         raw_text=markdown,
         markdown=markdown,

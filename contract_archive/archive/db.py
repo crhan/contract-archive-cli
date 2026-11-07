@@ -9,6 +9,7 @@ SQLite 连接 + schema 迁移。
 """
 from __future__ import annotations
 
+import fcntl
 import logging
 import re
 import sqlite3
@@ -21,6 +22,26 @@ logger = logging.getLogger(__name__)
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 MIGRATION_PATTERN = re.compile(r"^(\d{3})_.+\.sql$")
+
+
+@contextmanager
+def _schema_lock(db_path: Path) -> Iterator[None]:
+    """Serialize creation and migration of one archive database across processes.
+
+    The lock file deliberately remains on disk.  Removing a flock file after use
+    can split waiters across two inodes, which would let two migrations run at
+    once.  It lives under the archive's normal ``locks/`` directory without
+    requiring callers to construct :class:`ArchivePaths` (and therefore avoids a
+    dependency cycle in this low-level module).
+    """
+    lock_path = Path(db_path).parent / "locks" / "schema.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def utc_now_iso() -> str:
@@ -99,10 +120,10 @@ def migrate(conn: sqlite3.Connection) -> int:
     """
     应用所有未应用的迁移。返回最终 schema_version。
 
-    注意：executescript() 内部会自动 COMMIT 当前事务，所以不能再用 transaction()
-    包裹（会出现 "no transaction is active" 错误）。失败回滚由 SQLite 自身的
-    事务语义保证——脚本里若有 BEGIN/COMMIT，executescript 会按 SQL 内容执行。
-    本工具的 migration 文件不写 BEGIN/COMMIT，让 SQLite 走自动事务即可。
+    每个脚本由此处动态包进独立的 ``BEGIN IMMEDIATE`` / ``COMMIT``。不能使用
+    :func:`transaction`：``executescript`` 会在执行脚本文本前提交已有事务；把
+    BEGIN/COMMIT 写入同一 script 才能保证 DDL 和 ``schema_version`` 插入原子化。
+    迁移文件本身保持纯 SQL、无需各自重复事务样板。
     """
     current = get_schema_version(conn)
     applied = 0
@@ -111,7 +132,17 @@ def migrate(conn: sqlite3.Connection) -> int:
             continue
         sql = path.read_text(encoding="utf-8")
         logger.info("applying migration %s (version=%d)", path.name, version)
-        conn.executescript(sql)
+        try:
+            # Do not start an outer transaction here: sqlite3.executescript()
+            # commits one before it runs.  BEGIN must be part of its script.
+            conn.executescript(f"BEGIN IMMEDIATE;\n{sql}\nCOMMIT;")
+        except Exception:
+            # A failed script leaves the explicit transaction open.  Roll it
+            # back so a caller can inspect/retry the connection and so no
+            # half-created tables or schema_version row leak through.
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            raise
         applied += 1
     final = get_schema_version(conn)
     if applied:
@@ -120,10 +151,21 @@ def migrate(conn: sqlite3.Connection) -> int:
 
 
 def open_archive_db(db_path: Path) -> sqlite3.Connection:
-    """打开档案库 DB（必要时建表 + 迁移）。"""
-    conn = connect(db_path)
-    migrate(conn)
-    _upgrade_legacy_ocr_duration_column(conn)
+    """打开档案库 DB（必要时建表 + 原子迁移）。
+
+    Fresh archives are often opened by several ingest workers at once.  Hold a
+    persistent per-archive schema lock from connection setup through migration,
+    then return the already-migrated connection for normal caller transactions.
+    """
+    db_path = Path(db_path)
+    with _schema_lock(db_path):
+        conn = connect(db_path)
+        try:
+            migrate(conn)
+            _upgrade_legacy_ocr_duration_column(conn)
+        except Exception:
+            conn.close()
+            raise
     return conn
 
 
